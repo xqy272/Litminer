@@ -1,0 +1,6 @@
+title,doi,publication_year,journal,abstract,article_type,discovery_source,crossref_doi,crossref_mismatches
+Machine learning accelerates enzyme stability screening,10.1234/litminer.001,2026,Journal of Research Methods,This article reports an automated workflow for enzyme stability screening with benchmark data and external validation.,original_research,openalex,10.1234/litminer.001,
+Automated enzyme stability screening with external validation,10.1234/litminer.001,2026,Journal of Research Methods,The study describes machine learning assisted screening of enzyme variants and reports validated stability measurements.,original_research,semantic_scholar,10.1234/litminer.001,
+Review of machine learning for enzyme engineering,10.1234/litminer.002,2025,Biotechnology Reviews,This review summarizes recent machine learning approaches for enzyme engineering.,review,semantic_scholar,10.1234/litminer.002,
+Dataset note for molecular benchmark curation,,2026,Data Notes,This paper describes a benchmark dataset but does not report external validation.,data-paper,openalex,,
+Clinical language model evaluation under deployment drift,10.1234/litminer.003,2026,Applied AI Evaluation,This original research article evaluates language models under deployment drift using prospective validation.,original_research,openalex,10.1234/litminer.003,

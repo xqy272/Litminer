@@ -1,0 +1,37 @@
+{
+  "channels": {
+    "openalex": true,
+    "semantic_scholar": false,
+    "arxiv": false,
+    "europe_pmc": false,
+    "crossref": true,
+    "unpaywall": true,
+    "journal_metrics": true,
+    "publisher_probe": false
+  },
+  "api": {
+    "openalex_api_key_env": "OPENALEX_API_KEY",
+    "openalex_mailto_env": "OPENALEX_MAILTO",
+    "crossref_mailto_env": "CROSSREF_MAILTO",
+    "unpaywall_email_env": "UNPAYWALL_EMAIL",
+    "contact_email_env": "LITMINER_CONTACT_EMAIL"
+  },
+  "limits": {
+    "max_results_per_query": 100,
+    "semantic_query_limit": 3,
+    "semantic_max_results": 50,
+    "publisher_probe_limit": null,
+    "publisher_probe_sleep": 0.5,
+    "unpaywall_sleep": 0.1
+  },
+  "outputs": {
+    "default_output_dir": "check/litminer_run",
+    "screenshot_root": "work/screenshots"
+  },
+  "evidence": {
+    "require_doi_for_queue": true,
+    "queue_priorities": "high,medium,needs_review",
+    "include_metadata_blocked": false,
+    "unknown_value": "Unknown"
+  }
+}

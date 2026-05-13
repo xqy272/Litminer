@@ -1,0 +1,41 @@
+[project]
+name = "litminer"
+version = "0.1.0"
+description = "Agent-facing literature search substrate for API discovery, metadata verification, triage, and publisher-page queues."
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+litminer-run = "engine.run_lit_search:main"
+litminer-discover-api = "engine.api_discovery:main"
+litminer-triage = "engine.semantic_triage:main"
+litminer-mcp = "sources.mcp.server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]
+
+[tool.setuptools.packages.find]
+include = ["engine*", "sources*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+ignore = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+explicit_package_bases = true
+check_untyped_defs = true

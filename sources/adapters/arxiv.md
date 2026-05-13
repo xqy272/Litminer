@@ -1,0 +1,29 @@
+# arXiv Adapter
+
+Use arXiv for preprint discovery when the user topic belongs to a field where
+preprints are a meaningful signal. It is an optional discovery source, not a
+bibliographic authority.
+
+## Command
+
+```bash
+python engine/api_discovery.py \
+  --query "all:graphene" \
+  --sources arxiv \
+  --year-from 2026 \
+  --max-results-per-query 50 \
+  --output work/arxiv_candidates.csv \
+  --trace-output work/arxiv_trace.csv \
+  --report-output work/arxiv_report.md
+```
+
+Advanced arXiv query syntax can be passed directly. Prefer explicit arXiv
+fields such as `all:`, `ti:`, `au:`, `abs:`, and `cat:` when the Agent needs a
+precise query.
+
+## Evidence Boundary
+
+- Treat rows as preprint discovery leads.
+- Verify DOI-bearing rows through Crossref when available.
+- Keep arXiv category and PDF URL as access/context hints.
+- Do not infer peer-reviewed publication status from arXiv metadata alone.

@@ -1,0 +1,4 @@
+title,doi,publication_year,journal,abstract,article_type,discovery_source,discovery_query
+"Machine learning accelerates enzyme stability screening",10.1234/litminer.001,2026,Journal of Research Methods,"Snippet says the paper reports automated enzyme stability screening with external validation.",original_research,web_search,enzyme stability machine learning validation
+"Clinical language model evaluation under deployment drift",10.1234/litminer.003,2026,Applied AI Evaluation,"Snippet mentions prospective validation of language models under deployment drift.",original_research,web_search,language model deployment drift validation
+"Review of machine learning for enzyme engineering",10.1234/litminer.002,2025,Biotechnology Reviews,"Snippet indicates this is a broad review of machine learning for enzyme engineering.",review,web_search,enzyme engineering machine learning review
