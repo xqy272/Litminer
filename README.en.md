@@ -16,14 +16,14 @@ Install Litminer as a user-level skill:
 
 ```bash
 mkdir -p ~/.claude/skills
-git clone <this-repo-url> ~/.claude/skills/litminer
+git clone https://github.com/xqy272/Litminer.git ~/.claude/skills/litminer
 ```
 
 Or install it into a target project:
 
 ```bash
 mkdir -p .claude/skills
-git clone <this-repo-url> .claude/skills/litminer
+git clone https://github.com/xqy272/Litminer.git .claude/skills/litminer
 ```
 
 Restart or reload Claude Code skills, then invoke it naturally:
@@ -34,11 +34,11 @@ Use Litminer to find recent papers on enzyme stability external validation and b
 
 ### Codex
 
-Register the folder that contains `SKILL.md` in `~/.codex/config.toml` or a trusted project-level `.codex/config.toml`:
+Register the folder that contains `SKILL.md` in `~/.codex/config.toml` or a trusted project-level `.codex/config.toml`. `path` must point to your actual Litminer clone:
 
 ```toml
 [[skills.config]]
-path = "D:/Projects/Litminer"
+path = "C:/Users/your-name/.claude/skills/litminer"
 enabled = true
 ```
 
@@ -59,8 +59,8 @@ Codex MCP example:
 ```toml
 [mcp_servers.litminer]
 command = "python"
-args = ["D:/Projects/Litminer/sources/mcp/server.py"]
-cwd = "D:/Projects/Litminer"
+args = ["C:/Users/your-name/.claude/skills/litminer/sources/mcp/server.py"]
+cwd = "C:/Users/your-name/.claude/skills/litminer"
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
