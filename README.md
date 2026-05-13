@@ -92,17 +92,24 @@ Skill 负责让 Agent 知道什么时候使用 Litminer；MCP 负责把 Litminer
 先验证本地 MCP 服务可启动：
 
 ```bash
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```
 
-Claude Code 可用 JSON 方式添加 stdio MCP 服务：
+MCP 有两个路径概念：
+
+- Skill 安装目录：Litminer 代码所在位置，例如 `~/.claude/skills/litminer` 或 `~/.agents/skills/litminer`。
+- 用户工作区：输入 CSV、输出报告和 `check/`、`work/` 产物所在位置。通过 `LITMINER_WORKSPACE_ROOT` 指定；未指定时使用 MCP 进程的 `cwd`。
+
+Claude Code 可用 JSON 方式添加 stdio MCP 服务。下面示例把代码放在 skill 安装目录，把输出写入目标项目目录：
 
 ```bash
 claude mcp add-json litminer '{
   "type": "stdio",
   "command": "python",
-  "args": ["C:/Users/your-name/.claude/skills/litminer/sources/mcp/server.py"],
+  "args": ["C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"],
+  "cwd": "D:/path/to/your/project",
   "env": {
+    "LITMINER_WORKSPACE_ROOT": "D:/path/to/your/project",
     "LITMINER_CONTACT_EMAIL": "you@example.org"
   }
 }'
@@ -113,8 +120,9 @@ Codex 可在 `config.toml` 中添加：
 ```toml
 [mcp_servers.litminer]
 command = "python"
-args = ["C:/Users/your-name/.agents/skills/litminer/sources/mcp/server.py"]
-cwd = "C:/Users/your-name/.agents/skills/litminer"
+args = ["C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"]
+cwd = "D:/path/to/your/project"
+env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project" }
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
@@ -141,8 +149,8 @@ env_vars = [
 运行脚本或 MCP 服务需要 Python 3.10+。Litminer 运行时仅依赖 Python 标准库，所以在 Litminer 目录内可以直接运行：
 
 ```bash
-python engine/run_lit_search.py --help
-python sources/mcp/test_server.py
+python -m litminer.engine.run_lit_search --help
+python -m litminer.sources.mcp.test_server
 ```
 
 只有当你想使用 console scripts，或安装 Ruff、mypy 等开发/验证工具时，才需要 `pip install`。为避免污染用户电脑，推荐在 Litminer 目录内创建本地虚拟环境：
@@ -171,7 +179,7 @@ python -m pip install -e ".[dev]"
 
 `.venv/` 已在 `.gitignore` 中忽略。如果你配置 MCP，也可以把 MCP 的 `command` 指向 `.venv` 里的 Python，以保证运行环境稳定，例如 Windows 的 `.venv/Scripts/python.exe` 或 macOS/Linux 的 `.venv/bin/python`。
 
-当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`engine/`、`sources/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。如果后续要做更干净的用户侧安装体验，应提供独立 release 包或 plugin，而不是依赖用户手工挑选文件。
+当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`litminer/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。如果后续要做更干净的用户侧安装体验，应提供独立 release 包或 plugin，而不是依赖用户手工挑选文件。
 
 可选 API 联系信息：
 
@@ -185,7 +193,7 @@ python -m pip install -e ".[dev]"
 在 Litminer 项目根目录运行：
 
 ```bash
-python engine/run_lit_search.py \
+python -m litminer.engine.run_lit_search \
   --query "machine learning enzyme stability external validation" \
   --year-from 2026 \
   --required-concept "validation=external validation|prospective validation" \
@@ -205,7 +213,7 @@ pipeline.bat "machine learning enzyme stability external validation" 2026
 
 ## 默认工作流
 
-`engine/run_lit_search.py` 会执行一条完整的文献处理链：
+`litminer.engine.run_lit_search` 会执行一条完整的文献处理链：
 
 1. API 发现候选文献，默认使用 OpenAlex。
 2. DOI/标题去重，并合并互补字段。
@@ -241,7 +249,7 @@ pipeline.bat "machine learning enzyme stability external validation" 2026
 只运行 API 发现：
 
 ```bash
-python engine/api_discovery.py \
+python -m litminer.engine.api_discovery \
   --query "user topic query" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
@@ -253,7 +261,7 @@ python engine/api_discovery.py \
 对已有 CSV 做语义初筛：
 
 ```bash
-python engine/semantic_triage.py \
+python -m litminer.engine.semantic_triage \
   --input check/deduped_candidates.csv \
   --output check/triaged_candidates.csv \
   --required-concept "main=term1|term2" \
@@ -266,17 +274,19 @@ python engine/semantic_triage.py \
 构建出版社页面证据队列：
 
 ```bash
-python engine/build_publisher_queue.py \
-  --input check/verified_candidates.csv \
+python -m litminer.engine.build_publisher_queue \
+  --input check/oa_annotated_candidates.csv \
   --output check/publisher_queue.csv \
   --priorities high,medium,needs_review \
   --fields-needed "field_from_user_request"
 ```
 
+如果跳过 Unpaywall，则把 `--input` 改成 `check/triaged_candidates.csv` 或 `check/selected_candidates.csv`。不要直接用只有 Crossref 字段的 `verified_candidates.csv` 配合 `--priorities`，因为优先级字段来自语义初筛阶段。
+
 生成处理摘要：
 
 ```bash
-python engine/processing_report.py \
+python -m litminer.engine.processing_report \
   --output-dir check/litminer_run
 ```
 
@@ -295,11 +305,11 @@ Litminer 不做这些事：
 ## 验证
 
 ```bash
-python -m compileall engine sources -q
-python -m ruff check engine sources test
-python -m mypy engine sources
+python -m compileall litminer -q
+python -m ruff check litminer test
+python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```
 
 ## 项目结构
@@ -313,8 +323,7 @@ Litminer/
 |-- CLAUDE.md
 |-- config/
 |-- agents/
-|-- engine/
-|-- sources/
+|-- litminer/
 |-- references/
 `-- test/
 ```

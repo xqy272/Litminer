@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Deduplicate literature candidate CSV files by DOI, then title.
-Moved from scripts/dedupe_papers.py — this is now the canonical location.
 
 Usage:
-    python engine/dedupe_papers.py candidates.csv deduped.csv
-    python engine/dedupe_papers.py candidates.csv deduped.csv --doi-field doi --title-field title
+    python -m litminer.engine.dedupe_papers candidates.csv deduped.csv
+    python -m litminer.engine.dedupe_papers candidates.csv deduped.csv --doi-field doi --title-field title
 """
 
 from __future__ import annotations
@@ -147,6 +146,7 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
         row["duplicate_count"] = str(len(group_rows))
         output_rows.append(row)
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()

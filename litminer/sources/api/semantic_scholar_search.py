@@ -2,8 +2,8 @@
 """Search Semantic Scholar for candidate papers and output uniform CSV.
 
 Usage:
-    python semantic_scholar_search.py --query "your literature query" --year-from 2020 --output candidates.csv
-    python semantic_scholar_search.py --query "..." --citation-expand "seed_doi" --output expanded.csv
+    python -m litminer.sources.api.semantic_scholar_search --query "your literature query" --year-from 2020 --output candidates.csv
+    python -m litminer.sources.api.semantic_scholar_search --query "..." --citation-expand "seed_doi" --output expanded.csv
 
 Handles:
 - Graph API search with pagination
@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# ── Configuration ──────────────────────────────────────────────────────────
+# Configuration
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 REQUEST_TIMEOUT = 30
@@ -89,7 +89,7 @@ def _fetch_json(url: str) -> dict:
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
 
 
-# ── Field mapping ──────────────────────────────────────────────────────────
+# Field mapping
 
 def _extract_doi(paper: dict) -> str:
     ext = paper.get("externalIds", {}) or {}
@@ -142,7 +142,7 @@ def _paper_to_row(paper: dict, source_query: str = "", source_note: str = "") ->
     }
 
 
-# ── Search ─────────────────────────────────────────────────────────────────
+# Search
 
 def search(
     query: str,
@@ -206,7 +206,7 @@ def search(
     return results
 
 
-# ── Citation expansion ─────────────────────────────────────────────────────
+# Citation expansion
 
 def get_citations(doi: str, max_results: int = 100) -> list[dict[str, str]]:
     """Get papers that cite the given DOI (forward search)."""
@@ -274,7 +274,7 @@ def get_references(doi: str, max_results: int = 100) -> list[dict[str, str]]:
     return results
 
 
-# ── CSV output ─────────────────────────────────────────────────────────────
+# CSV output
 
 def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +286,7 @@ def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
     print(f"Wrote {len(results)} rows to {output_path}", file=sys.stderr)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
+# CLI
 
 def main() -> None:
     parser = argparse.ArgumentParser(

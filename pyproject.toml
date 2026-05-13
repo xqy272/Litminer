@@ -10,17 +10,21 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-litminer-run = "engine.run_lit_search:main"
-litminer-discover-api = "engine.api_discovery:main"
-litminer-triage = "engine.semantic_triage:main"
-litminer-mcp = "sources.mcp.server:main"
+litminer-run = "litminer.engine.run_lit_search:main"
+litminer-discover-api = "litminer.engine.api_discovery:main"
+litminer-triage = "litminer.engine.semantic_triage:main"
+litminer-mcp = "litminer.sources.mcp.server:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]
 
 [tool.setuptools.packages.find]
-include = ["engine*", "sources*"]
+include = ["litminer*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+"litminer.sources" = ["adapters/*.md", "extraction/*.md", "mcp/README.md"]
+"litminer.references" = ["journal_metrics_seed.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

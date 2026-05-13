@@ -6,19 +6,21 @@ literature workspace plus basic processing tools for triage, verification, OA
 link annotation, metrics annotation, processing summaries, and publisher-page
 queueing.
 
-File path arguments are resolved relative to the Litminer project root and are
-rejected if they escape that workspace.
+File path arguments are resolved relative to `LITMINER_WORKSPACE_ROOT`. If that
+environment variable is unset, they resolve relative to the MCP process `cwd`.
+Paths are rejected if they escape the workspace root. This keeps the skill code
+directory separate from user output files.
 
 ## Run
 
 ```bash
-python sources/mcp/server.py
+python -m litminer.sources.mcp.server
 ```
 
 Smoke test:
 
 ```bash
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```
 
 ## Tools
@@ -60,7 +62,6 @@ python sources/mcp/test_server.py
       "include_arxiv": false,
       "include_europe_pmc": false,
       "enrich_unpaywall": true,
-      "config": "config/default.json",
       "output_dir": "check/mcp_run"
     }
   }

@@ -3,16 +3,16 @@
 
 Usage:
     # Verify a single DOI
-    python crossref_verify.py --doi "10.1016/j.apcatb.2024.123456"
+    python -m litminer.sources.api.crossref_verify --doi "10.1016/j.apcatb.2024.123456"
 
     # Verify all DOIs in a CSV
-    python crossref_verify.py --input candidates.csv --output verified.csv
+    python -m litminer.sources.api.crossref_verify --input candidates.csv --output verified.csv
 
     # Search Crossref by title to find a DOI
-    python crossref_verify.py --title-search "Machine learning accelerates enzyme stability screening"
+    python -m litminer.sources.api.crossref_verify --title-search "Machine learning accelerates enzyme stability screening"
 
     # Verify and add mismatch warnings
-    python crossref_verify.py --input candidates.csv --output verified.csv --strict
+    python -m litminer.sources.api.crossref_verify --input candidates.csv --output verified.csv --strict
 
 The script returns the canonical Crossref metadata for each paper and flags
 mismatches between the input metadata and Crossref's authoritative record.
@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# ── Configuration ──────────────────────────────────────────────────────────
+# Configuration
 
 CROSSREF_BASE = "https://api.crossref.org"
 REQUEST_TIMEOUT = 30
@@ -77,7 +77,7 @@ def _fetch_json(url: str) -> dict:
     raise RuntimeError(f"Crossref request failed: {last_error}")
 
 
-# ── Normalization ──────────────────────────────────────────────────────────
+# Normalization
 
 def normalize_doi(doi: str) -> str:
     """Normalize DOI to lowercase, strip prefix and trailing junk."""
@@ -109,7 +109,7 @@ def _title_similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-# ── Metadata extraction from Crossref response ─────────────────────────────
+# Metadata extraction from Crossref response
 
 def _extract_crossref_metadata(message: dict) -> dict[str, str]:
     """Extract uniform fields from a Crossref API message."""
@@ -168,7 +168,7 @@ def _extract_date_part(date_dict: dict) -> str:
     return "-".join(str(p) for p in parts if p is not None)
 
 
-# ── Core verification ──────────────────────────────────────────────────────
+# Core verification
 
 def verify_doi(doi: str) -> dict[str, str] | None:
     """Verify a single DOI against Crossref. Returns metadata dict or None."""
@@ -211,7 +211,7 @@ def search_by_title(title: str, max_results: int = 5) -> list[dict[str, str]]:
     return [_extract_crossref_metadata(item) for item in items]
 
 
-# ── Mismatch detection ─────────────────────────────────────────────────────
+# Mismatch detection
 
 def detect_mismatches(input_row: dict[str, str], crossref_meta: dict[str, str],
                       strict: bool = False) -> list[str]:
@@ -245,7 +245,7 @@ def detect_mismatches(input_row: dict[str, str], crossref_meta: dict[str, str],
     return warnings
 
 
-# ── Batch verification ────────────────────────────────────────────────────
+# Batch verification
 
 def _best_title_match(title: str, input_row: dict[str, str] | None = None,
                       max_results: int = 5,
@@ -398,7 +398,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
     return counts
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
+# CLI
 
 def main() -> None:
     parser = argparse.ArgumentParser(

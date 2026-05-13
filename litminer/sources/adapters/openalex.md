@@ -16,7 +16,7 @@ landing page URL.
 ## Scripted Discovery
 
 ```bash
-python sources/api/openalex_search.py \
+python -m litminer.sources.api.openalex_search \
   --query "user topic query" \
   --year-from 2026 \
   --max-results 200 \
@@ -31,9 +31,9 @@ families from the active user request, not from project defaults.
 Recommended next steps:
 
 ```bash
-python engine/dedupe_papers.py work/candidates_openalex.csv work/deduped_candidates.csv
-python engine/semantic_triage.py --input work/deduped_candidates.csv --output work/triaged_candidates.csv --required-concept "concept=term1|term2"
-python sources/api/crossref_verify.py --input work/triaged_candidates.csv --output work/verified_candidates.csv --title-lookup
+python -m litminer.engine.dedupe_papers work/candidates_openalex.csv work/deduped_candidates.csv
+python -m litminer.engine.semantic_triage --input work/deduped_candidates.csv --output work/triaged_candidates.csv --required-concept "concept=term1|term2"
+python -m litminer.sources.api.crossref_verify --input work/triaged_candidates.csv --output work/verified_candidates.csv --title-lookup
 ```
 
 ## Reliability Boundary

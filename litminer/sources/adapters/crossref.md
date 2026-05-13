@@ -18,13 +18,13 @@ Crossref is the bibliographic authority in Litminer.
 Verify one DOI:
 
 ```bash
-python sources/api/crossref_verify.py --doi "10.1234/example"
+python -m litminer.sources.api.crossref_verify --doi "10.1234/example"
 ```
 
 Verify a candidate CSV:
 
 ```bash
-python sources/api/crossref_verify.py \
+python -m litminer.sources.api.crossref_verify \
   --input work/candidates.csv \
   --output work/verified_candidates.csv \
   --title-lookup
@@ -33,7 +33,7 @@ python sources/api/crossref_verify.py \
 Search by title when a DOI is missing:
 
 ```bash
-python sources/api/crossref_verify.py \
+python -m litminer.sources.api.crossref_verify \
   --title-search "Machine learning accelerates enzyme stability screening"
 ```
 

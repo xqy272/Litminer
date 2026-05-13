@@ -24,20 +24,20 @@ Litminer is domain-neutral. The Agent derives queries, year ranges, required con
 - `README.md`: human-facing Chinese documentation.
 - `README.en.md`: human-facing English documentation.
 - `config/default.json`: infrastructure defaults only.
-- `engine/run_lit_search.py`: end-to-end workflow runner.
-- `engine/api_discovery.py`: unified discovery orchestrator with trace/report output.
-- `engine/dedupe_papers.py`: DOI/title dedupe with complementary-field merging.
-- `engine/semantic_triage.py`: runtime concept tagging, scoring, and metadata flags.
-- `sources/api/crossref_verify.py`: Crossref DOI verification and title-based DOI recovery.
-- `sources/api/unpaywall_lookup.py`: structured OA/access-link annotation.
-- `engine/journal_metrics.py`: verified local journal metric annotation.
-- `engine/build_publisher_queue.py`: publisher-page evidence queue generation.
-- `engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
-- `engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
-- `engine/websearch_import.py`: import WebSearch leads as unverified candidates.
-- `engine/validate_stage.py`: CSV stage validation.
-- `sources/api/registry.py`: provider registry and capability metadata.
-- `sources/mcp/server.py`: stdio JSON-RPC/MCP-compatible tool server.
+- `litminer/engine/run_lit_search.py`: end-to-end workflow runner.
+- `litminer/engine/api_discovery.py`: unified discovery orchestrator with trace/report output.
+- `litminer/engine/dedupe_papers.py`: DOI/title dedupe with complementary-field merging.
+- `litminer/engine/semantic_triage.py`: runtime concept tagging, scoring, and metadata flags.
+- `litminer/sources/api/crossref_verify.py`: Crossref DOI verification and title-based DOI recovery.
+- `litminer/sources/api/unpaywall_lookup.py`: structured OA/access-link annotation.
+- `litminer/engine/journal_metrics.py`: verified local journal metric annotation.
+- `litminer/engine/build_publisher_queue.py`: publisher-page evidence queue generation.
+- `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
+- `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
+- `litminer/engine/websearch_import.py`: import WebSearch leads as unverified candidates.
+- `litminer/engine/validate_stage.py`: CSV stage validation.
+- `litminer/sources/api/registry.py`: provider registry and capability metadata.
+- `litminer/sources/mcp/server.py`: stdio JSON-RPC/MCP-compatible tool server.
 
 ## Runtime Model
 
@@ -52,6 +52,7 @@ Installation and environment policy:
 - Run scripts directly with Python 3.10+ when possible; runtime code is intentionally stdlib-only.
 - If package installation is needed for console scripts or development tools, create a `.venv` inside the Litminer clone and install there.
 - If MCP is configured, prefer pointing the MCP command at the `.venv` Python when a virtualenv exists.
+- Keep MCP code root and user workspace separate. `litminer/sources/mcp/server.py` imports code from the Litminer clone, while file arguments resolve under `LITMINER_WORKSPACE_ROOT` or the MCP process `cwd`.
 - Do not document hand-copying a subset of files as an install method unless the project ships a dedicated release package or plugin.
 
 Allowed in config:
@@ -99,7 +100,7 @@ These are examples, not defaults.
 ### 2. Prefer The Full Runner
 
 ```bash
-python engine/run_lit_search.py \
+python -m litminer.engine.run_lit_search \
   --query "USER_QUERY_HERE" \
   --year-from 2026 \
   --required-concept "main=term1|term2" \
@@ -130,10 +131,10 @@ Do not mechanically scan large CSVs before checking `processing_report.md`.
 
 ### Discovery
 
-Use `engine/api_discovery.py` instead of raw provider wrappers when possible. It records provider, query ID, rank, source trace, and provider status.
+Use `litminer.engine.api_discovery` instead of raw provider wrappers when possible. It records provider, query ID, rank, source trace, and provider status.
 
 ```bash
-python engine/api_discovery.py \
+python -m litminer.engine.api_discovery \
   --query "USER_QUERY_HERE" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
@@ -191,13 +192,13 @@ The publisher probe is heuristic and safe by design:
 
 ## MCP Use
 
-The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly.
+The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly. File path arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset.
 
 Start/test:
 
 ```bash
-python sources/mcp/server.py
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.server
+python -m litminer.sources.mcp.test_server
 ```
 
 Core MCP tools:
@@ -230,7 +231,7 @@ Core MCP tools:
 
 ## Development Rules
 
-- Keep provider expansion modular: wrapper in `sources/api/`, registration in `sources/api/registry.py`, orchestration through `engine/api_discovery.py`, MCP exposure if useful.
+- Keep provider expansion modular: wrapper in `litminer/sources/api/`, registration in `litminer/sources/api/registry.py`, orchestration through `litminer/engine/api_discovery.py`, MCP exposure if useful.
 - Preserve traceability: provider, query, rank, status, error, DOI, and source trace should remain visible.
 - Prefer annotating and queueing over deleting.
 - Keep script-level facts separate from Agent-level semantic judgement.
@@ -242,16 +243,16 @@ Core MCP tools:
 Run after code changes:
 
 ```bash
-python -m compileall engine sources -q
-python -m ruff check engine sources test
-python -m mypy engine sources
+python -m compileall litminer -q
+python -m ruff check litminer test
+python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```
 
 Optional network smoke tests when source wrappers changed:
 
 ```bash
-python engine/api_discovery.py --query "all:graphene" --sources arxiv --max-results-per-query 1 --output check/arxiv_smoke.csv
-python engine/api_discovery.py --query "cancer immunotherapy" --sources europe_pmc --max-results-per-query 1 --output check/europe_pmc_smoke.csv
+python -m litminer.engine.api_discovery --query "all:graphene" --sources arxiv --max-results-per-query 1 --output check/arxiv_smoke.csv
+python -m litminer.engine.api_discovery --query "cancer immunotherapy" --sources europe_pmc --max-results-per-query 1 --output check/europe_pmc_smoke.csv
 ```

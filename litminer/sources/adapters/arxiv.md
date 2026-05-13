@@ -7,7 +7,7 @@ bibliographic authority.
 ## Command
 
 ```bash
-python engine/api_discovery.py \
+python -m litminer.engine.api_discovery \
   --query "all:graphene" \
   --sources arxiv \
   --year-from 2026 \

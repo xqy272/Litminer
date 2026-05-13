@@ -12,17 +12,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from engine import api_discovery
-from engine import dedupe_papers
-from engine import publisher_probe
-from engine import processing_report
-from engine import run_lit_search
-from engine import semantic_triage
-from sources.api import arxiv_search
-from sources.api import crossref_verify
-from sources.api import europe_pmc_search
-from sources.api import unpaywall_lookup
-from sources.mcp import server as mcp_server
+from litminer.engine import api_discovery
+from litminer.engine import dedupe_papers
+from litminer.engine import publisher_probe
+from litminer.engine import processing_report
+from litminer.engine import run_lit_search
+from litminer.engine import semantic_triage
+from litminer.sources.api import arxiv_search
+from litminer.sources.api import crossref_verify
+from litminer.sources.api import europe_pmc_search
+from litminer.sources.api import unpaywall_lookup
+from litminer.sources.mcp import server as mcp_server
 
 
 class LitminerCoreTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class LitminerCoreTests(unittest.TestCase):
             trace = tmp_path / "trace.csv"
             report = tmp_path / "report.md"
 
-            with patch("engine.api_discovery.run_provider", side_effect=RuntimeError("boom")):
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=RuntimeError("boom")):
                 result = api_discovery.discover_api(
                     ["query"],
                     output,
@@ -152,7 +152,7 @@ class LitminerCoreTests(unittest.TestCase):
                 probe_sleep=0,
             )
 
-            with patch("sources.api.crossref_verify.verify_doi", return_value=None):
+            with patch("litminer.sources.api.crossref_verify.verify_doi", return_value=None):
                 run_lit_search.run(args)
 
             with (out_dir / "verified_candidates.csv").open(encoding="utf-8", newline="") as handle:
@@ -223,7 +223,7 @@ class LitminerCoreTests(unittest.TestCase):
                 "crossref_year": "2026",
             }]
 
-            with patch("sources.api.crossref_verify.search_by_title", return_value=candidates):
+            with patch("litminer.sources.api.crossref_verify.search_by_title", return_value=candidates):
                 run_lit_search.run(args)
 
             with (out_dir / "publisher_queue.csv").open(encoding="utf-8", newline="") as handle:
@@ -491,6 +491,33 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIn("escapes Litminer workspace", response["error"]["message"])
         self.assertNotIn("data", response["error"])
 
+    def test_mcp_uses_configured_workspace_root_for_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            input_csv = workspace / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "Paper,10.1234/example,2026,Journal A\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"LITMINER_WORKSPACE_ROOT": str(workspace)}):
+                response = mcp_server.handle_request({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "litminer_dedupe",
+                        "arguments": {
+                            "input_csv": "input.csv",
+                            "output_csv": "out/deduped.csv",
+                        },
+                    },
+                })
+
+            self.assertIn("result", response)
+            self.assertTrue((workspace / "out" / "deduped.csv").exists())
+
     def test_crossref_title_recovery_uses_context(self) -> None:
         candidates = [
             {
@@ -507,7 +534,7 @@ class LitminerCoreTests(unittest.TestCase):
             },
         ]
 
-        with patch("sources.api.crossref_verify.search_by_title", return_value=candidates):
+        with patch("litminer.sources.api.crossref_verify.search_by_title", return_value=candidates):
             match = crossref_verify._best_title_match(
                 "A precise paper title",
                 input_row={"publication_year": "2026", "journal": "Journal A"},

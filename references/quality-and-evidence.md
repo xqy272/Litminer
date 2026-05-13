@@ -18,11 +18,11 @@ review, not pretend to make final scientific judgement by itself.
 
 ## Semantic Triage
 
-Use `engine/semantic_triage.py` for script-assisted review. The Agent supplies
+Use `litminer.engine.semantic_triage` for script-assisted review. The Agent supplies
 concepts based on the user's request:
 
 ```bash
-python engine/semantic_triage.py \
+python -m litminer.engine.semantic_triage \
   --input candidates.csv \
   --output triaged.csv \
   --required-concept "main=term1|term2" \

@@ -23,21 +23,21 @@ import re
 import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from engine import api_discovery
-from engine import build_publisher_queue
-from engine import dedupe_papers
-from engine import journal_metrics
-from engine import merge_csv
-from engine import publisher_probe
-from engine import processing_report
-from engine import semantic_triage
-from engine import validate_stage
-from sources.api import crossref_verify
-from sources.api import unpaywall_lookup
+from litminer.engine import api_discovery
+from litminer.engine import build_publisher_queue
+from litminer.engine import dedupe_papers
+from litminer.engine import journal_metrics
+from litminer.engine import merge_csv
+from litminer.engine import publisher_probe
+from litminer.engine import processing_report
+from litminer.engine import semantic_triage
+from litminer.engine import validate_stage
+from litminer.sources.api import crossref_verify
+from litminer.sources.api import unpaywall_lookup
 
 
 DEFAULT_QUEUE_PRIORITIES = {"high", "medium", "needs_review"}

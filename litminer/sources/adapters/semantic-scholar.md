@@ -15,7 +15,7 @@ cross-checks, and one-hop citation/reference expansion.
 ## Scripted Discovery
 
 ```bash
-python sources/api/semantic_scholar_search.py \
+python -m litminer.sources.api.semantic_scholar_search \
   --query "user topic query" \
   --year-from 2026 \
   --max-results 100 \
@@ -25,7 +25,7 @@ python sources/api/semantic_scholar_search.py \
 Citation expansion:
 
 ```bash
-python sources/api/semantic_scholar_search.py \
+python -m litminer.sources.api.semantic_scholar_search \
   --citation-expand "10.xxxx/yyyy" \
   --max-results 100 \
   --output work/citations_s2.csv
@@ -40,9 +40,9 @@ Merge with OpenAlex when both are available, then dedupe and run semantic
 triage:
 
 ```bash
-python engine/merge_csv.py work/candidates_openalex.csv work/candidates_s2.csv --allow-missing --output work/merged_candidates.csv
-python engine/dedupe_papers.py work/merged_candidates.csv work/deduped_candidates.csv
-python engine/semantic_triage.py --input work/deduped_candidates.csv --output work/triaged_candidates.csv --required-concept "concept=term1|term2"
+python -m litminer.engine.merge_csv work/candidates_openalex.csv work/candidates_s2.csv --allow-missing --output work/merged_candidates.csv
+python -m litminer.engine.dedupe_papers work/merged_candidates.csv work/deduped_candidates.csv
+python -m litminer.engine.semantic_triage --input work/deduped_candidates.csv --output work/triaged_candidates.csv --required-concept "concept=term1|term2"
 ```
 
 ## Reliability Boundary

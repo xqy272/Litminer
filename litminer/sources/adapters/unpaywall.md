@@ -23,7 +23,7 @@ and access-link hints:
 ## Command
 
 ```bash
-python sources/api/unpaywall_lookup.py \
+python -m litminer.sources.api.unpaywall_lookup \
   --input work/verified_candidates.csv \
   --output work/oa_annotated_candidates.csv \
   --email "you@example.org"

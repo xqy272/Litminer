@@ -21,7 +21,7 @@ journal,aliases,issn,impact_factor,metric_year,metric_source,source_url,last_che
 Then run:
 
 ```bash
-python engine/journal_metrics.py \
+python -m litminer.engine.journal_metrics \
   --input work/verified_candidates.csv \
   --output work/metrics_annotated_candidates.csv \
   --metrics work/verified_journal_metrics.csv \

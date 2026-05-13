@@ -2,8 +2,8 @@
 """Search OpenAlex for candidate papers and output uniform CSV.
 
 Usage:
-    python openalex_search.py --query "your literature query" --year-from 2020 --max-results 200 --output candidates.csv
-    python openalex_search.py --query-file queries.txt --year-from 2020 --output candidates.csv
+    python -m litminer.sources.api.openalex_search --query "your literature query" --year-from 2020 --max-results 200 --output candidates.csv
+    python -m litminer.sources.api.openalex_search --query-file queries.txt --year-from 2020 --output candidates.csv
 
 The script handles:
 - API pagination and cursor-based traversal
@@ -28,7 +28,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-# ── Configuration ──────────────────────────────────────────────────────────
+# Configuration
 
 OPENALEX_BASE = "https://api.openalex.org/works"
 REQUEST_TIMEOUT = 30  # seconds
@@ -51,7 +51,7 @@ class ProviderSearchError(RuntimeError):
         self.partial_results = partial_results or []
         self.status = status
 
-# Field mapping: OpenAlex JSON path → uniform CSV column
+# Field mapping: OpenAlex JSON path to uniform CSV column
 # Each value is a callable that extracts the field from the work dict.
 FIELD_MAP: dict[str, Any] = {}
 OUTPUT_FIELDS = [
@@ -144,7 +144,7 @@ def _extract_authors(work: dict) -> str:
     return "; ".join(names)
 
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────
+# HTTP helpers
 
 def _build_url(query: str, year_from: int | None, page: int, per_page: int,
                api_key: str | None = None, mailto: str | None = None) -> str:
@@ -199,7 +199,7 @@ def _fetch_json(url: str) -> dict:
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
 
 
-# ── Core search ────────────────────────────────────────────────────────────
+# Core search
 
 def search(query: str, year_from: int | None = None, max_results: int = 200,
            api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
@@ -274,7 +274,7 @@ def search(query: str, year_from: int | None = None, max_results: int = 200,
     return results
 
 
-# ── Batch search from file ─────────────────────────────────────────────────
+# Batch search from file
 
 def search_from_file(query_file: Path, year_from: int | None, max_results: int,
                      api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
@@ -313,7 +313,7 @@ def search_from_file(query_file: Path, year_from: int | None, max_results: int,
     return all_results
 
 
-# ── CSV output ─────────────────────────────────────────────────────────────
+# CSV output
 
 def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -325,7 +325,7 @@ def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
     print(f"Wrote {len(results)} rows to {output_path}", file=sys.stderr)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────
+# CLI
 
 def main() -> None:
     parser = argparse.ArgumentParser(

@@ -16,7 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_METRICS = Path(__file__).resolve().parent.parent / "references" / "journal_metrics_seed.csv"
+PROJECT_DEFAULT_METRICS = Path(__file__).resolve().parents[2] / "references" / "journal_metrics_seed.csv"
+PACKAGE_DEFAULT_METRICS = Path(__file__).resolve().parents[1] / "references" / "journal_metrics_seed.csv"
+DEFAULT_METRICS = PROJECT_DEFAULT_METRICS if PROJECT_DEFAULT_METRICS.exists() else PACKAGE_DEFAULT_METRICS
 
 
 @dataclass

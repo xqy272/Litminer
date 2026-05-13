@@ -1,5 +1,5 @@
 ---
-name: Litminer
+name: litminer
 description: >
   Agent-facing literature search substrate for API discovery, metadata
   verification, semantic triage support, journal metric annotation, and
@@ -100,7 +100,7 @@ These examples are not defaults.
 ### 2. Run The Workflow
 
 ```bash
-python engine/run_lit_search.py \
+python -m litminer.engine.run_lit_search \
   --query "USER_QUERY_HERE" \
   --year-from 2026 \
   --required-concept "main=term1|term2" \
@@ -117,7 +117,7 @@ or `--include-europe-pmc` for biomedical/life-science searches.
 ### 3. Use Discovery Only When Needed
 
 ```bash
-python engine/api_discovery.py \
+python -m litminer.engine.api_discovery \
   --query "USER_QUERY_HERE" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
@@ -132,7 +132,7 @@ rank, source trace, and per-source status.
 ### 4. Triage Without Deleting
 
 ```bash
-python engine/semantic_triage.py \
+python -m litminer.engine.semantic_triage \
   --input work/deduped_candidates.csv \
   --output work/triaged_candidates.csv \
   --required-concept "main=term1|term2" \
@@ -159,16 +159,16 @@ commands unless the Agent explicitly applies a downstream hard filter.
 ### 5. Verify And Queue Evidence
 
 ```bash
-python sources/api/crossref_verify.py \
+python -m litminer.sources.api.crossref_verify \
   --input work/selected_candidates.csv \
   --output work/verified_candidates.csv \
   --title-lookup
 
-python sources/api/unpaywall_lookup.py \
+python -m litminer.sources.api.unpaywall_lookup \
   --input work/verified_candidates.csv \
   --output work/oa_annotated_candidates.csv
 
-python engine/build_publisher_queue.py \
+python -m litminer.engine.build_publisher_queue \
   --input work/oa_annotated_candidates.csv \
   --output work/publisher_queue.csv \
   --priorities high,medium,needs_review \
@@ -178,7 +178,7 @@ python engine/build_publisher_queue.py \
 Optional publisher probe:
 
 ```bash
-python engine/publisher_probe.py \
+python -m litminer.engine.publisher_probe \
   --input work/publisher_queue.csv \
   --output work/publisher_queue_probed.csv \
   --limit 20
@@ -190,14 +190,14 @@ not read PDFs.
 Generate a compact automated processing report:
 
 ```bash
-python engine/processing_report.py \
+python -m litminer.engine.processing_report \
   --output-dir work/litminer_run
 ```
 
 ### 6. Import WebSearch Leads Only As Supplement
 
 ```bash
-python engine/websearch_import.py \
+python -m litminer.engine.websearch_import \
   --input work/websearch_raw.csv \
   --output work/websearch_candidates.csv \
   --query "gap-focused query"
@@ -211,7 +211,7 @@ publisher-page verification before promotion.
 Start the local server:
 
 ```bash
-python sources/mcp/server.py
+python -m litminer.sources.mcp.server
 ```
 
 Preferred tools:

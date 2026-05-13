@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Quick local test of the Litminer MCP server before deploying to Cowork.
+"""Quick local test of the Litminer MCP server before configuring an Agent.
 Run this to verify the server starts, responds to initialize, and lists tools.
-No Cowork or MCP client needed; this script speaks JSON-RPC directly over a pipe.
+No MCP client is needed; this script speaks JSON-RPC directly over a pipe.
 
 Usage:
-    python sources/mcp/test_server.py
+    python -m litminer.sources.mcp.test_server
 """
 
 import json
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 SERVER_PATH = Path(__file__).resolve().parent / "server.py"
-PROJECT_ROOT = SERVER_PATH.parent.parent.parent
+PROJECT_ROOT = SERVER_PATH.parents[3]
 
 
 def send_request(proc, request: dict) -> dict:
@@ -106,7 +106,7 @@ def main():
         print("  PASS: Notification sent (no response expected)")
 
         print("\n" + "=" * 50)
-        print("ALL TESTS PASSED - server is ready for Cowork deployment.")
+        print("ALL TESTS PASSED - server is ready for Agent MCP configuration.")
 
     except Exception as e:
         print(f"\nFAIL: {e}")

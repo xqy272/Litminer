@@ -20,9 +20,9 @@ echo.
 
 echo [1/1] Run Agent-facing workflow...
 if "%KEY%"=="" (
-  python engine/run_lit_search.py --query "%QUERY%" --year-from %YEAR% --output-dir "%OUT%\litminer_run" --include-semantic-scholar
+  python -m litminer.engine.run_lit_search --query "%QUERY%" --year-from %YEAR% --output-dir "%OUT%\litminer_run" --include-semantic-scholar
 ) else (
-  python engine/run_lit_search.py --query "%QUERY%" --year-from %YEAR% --output-dir "%OUT%\litminer_run" --openalex-api-key "%KEY%" --include-semantic-scholar
+  python -m litminer.engine.run_lit_search --query "%QUERY%" --year-from %YEAR% --output-dir "%OUT%\litminer_run" --openalex-api-key "%KEY%" --include-semantic-scholar
 )
 if %errorlevel% neq 0 goto :error
 

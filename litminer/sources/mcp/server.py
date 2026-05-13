@@ -6,10 +6,7 @@ Europe PMC, Crossref, Unpaywall) and deterministic engine scripts as
 MCP-style JSON-RPC tools.
 
 Usage:
-    python sources/mcp/server.py
-    # Or with pip-installed MCP:
-    pip install mcp --break-system-packages
-    python sources/mcp/server.py
+    python -m litminer.sources.mcp.server
 
 Tools exposed:
     litminer_search_openalex    - Search OpenAlex for papers
@@ -24,11 +21,11 @@ Tools exposed:
     litminer_build_publisher_queue - Build DOI/publisher-page queues
     litminer_run_lit_search     - Run the full Agent-facing workflow
 
-This server uses stdlib-only HTTP (no MCP SDK dependency) for maximum
-portability. The MCP protocol is JSON-RPC over stdio or HTTP.
+This server uses stdlib-only JSON-RPC over stdio (no MCP SDK dependency) for
+maximum portability.
 
 Architecture:
-    Agent -> MCP -> sources/api/* and engine/*
+    Agent -> MCP -> litminer.sources.api.* and litminer.engine.*
 """
 
 from __future__ import annotations
@@ -41,10 +38,11 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-# Add project root to path so we can import litminer modules
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-WORKSPACE_ROOT = PROJECT_ROOT.resolve()
+# Add repository root to path so this file also works when launched directly by
+# absolute path from an Agent MCP config.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 
@@ -58,16 +56,23 @@ _unpaywall_lookup = None
 _import_lock = threading.Lock()
 
 
+def _workspace_root() -> Path:
+    """Return the user workspace root for MCP file operations."""
+    configured = os.environ.get("LITMINER_WORKSPACE_ROOT", "").strip()
+    return Path(configured).expanduser().resolve(strict=False) if configured else Path.cwd().resolve(strict=False)
+
+
 def _workspace_path(value: str, label: str = "path", must_exist: bool = False) -> Path:
-    """Resolve a user-supplied path and keep MCP file access inside the project."""
+    """Resolve a user path while keeping MCP file access inside the workspace."""
     if value is None or str(value).strip() == "":
         raise ValueError(f"{label} is required")
+    root = _workspace_root()
     path = Path(str(value))
     if not path.is_absolute():
-        path = WORKSPACE_ROOT / path
+        path = root / path
     resolved = path.resolve(strict=False)
     try:
-        resolved.relative_to(WORKSPACE_ROOT)
+        resolved.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"{label} escapes Litminer workspace: {value}") from exc
     if must_exist and not resolved.exists():
@@ -94,7 +99,7 @@ def _get_openalex():
     if _openalex_search is None:
         with _import_lock:
             if _openalex_search is None:  # double-check under lock
-                from sources.api import openalex_search as _mod
+                from litminer.sources.api import openalex_search as _mod
                 _openalex_search = _mod
     return _openalex_search
 
@@ -104,7 +109,7 @@ def _get_crossref():
     if _crossref_verify is None:
         with _import_lock:
             if _crossref_verify is None:  # double-check under lock
-                from sources.api import crossref_verify as _mod
+                from litminer.sources.api import crossref_verify as _mod
                 _crossref_verify = _mod
     return _crossref_verify
 
@@ -114,7 +119,7 @@ def _get_semantic_scholar():
     if _semantic_scholar is None:
         with _import_lock:
             if _semantic_scholar is None:
-                from sources.api import semantic_scholar_search as _mod
+                from litminer.sources.api import semantic_scholar_search as _mod
                 _semantic_scholar = _mod
     return _semantic_scholar
 
@@ -124,7 +129,7 @@ def _get_arxiv():
     if _arxiv_search is None:
         with _import_lock:
             if _arxiv_search is None:
-                from sources.api import arxiv_search as _mod
+                from litminer.sources.api import arxiv_search as _mod
                 _arxiv_search = _mod
     return _arxiv_search
 
@@ -134,7 +139,7 @@ def _get_europe_pmc():
     if _europe_pmc_search is None:
         with _import_lock:
             if _europe_pmc_search is None:
-                from sources.api import europe_pmc_search as _mod
+                from litminer.sources.api import europe_pmc_search as _mod
                 _europe_pmc_search = _mod
     return _europe_pmc_search
 
@@ -144,7 +149,7 @@ def _get_unpaywall():
     if _unpaywall_lookup is None:
         with _import_lock:
             if _unpaywall_lookup is None:
-                from sources.api import unpaywall_lookup as _mod
+                from litminer.sources.api import unpaywall_lookup as _mod
                 _unpaywall_lookup = _mod
     return _unpaywall_lookup
 
@@ -309,7 +314,7 @@ def _get_engine_dedupe():
     if _engine_dedupe is None:
         with _import_lock:
             if _engine_dedupe is None:
-                from engine import dedupe_papers as _mod
+                from litminer.engine import dedupe_papers as _mod
                 _engine_dedupe = _mod
     return _engine_dedupe
 
@@ -319,7 +324,7 @@ def _get_engine_api_discovery():
     if _engine_api_discovery is None:
         with _import_lock:
             if _engine_api_discovery is None:
-                from engine import api_discovery as _mod
+                from litminer.engine import api_discovery as _mod
                 _engine_api_discovery = _mod
     return _engine_api_discovery
 
@@ -329,7 +334,7 @@ def _get_engine_semantic_triage():
     if _engine_semantic_triage is None:
         with _import_lock:
             if _engine_semantic_triage is None:
-                from engine import semantic_triage as _mod
+                from litminer.engine import semantic_triage as _mod
                 _engine_semantic_triage = _mod
     return _engine_semantic_triage
 
@@ -339,7 +344,7 @@ def _get_engine_journal_metrics():
     if _engine_journal_metrics is None:
         with _import_lock:
             if _engine_journal_metrics is None:
-                from engine import journal_metrics as _mod
+                from litminer.engine import journal_metrics as _mod
                 _engine_journal_metrics = _mod
     return _engine_journal_metrics
 
@@ -349,7 +354,7 @@ def _get_engine_build_queue():
     if _engine_build_queue is None:
         with _import_lock:
             if _engine_build_queue is None:
-                from engine import build_publisher_queue as _mod
+                from litminer.engine import build_publisher_queue as _mod
                 _engine_build_queue = _mod
     return _engine_build_queue
 
@@ -359,7 +364,7 @@ def _get_engine_publisher_probe():
     if _engine_publisher_probe is None:
         with _import_lock:
             if _engine_publisher_probe is None:
-                from engine import publisher_probe as _mod
+                from litminer.engine import publisher_probe as _mod
                 _engine_publisher_probe = _mod
     return _engine_publisher_probe
 
@@ -369,7 +374,7 @@ def _get_engine_websearch_import():
     if _engine_websearch_import is None:
         with _import_lock:
             if _engine_websearch_import is None:
-                from engine import websearch_import as _mod
+                from litminer.engine import websearch_import as _mod
                 _engine_websearch_import = _mod
     return _engine_websearch_import
 
@@ -379,7 +384,7 @@ def _get_engine_processing_report():
     if _engine_processing_report is None:
         with _import_lock:
             if _engine_processing_report is None:
-                from engine import processing_report as _mod
+                from litminer.engine import processing_report as _mod
                 _engine_processing_report = _mod
     return _engine_processing_report
 
@@ -389,7 +394,7 @@ def _get_engine_run_lit_search():
     if _engine_run_lit_search is None:
         with _import_lock:
             if _engine_run_lit_search is None:
-                from engine import run_lit_search as _mod
+                from litminer.engine import run_lit_search as _mod
                 _engine_run_lit_search = _mod
     return _engine_run_lit_search
 
@@ -538,7 +543,7 @@ def tool_run_lit_search(args: dict) -> dict:
         query_file=_optional_workspace_path(args.get("query_file"), "query_file", must_exist=True),
         year_from=args.get("year_from"),
         year_to=args.get("year_to"),
-        output_dir=_optional_workspace_path(args.get("output_dir"), "output_dir"),
+        output_dir=_workspace_path(args.get("output_dir", "check/litminer_run"), "output_dir"),
         discovery_sources=args.get("discovery_sources"),
         include_arxiv=args.get("include_arxiv"),
         include_europe_pmc=args.get("include_europe_pmc"),
@@ -569,7 +574,7 @@ def tool_run_lit_search(args: dict) -> dict:
         target_count=args.get("target_count"),
         queue_strict_only=args.get("queue_strict_only", False),
         allow_missing_doi=args.get("allow_missing_doi"),
-        screenshot_root=_optional_workspace_path(args.get("screenshot_root"), "screenshot_root"),
+        screenshot_root=_workspace_path(args.get("screenshot_root", "work/screenshots"), "screenshot_root"),
         probe_publishers=args.get("probe_publishers"),
         probe_limit=args.get("probe_limit"),
         probe_sleep=args.get("probe_sleep"),

@@ -80,16 +80,22 @@ The skill tells the Agent when to use Litminer. MCP exposes Litminer operations 
 Verify the local server:
 
 ```bash
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```
+
+MCP uses two path roots:
+
+- Skill install directory: the Litminer code location, such as `~/.claude/skills/litminer` or `~/.agents/skills/litminer`.
+- User workspace: where input CSVs, reports, `check/`, and `work/` outputs live. Set it with `LITMINER_WORKSPACE_ROOT`; when unset, the MCP process `cwd` is used.
 
 Codex MCP example:
 
 ```toml
 [mcp_servers.litminer]
 command = "python"
-args = ["C:/Users/your-name/.agents/skills/litminer/sources/mcp/server.py"]
-cwd = "C:/Users/your-name/.agents/skills/litminer"
+args = ["C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"]
+cwd = "D:/path/to/your/project"
+env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project" }
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
@@ -114,8 +120,8 @@ Installing or discovering the skill does not require `pip install`. The clone co
 Running scripts or the MCP server requires Python 3.10+. Litminer has no runtime dependencies outside the Python standard library, so you can run these directly from the Litminer directory:
 
 ```bash
-python engine/run_lit_search.py --help
-python sources/mcp/test_server.py
+python -m litminer.engine.run_lit_search --help
+python -m litminer.sources.mcp.test_server
 ```
 
 Use `pip install` only when you want console scripts or development tools such as Ruff and mypy. To avoid polluting the user's machine, create a local virtual environment inside the Litminer clone:
@@ -144,7 +150,7 @@ python -m pip install -e ".[dev]"
 
 `.venv/` is ignored by Git. If you configure MCP, you may point the MCP `command` at the virtualenv Python for stable execution, for example `.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on macOS/Linux.
 
-The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `engine/`, `sources/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
+The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `litminer/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
 
 Optional API contact environment variables:
 
@@ -156,7 +162,7 @@ Optional API contact environment variables:
 ## Quick Start
 
 ```bash
-python engine/run_lit_search.py \
+python -m litminer.engine.run_lit_search \
   --query "machine learning enzyme stability external validation" \
   --year-from 2026 \
   --required-concept "validation=external validation|prospective validation" \
@@ -170,7 +176,7 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 
 ## Workflow
 
-`engine/run_lit_search.py` performs:
+`litminer.engine.run_lit_search` performs:
 
 1. API discovery, OpenAlex by default.
 2. DOI/title deduplication with complementary-field merging.
@@ -214,9 +220,9 @@ Agent-facing rules and operating details live in [CLAUDE.md](CLAUDE.md) and [SKI
 ## Verification
 
 ```bash
-python -m compileall engine sources -q
-python -m ruff check engine sources test
-python -m mypy engine sources
+python -m compileall litminer -q
+python -m ruff check litminer test
+python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
-python sources/mcp/test_server.py
+python -m litminer.sources.mcp.test_server
 ```

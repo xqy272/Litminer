@@ -292,7 +292,7 @@ def build_queue(input_path: Path, output_path: Path,
             "page_required_fields": "; ".join(required_page_fields),
             "full_text_required_fields": "; ".join(required_page_fields),
             "screenshot_dir": screenshot_dir,
-            "extraction_sop": "sources/extraction/publisher-page-extraction.md",
+            "extraction_sop": "litminer/sources/extraction/publisher-page-extraction.md",
             "evidence_target_grade": "publisher_page_or_better",
             "next_action": (
                 "Resolve DOI landing page and inspect publisher-visible article page. "
