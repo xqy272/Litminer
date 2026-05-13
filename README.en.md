@@ -8,15 +8,22 @@ Litminer is not a review writer, a domain knowledge base, or a PDF reader. It di
 
 ## Connect The Skill First
 
-The repository root contains `SKILL.md`, so the repository directory itself is the skill folder.
+The repository root contains `SKILL.md`, so the repository directory itself is the skill folder. The minimum installation is cloning this repository into a skills directory that your Agent scans. That clone writes only the repository files into that directory; it does not run `pip install` and does not modify the global Python environment. Python 3.10+ is only needed when the Agent actually runs Litminer scripts or the optional MCP server.
 
 ### Claude Code
 
 Install Litminer as a user-level skill:
 
 ```bash
+# macOS / Linux
 mkdir -p ~/.claude/skills
 git clone https://github.com/xqy272/Litminer.git ~/.claude/skills/litminer
+```
+
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
+git clone https://github.com/xqy272/Litminer.git "$HOME\.claude\skills\litminer"
 ```
 
 Or install it into a target project:
@@ -34,15 +41,37 @@ Use Litminer to find recent papers on enzyme stability external validation and b
 
 ### Codex
 
-Register the folder that contains `SKILL.md` in `~/.codex/config.toml` or a trusted project-level `.codex/config.toml`. `path` must point to your actual Litminer clone:
+Codex scans user-level `$HOME/.agents/skills` and repository-level `.agents/skills`. Clone Litminer into one of those locations so Codex can discover the folder containing `SKILL.md`.
 
-```toml
-[[skills.config]]
-path = "C:/Users/your-name/.claude/skills/litminer"
-enabled = true
+User-level install:
+
+```bash
+# macOS / Linux
+mkdir -p ~/.agents/skills
+git clone https://github.com/xqy272/Litminer.git ~/.agents/skills/litminer
 ```
 
-Restart or reload Codex skills after editing the config.
+```powershell
+# Windows PowerShell
+New-Item -ItemType Directory -Force "$HOME\.agents\skills" | Out-Null
+git clone https://github.com/xqy272/Litminer.git "$HOME\.agents\skills\litminer"
+```
+
+Project-level install:
+
+```bash
+# Run at the target project root
+mkdir -p .agents/skills
+git clone https://github.com/xqy272/Litminer.git .agents/skills/litminer
+```
+
+Restart or reload Codex skills after cloning, then invoke it naturally:
+
+```text
+Use Litminer to find recent papers, verify DOI metadata, annotate OA links, and build a publisher queue.
+```
+
+Codex also provides `$skill-installer` for downloading skills from other repositories. This README documents direct `git clone` because it is explicit, auditable, and easy to update. `[[skills.config]]` is mainly for enable/disable overrides on discovered skills, not a required Litminer installation step. If Litminer later needs one-click installation, bundled MCP config, or richer distribution metadata, package it as a Codex plugin.
 
 ### Optional MCP Tools
 
@@ -59,8 +88,8 @@ Codex MCP example:
 ```toml
 [mcp_servers.litminer]
 command = "python"
-args = ["C:/Users/your-name/.claude/skills/litminer/sources/mcp/server.py"]
-cwd = "C:/Users/your-name/.claude/skills/litminer"
+args = ["C:/Users/your-name/.agents/skills/litminer/sources/mcp/server.py"]
+cwd = "C:/Users/your-name/.agents/skills/litminer"
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
@@ -74,21 +103,48 @@ Official references:
 
 - Claude Code Skills: <https://docs.claude.com/en/docs/claude-code/skills>
 - Claude Code MCP: <https://docs.claude.com/en/docs/claude-code/mcp>
+- Codex Agent Skills: <https://developers.openai.com/codex/skills>
 - Codex config reference: <https://developers.openai.com/codex/config-reference#configtoml>
+- Codex plugins: <https://developers.openai.com/codex/plugins/build>
 
-## Install
+## Python Environment And Isolation
 
-Litminer uses Python 3.10+ and has no runtime dependencies outside the standard library.
+Installing or discovering the skill does not require `pip install`. The clone commands above only place Litminer repository files in the skills directory; they do not write into global `site-packages` or change the user's Python configuration.
+
+Running scripts or the MCP server requires Python 3.10+. Litminer has no runtime dependencies outside the Python standard library, so you can run these directly from the Litminer directory:
 
 ```bash
+python engine/run_lit_search.py --help
+python sources/mcp/test_server.py
+```
+
+Use `pip install` only when you want console scripts or development tools such as Ruff and mypy. To avoid polluting the user's machine, create a local virtual environment inside the Litminer clone:
+
+```bash
+# macOS / Linux
+cd ~/.claude/skills/litminer  # or ~/.agents/skills/litminer
+python -m venv .venv
+source .venv/bin/activate
 python -m pip install -e .
 ```
 
-Development tools:
+```powershell
+# Windows PowerShell
+cd "$HOME\.claude\skills\litminer"  # or "$HOME\.agents\skills\litminer"
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+```
+
+Install development and verification tools only inside an activated `.venv`:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
+
+`.venv/` is ignored by Git. If you configure MCP, you may point the MCP `command` at the virtualenv Python for stable execution, for example `.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on macOS/Linux.
+
+The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `engine/`, `sources/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
 
 Optional API contact environment variables:
 

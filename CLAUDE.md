@@ -43,6 +43,17 @@ Litminer is domain-neutral. The Agent derives queries, year ranges, required con
 
 Configuration is operational, not semantic.
 
+Installation and environment policy:
+
+- Treat `git clone .../Litminer.git` into a scanned skills directory as sufficient for skill discovery.
+- For Claude Code, prefer `~/.claude/skills/litminer` or a project-local `.claude/skills/litminer`.
+- For Codex, prefer `$HOME/.agents/skills/litminer` or a project-local `.agents/skills/litminer`.
+- Do not present global `pip install -e .` as a required user step.
+- Run scripts directly with Python 3.10+ when possible; runtime code is intentionally stdlib-only.
+- If package installation is needed for console scripts or development tools, create a `.venv` inside the Litminer clone and install there.
+- If MCP is configured, prefer pointing the MCP command at the `.venv` Python when a virtualenv exists.
+- Do not document hand-copying a subset of files as an install method unless the project ships a dedicated release package or plugin.
+
 Allowed in config:
 
 - source/channel toggles
