@@ -234,7 +234,7 @@ Run after code changes:
 python -m compileall engine sources -q
 python -m ruff check engine sources test
 python -m mypy engine sources
-python -m unittest test.test_litminer_core
+python -m unittest discover -s test -p "test_*.py"
 python sources/mcp/test_server.py
 ```
 

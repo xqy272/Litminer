@@ -24,4 +24,4 @@ jobs:
       - name: Type Check
         run: python -m mypy engine sources
       - name: Test
-        run: python -m unittest test.test_litminer_core
+        run: python -m unittest discover -s test -p "test_*.py"
