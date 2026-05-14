@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from litminer.engine.common import write_csv_atomic
+from litminer.sources.api.errors import ProviderSearchError
 
 # Configuration
 
@@ -40,22 +41,8 @@ USER_AGENT = "litminer/1.0"
 DEFAULT_MAILTO = os.environ.get("OPENALEX_MAILTO") or os.environ.get("LITMINER_CONTACT_EMAIL") or ""
 
 
-class ProviderSearchError(RuntimeError):
-    """Raised when a provider query fails, preserving any rows already fetched."""
-
-    def __init__(
-        self,
-        message: str,
-        partial_results: list[dict[str, str]] | None = None,
-        status: str = "error",
-    ) -> None:
-        super().__init__(message)
-        self.partial_results = partial_results or []
-        self.status = status
-
 # Field mapping: OpenAlex JSON path to uniform CSV column
 # Each value is a callable that extracts the field from the work dict.
-FIELD_MAP: dict[str, Any] = {}
 OUTPUT_FIELDS = [
     "title",
     "doi",
@@ -70,24 +57,6 @@ OUTPUT_FIELDS = [
     "discovery_source",
     "discovery_query",
 ]
-
-
-def _init_field_map() -> None:
-    """Lazy-init the field map so functions are defined first."""
-    FIELD_MAP.update({
-        "title": lambda w: w.get("title", ""),
-        "doi": lambda w: _extract_doi(w),
-        "publication_year": lambda w: str(w.get("publication_year", "")),
-        "journal": lambda w: _extract_journal(w),
-        "abstract": lambda w: _extract_abstract(w),
-        "article_type": lambda w: w.get("type", ""),
-        "cited_by_count": lambda w: str(w.get("cited_by_count", "")),
-        "authors": lambda w: _extract_authors(w),
-        "openalex_id": lambda w: w.get("id", ""),
-        "landing_page_url": lambda w: _extract_landing_page_url(w),
-        "discovery_source": lambda w: "openalex",
-        "discovery_query": lambda w: "",
-    })
 
 
 def _extract_doi(work: dict) -> str:
@@ -160,6 +129,22 @@ def _extract_authors(work: dict) -> str:
     return "; ".join(names)
 
 
+FIELD_MAP: dict[str, Any] = {
+    "title": lambda w: w.get("title", ""),
+    "doi": lambda w: _extract_doi(w),
+    "publication_year": lambda w: str(w.get("publication_year", "")),
+    "journal": lambda w: _extract_journal(w),
+    "abstract": lambda w: _extract_abstract(w),
+    "article_type": lambda w: w.get("type", ""),
+    "cited_by_count": lambda w: str(w.get("cited_by_count", "")),
+    "authors": lambda w: _extract_authors(w),
+    "openalex_id": lambda w: w.get("id", ""),
+    "landing_page_url": lambda w: _extract_landing_page_url(w),
+    "discovery_source": lambda w: "openalex",
+    "discovery_query": lambda w: "",
+}
+
+
 # HTTP helpers
 
 def _build_url(query: str, year_from: int | None, year_to: int | None, page: int, per_page: int,
@@ -196,9 +181,6 @@ def _fetch_json(url: str) -> dict:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                if resp.status in (403, 409):
-                    body = resp.read().decode("utf-8", errors="replace")
-                    raise RuntimeError(f"HTTP {resp.status} (not retryable): {body[:200]}")
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (403, 409):
@@ -232,7 +214,6 @@ def search(query: str, year_from: int | None = None, year_to: int | None = None,
     Handles pagination automatically. Stops when max_results is reached
     or when no more results are available.
     """
-    _init_field_map()
     results: list[dict[str, str]] = []
     seen_dois: set[str] = set()
     page = 1

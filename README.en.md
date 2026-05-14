@@ -270,6 +270,8 @@ The default runtime config is [config/default.json](config/default.json). Do not
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
     "strict_discovery": false,
+    "parallel_providers": false,
+    "provider_workers": null,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -326,6 +328,7 @@ Publisher-related settings:
 - `queue_priorities` / `--queue-priorities`: triage priorities included in `publisher_queue.csv`.
 - `require_doi_for_queue` / `--allow-missing-doi`: by default, a DOI is required for publisher queueing; use `--allow-missing-doi` only when explicitly needed.
 - `strict_discovery` / `--strict-discovery`: fail the workflow when API provider errors make the candidate set unreliable instead of only producing an empty-result report.
+- `parallel_providers` / `--parallel-providers`: optionally run different API providers for the same query concurrently. This uses stdlib threads and keeps calls to the same provider serial across queries.
 - `openalex_work_types` / `--openalex-work-types`: controls OpenAlex work type filtering. The default is `article`; pass `all` to disable the type filter.
 - `queue_strict_only` / `--queue-strict-only` / `--queue-all-metric-statuses`: with `--min-if`, Litminer defaults to queueing only metric-pass rows. Use queue-all mode when you want annotation without hard filtering.
 - `publisher_probe` / `--probe-publishers`: lightweight reachability and PDF/SI-link probing only. It does not parse PDFs or bypass paywalls.

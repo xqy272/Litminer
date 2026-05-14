@@ -299,6 +299,8 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
     "strict_discovery": false,
+    "parallel_providers": false,
+    "provider_workers": null,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -355,6 +357,7 @@ python -m litminer.engine.run_lit_search \
 - `queue_priorities` / `--queue-priorities`：决定哪些 triage 优先级进入 `publisher_queue.csv`。
 - `require_doi_for_queue` / `--allow-missing-doi`：默认要求 DOI 才进入出版社队列；如果明确允许缺 DOI，可用 `--allow-missing-doi`。
 - `strict_discovery` / `--strict-discovery`：当 API 来源报错导致候选集不可靠时让流程失败，而不是只生成空结果报告。
+- `parallel_providers` / `--parallel-providers`：可选地并行执行同一 query 下的不同 API provider；实现使用标准库线程，同一 provider 在不同 query 间仍保持串行。
 - `openalex_work_types` / `--openalex-work-types`：控制 OpenAlex 的 work type 过滤，默认 `article`；可传 `all` 关闭类型过滤。
 - `queue_strict_only` / `--queue-strict-only` / `--queue-all-metric-statuses`：使用 `--min-if` 时默认只把 metric-pass 行送入 queue；如只想标注不硬过滤，可显式选择 queue all metric statuses。
 - `publisher_probe` / `--probe-publishers`：只做轻量页面可达性、PDF/SI 链接提示探测，不解析 PDF，也不绕过付费墙。

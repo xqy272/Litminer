@@ -65,6 +65,7 @@ def main():
             "litminer_search_arxiv",
             "litminer_search_europe_pmc",
             "litminer_verify_crossref",
+            "litminer_batch_verify_crossref",
             "litminer_search_crossref_title",
             "litminer_batch_crossref_title_search",
             "litminer_dedupe",
@@ -76,6 +77,7 @@ def main():
             "litminer_probe_publishers",
             "litminer_import_websearch",
             "litminer_processing_report",
+            "litminer_read_csv_summary",
             "litminer_run_lit_search",
         ]
         for name in expected:

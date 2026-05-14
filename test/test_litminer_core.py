@@ -16,19 +16,25 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from litminer.engine import api_discovery
+from litminer.engine import build_publisher_queue
+from litminer.engine import common
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
+from litminer.engine import journal_metrics
 from litminer.engine import offline_smoke
 from litminer.engine import publisher_probe
 from litminer.engine import processing_report
 from litminer.engine import run_lit_search
 from litminer.engine import semantic_triage
+from litminer.engine import websearch_import
 from litminer.engine import workspace
 from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import europe_pmc_search
+from litminer.sources.api import openalex_search
 from litminer.sources.api import semantic_scholar_search
 from litminer.sources.api import unpaywall_lookup
+from litminer.sources.api.errors import ProviderSearchError
 from litminer.sources.mcp import server as mcp_server
 
 
@@ -102,6 +108,31 @@ class LitminerCoreTests(unittest.TestCase):
                 trace_rows = list(csv.DictReader(handle))
             self.assertEqual(trace_rows[0]["year_to"], "2026")
 
+    def test_api_discovery_can_parallelize_provider_calls_preserving_trace_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+
+            def fake_run_provider(provider, *args, **kwargs):
+                return [{"title": provider, "doi": f"10.1234/{provider}"}]
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=fake_run_provider) as run_provider:
+                result = api_discovery.discover_api(
+                    ["query"],
+                    output,
+                    sources=["openalex", "arxiv"],
+                    parallel_providers=True,
+                    provider_workers=2,
+                    trace_csv=trace,
+                )
+
+            self.assertEqual(run_provider.call_count, 2)
+            self.assertEqual(result["candidate_count"], 2)
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual([row["provider"] for row in trace_rows], ["openalex", "arxiv"])
+
     def test_openalex_work_type_filter_is_configurable(self) -> None:
         article_url = api_discovery.openalex_search._build_url(
             "query",
@@ -122,6 +153,31 @@ class LitminerCoreTests(unittest.TestCase):
 
         self.assertIn("type%3Aarticle%7Creview", article_url)
         self.assertNotIn("filter=", all_url)
+
+    def test_provider_search_error_is_shared(self) -> None:
+        self.assertIs(openalex_search.ProviderSearchError, ProviderSearchError)
+        self.assertIs(semantic_scholar_search.ProviderSearchError, ProviderSearchError)
+        self.assertIs(arxiv_search.ProviderSearchError, ProviderSearchError)
+        self.assertIs(europe_pmc_search.ProviderSearchError, ProviderSearchError)
+
+    def test_common_helpers_preserve_doi_parentheses_and_write_csv(self) -> None:
+        self.assertEqual(
+            common.normalize_doi("https://doi.org/10.1002/(SICI)1097-4571(199912)50:6)"),
+            "10.1002/(sici)1097-4571(199912)50:6)",
+        )
+        self.assertEqual(common.normalize_doi("doi:10.1234/example)."), "10.1234/example")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out.csv"
+            common.write_csv_atomic(
+                [{"title": "Paper", "doi": "10.1234/example"}],
+                output,
+                fallback_fields=["title", "doi"],
+            )
+            fieldnames, rows = common.read_csv_rows(output)
+
+        self.assertEqual(fieldnames, ["title", "doi"])
+        self.assertEqual(rows[0]["doi"], "10.1234/example")
 
     def test_semantic_scholar_429_uses_rate_limited_status(self) -> None:
         headers = Message()
@@ -360,6 +416,15 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(triaged["matched_required"], "")
         self.assertIn("external_validation", triaged["missing_required"])
 
+    def test_semantic_triage_pattern_cache_is_bounded(self) -> None:
+        semantic_triage._PATTERN_CACHE.clear()
+        with patch.object(semantic_triage, "MAX_PATTERN_CACHE_SIZE", 3):
+            for index in range(5):
+                semantic_triage.compile_pattern(f"pattern {index}")
+
+        self.assertLessEqual(len(semantic_triage._PATTERN_CACHE), 3)
+        self.assertNotIn(("pattern 0", True), semantic_triage._PATTERN_CACHE)
+
     def test_dedupe_merges_complementary_duplicate_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -381,6 +446,86 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["duplicate_count"], "2")
             self.assertIn("openalex", rows[0]["merged_discovery_sources"])
             self.assertIn("semantic_scholar", rows[0]["merged_discovery_sources"])
+
+    def test_journal_metrics_match_indexes_and_avoid_substring_matches(self) -> None:
+        metric = journal_metrics.Metric(
+            journal="Chemical Engineering Journal",
+            aliases=["CEJ"],
+            issns=["12345678"],
+            impact_factor="12.3",
+            metric_year="2026",
+            metric_source="verified",
+            source_url="https://example.org",
+            last_checked="2026-05-14",
+            confidence="high",
+        )
+        indexes = journal_metrics.build_indexes([metric])
+
+        self.assertIs(
+            journal_metrics.match_metric({"issn": "1234-5678"}, [metric], indexes=indexes),
+            metric,
+        )
+        self.assertIs(
+            journal_metrics.match_metric({"journal": "CEJ"}, [metric], indexes=indexes),
+            metric,
+        )
+        self.assertIsNone(
+            journal_metrics.match_metric(
+                {"journal": "Chemical Engineering Journal Advances"},
+                [metric],
+                indexes=indexes,
+            )
+        )
+
+    def test_build_publisher_queue_filters_metadata_and_keeps_requested_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "triaged.csv"
+            output_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,triage_priority,triage_score,metadata_status,candidate_status,crossref_status\n"
+                "Ready,10.1234/ready,high,7.0,ok,ready_for_verification,verified\n"
+                "Blocked,10.1234/blocked,high,6.0,blocked,metadata_blocked,lookup_failed\n"
+                "No DOI,,high,5.0,ok,ready_for_verification,verified\n",
+                encoding="utf-8",
+            )
+
+            counts = build_publisher_queue.build_queue(
+                input_csv,
+                output_csv,
+                priorities={"high"},
+                screenshot_root=str(tmp_path / "screens"),
+                require_doi=True,
+                fields_needed=["claim", "dataset"],
+            )
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(counts["queued"], 1)
+        self.assertEqual(counts["skipped_metadata_blocked"], 1)
+        self.assertEqual(counts["skipped_missing_doi"], 1)
+        self.assertEqual(rows[0]["doi"], "10.1234/ready")
+        self.assertEqual(rows[0]["fields_needed"], "claim; dataset")
+
+    def test_websearch_import_extracts_doi_from_url_and_marks_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "web.csv"
+            output_csv = tmp_path / "out.csv"
+            input_csv.write_text(
+                "result_title,link,snippet\n"
+                "A useful 2025 paper,https://doi.org/10.5555/example,Snippet text\n",
+                encoding="utf-8",
+            )
+
+            counts = websearch_import.import_websearch(input_csv, output_csv, default_query="useful paper")
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(counts["with_doi"], 1)
+        self.assertEqual(rows[0]["doi"], "10.5555/example")
+        self.assertEqual(rows[0]["publication_year"], "2025")
+        self.assertEqual(rows[0]["websearch_status"], "lead_unverified")
 
     def test_runtime_config_supplies_infrastructure_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -716,6 +861,54 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertIn("result", response)
             self.assertTrue((workspace / "out" / "deduped.csv").exists())
 
+    def test_mcp_lists_new_agent_summary_tools(self) -> None:
+        response = mcp_server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        })
+
+        names = {tool["name"] for tool in response["result"]["tools"]}
+        self.assertIn("litminer_batch_verify_crossref", names)
+        self.assertIn("litminer_read_csv_summary", names)
+
+    def test_mcp_batch_verify_crossref(self) -> None:
+        with patch("litminer.sources.api.crossref_verify.verify_doi", return_value={"crossref_doi": "10.1234/a"}):
+            result = mcp_server.tool_batch_verify_crossref({
+                "dois": ["https://doi.org/10.1234/a", "10.1234/a", ""],
+            })
+
+        self.assertEqual(result["verified"], 1)
+        self.assertEqual(result["skipped"], 2)
+        self.assertEqual(result["results"][0]["doi"], "10.1234/a")
+
+    def test_mcp_read_csv_summary_filters_and_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            csv_path = root / "triaged.csv"
+            csv_path.write_text(
+                "title,doi,triage_priority,candidate_status,metadata_status,triage_score\n"
+                "A,10.1/a,high,ready,ok,5\n"
+                "B,10.1/b,medium,ready,ok,4\n"
+                "C,10.1/c,high,check,blocked,3\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(root)}):
+                result = mcp_server.tool_read_csv_summary({
+                    "input_csv": "triaged.csv",
+                    "priority": "high",
+                    "page_size": 1,
+                    "page": 2,
+                    "columns": ["title", "triage_priority", "metadata_status"],
+                })
+
+        self.assertEqual(result["row_count"], 3)
+        self.assertEqual(result["filtered_count"], 2)
+        self.assertEqual(result["total_pages"], 2)
+        self.assertEqual(result["rows"][0]["title"], "C")
+        self.assertEqual(result["counts"]["triage_priority"]["high"], 2)
+
     def test_crossref_title_recovery_uses_context(self) -> None:
         candidates = [
             {
@@ -760,6 +953,36 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(counts["title_lookup_failed"], 10)
             sleep.assert_called_once_with(0.5)
 
+    def test_crossref_retry_respects_retry_after_header(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "0"
+        first = urllib.error.HTTPError(
+            url="https://api.crossref.org/works/10.1234/example",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=headers,
+            fp=None,
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"message": {"DOI": "10.1234/example", "title": ["Example"]}}'
+
+        with (
+            patch("litminer.sources.api.crossref_verify.urllib.request.urlopen", side_effect=[first, Response()]),
+            patch("litminer.sources.api.crossref_verify.time.sleep") as sleep,
+        ):
+            data = crossref_verify._fetch_json("https://api.crossref.org/works/10.1234/example")
+
+        self.assertEqual(data["message"]["DOI"], "10.1234/example")
+        sleep.assert_called_once_with(0.0)
+
     def test_publisher_probe_marks_heuristic_status(self) -> None:
         row = publisher_probe.probe_row({})
         self.assertEqual(row["access_status"], "missing_url")
@@ -770,6 +993,15 @@ class LitminerCoreTests(unittest.TestCase):
         row = publisher_probe.probe_row({"publisher_url": "http://127.0.0.1:9/private"})
         self.assertEqual(row["access_status"], "blocked_url")
         self.assertIn("Blocked", row["publisher_probe_error"])
+
+    def test_publisher_probe_caches_dns_resolution(self) -> None:
+        publisher_probe._DNS_CACHE.clear()
+        infos = [(0, 0, 0, "", ("93.184.216.34", 0))]
+        with patch("litminer.engine.publisher_probe.socket.getaddrinfo", return_value=infos) as getaddrinfo:
+            publisher_probe.validate_public_http_url("https://example.org/a")
+            publisher_probe.validate_public_http_url("https://example.org/b")
+
+        getaddrinfo.assert_called_once_with("example.org", None)
 
     def test_doctor_validates_config_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,7 +20,9 @@ import json
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -62,6 +64,8 @@ RUNTIME_DEFAULTS = {
         "publisher_probe_limit": None,
         "publisher_probe_sleep": 0.5,
         "strict_discovery": False,
+        "parallel_providers": False,
+        "provider_workers": None,
         "unpaywall_sleep": 0.1,
     },
     "outputs": {
@@ -83,6 +87,33 @@ RUNTIME_DEFAULTS = {
         "openalex_work_types": "article",
     },
 }
+
+
+@dataclass
+class RuntimeConfig:
+    """Typed view over the runtime infrastructure config."""
+
+    raw: dict[str, Any] = field(default_factory=dict)
+    channels: dict[str, Any] = field(default_factory=dict)
+    limits: dict[str, Any] = field(default_factory=dict)
+    outputs: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
+    api: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_path(cls, path: Path | None = None) -> "RuntimeConfig":
+        raw = load_runtime_config(path)
+        return cls(
+            raw=raw,
+            channels=dict(raw.get("channels", {})),
+            limits=dict(raw.get("limits", {})),
+            outputs=dict(raw.get("outputs", {})),
+            evidence=dict(raw.get("evidence", {})),
+            api=dict(raw.get("api", {})),
+        )
+
+    def output_path(self, key: str, default: str) -> Path:
+        return workspace.resolve_workspace_path(self.outputs.get(key) or default)
 
 
 def write_rows(rows: list[dict[str, str]], output: Path,
@@ -115,19 +146,16 @@ def load_runtime_config(path: Path | None = None) -> dict:
 
 
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
-    config = load_runtime_config(getattr(args, "config", None))
-    channels = config.get("channels", {})
-    limits = config.get("limits", {})
-    outputs = config.get("outputs", {})
-    evidence = config.get("evidence", {})
-    api = config.get("api", {})
+    config = RuntimeConfig.from_path(getattr(args, "config", None))
+    channels = config.channels
+    limits = config.limits
+    evidence = config.evidence
+    api = config.api
 
     if getattr(args, "output_dir", None) is None:
-        args.output_dir = workspace.resolve_workspace_path(outputs.get("default_output_dir") or workspace.DEFAULT_RUN_DIR)
+        args.output_dir = config.output_path("default_output_dir", workspace.DEFAULT_RUN_DIR)
     if getattr(args, "screenshot_root", None) is None:
-        args.screenshot_root = workspace.resolve_workspace_path(
-            outputs.get("screenshot_root") or workspace.DEFAULT_SCREENSHOT_ROOT
-        )
+        args.screenshot_root = config.output_path("screenshot_root", workspace.DEFAULT_SCREENSHOT_ROOT)
     discovery_sources_from_config = getattr(args, "discovery_sources", None) is None
     if discovery_sources_from_config:
         sources = []
@@ -173,6 +201,10 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.unpaywall_sleep = float(limits.get("unpaywall_sleep", 0.1))
     if getattr(args, "strict_discovery", None) is None:
         args.strict_discovery = bool(limits.get("strict_discovery", False))
+    if getattr(args, "parallel_providers", None) is None:
+        args.parallel_providers = bool(limits.get("parallel_providers", False))
+    if getattr(args, "provider_workers", None) is None:
+        args.provider_workers = limits.get("provider_workers")
 
     if getattr(args, "queue_priorities", None) is None:
         args.queue_priorities = evidence.get("queue_priorities") or "high,medium,needs_review"
@@ -269,6 +301,8 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         openalex_mailto=args.openalex_mailto,
         openalex_work_types=args.openalex_work_types,
         strict_discovery=args.strict_discovery,
+        parallel_providers=args.parallel_providers,
+        provider_workers=args.provider_workers,
         trace_csv=out_dir / "api_discovery_trace.csv",
         report_md=out_dir / "api_discovery_report.md",
     )
@@ -455,6 +489,142 @@ def make_report(out_dir: Path, counts: dict[str, int],
     write_text_atomic(out_dir / "feasibility_report.md", "\n".join(lines) + "\n")
 
 
+def run_crossref_stage(input_path: Path, out_dir: Path,
+                       args: argparse.Namespace,
+                       counts: dict[str, int]) -> Path:
+    if args.skip_crossref:
+        return input_path
+    output_path = out_dir / "verified_candidates.csv"
+    crossref_counts = crossref_verify.verify_csv(
+        input_path,
+        output_path,
+        strict=False,
+        title_lookup=True,
+    )
+    counts["crossref_verified"] = crossref_counts.get("verified", 0)
+    counts["crossref_title_recovered"] = crossref_counts.get("title_recovered", 0)
+    counts["crossref_mismatch"] = crossref_counts.get("mismatch", 0)
+    counts["crossref_lookup_failed"] = crossref_counts.get("lookup_failed", 0)
+    counts["crossref_missing_doi"] = crossref_counts.get("missing_doi", 0)
+    counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
+    return output_path
+
+
+def run_triage_stage(input_path: Path, out_dir: Path,
+                     args: argparse.Namespace,
+                     counts: dict[str, int]) -> Path:
+    output_path = out_dir / "triaged_candidates.csv"
+    triage_counts = semantic_triage.triage_csv(
+        input_path,
+        output_path,
+        profile_path=profile_path(args),
+        required_concepts=args.required_concept,
+        optional_concepts=args.optional_concept,
+        negative_concepts=args.negative_concept,
+        year_from=args.year_from,
+        year_to=args.year_to,
+        require_doi=not args.allow_missing_doi,
+        exclude_article_types=args.exclude_article_type,
+    )
+    counts["triaged"] = triage_counts["rows"]
+    counts["triage_high"] = triage_counts["high"]
+    counts["triage_medium"] = triage_counts["medium"]
+    counts["triage_needs_review"] = triage_counts["needs_review"]
+    counts["triage_low"] = triage_counts["low"]
+    counts["metadata_blocked"] = triage_counts["metadata_blocked"]
+    validate_stage.validate_stage(
+        output_path,
+        out_dir / "triage_validation.md",
+        "triage",
+    )
+    return output_path
+
+
+def run_unpaywall_stage(input_path: Path, out_dir: Path,
+                        args: argparse.Namespace,
+                        counts: dict[str, int]) -> Path:
+    if not args.enrich_unpaywall:
+        return input_path
+    output_path = out_dir / "oa_annotated_candidates.csv"
+    unpaywall_counts = unpaywall_lookup.annotate_csv(
+        input_path,
+        output_path,
+        email=args.unpaywall_email,
+        sleep_s=args.unpaywall_sleep,
+    )
+    counts["unpaywall_ok"] = unpaywall_counts.get("ok", 0)
+    counts["unpaywall_skipped_missing_email"] = unpaywall_counts.get("skipped_missing_email", 0)
+    counts["unpaywall_missing_doi"] = unpaywall_counts.get("missing_doi", 0)
+    counts["unpaywall_not_found"] = unpaywall_counts.get("not_found", 0)
+    counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
+    return output_path
+
+
+def run_metrics_stage(input_path: Path, out_dir: Path,
+                      args: argparse.Namespace,
+                      counts: dict[str, int]) -> tuple[Path, Path | None, Path | None]:
+    strict_path: Path | None = None
+    backup_path: Path | None = None
+    metrics_requested = args.min_if is not None or args.metrics
+    if not metrics_requested or args.skip_journal_metrics:
+        return input_path, strict_path, backup_path
+
+    annotated = out_dir / "metrics_annotated_candidates.csv"
+    strict_path = out_dir / "strict_candidates.csv"
+    backup_path = out_dir / "backup_candidates.csv"
+    journal_metrics.filter_csv(
+        input_path,
+        annotated,
+        metrics_path=args.metrics or journal_metrics.DEFAULT_METRICS,
+        min_if=args.min_if,
+        pass_output=strict_path,
+        backup_output=backup_path,
+    )
+    counts["metric_pass"] = len(read_rows(strict_path))
+    counts["metric_backup"] = len(read_rows(backup_path))
+    return (strict_path if args.queue_strict_only else annotated), strict_path, backup_path
+
+
+def run_queue_stage(input_path: Path, out_dir: Path,
+                    args: argparse.Namespace,
+                    counts: dict[str, int],
+                    queue_priorities: set[str]) -> Path:
+    output_path = out_dir / "publisher_queue.csv"
+    queue_counts = build_publisher_queue.build_queue(
+        input_path,
+        output_path,
+        decisions=None,
+        priorities=queue_priorities,
+        screenshot_root=str(args.screenshot_root),
+        require_doi=not args.allow_missing_doi,
+        include_metadata_blocked=args.include_metadata_blocked,
+        fields_needed=args.fields_needed,
+        page_required_fields=args.page_required_field,
+    )
+    counts["publisher_queue"] = queue_counts["queued"]
+    validate_stage.validate_stage(
+        output_path,
+        out_dir / "publisher_queue_validation.md",
+        "queue",
+    )
+    return output_path
+
+
+def run_publisher_probe_stage(input_path: Path, out_dir: Path,
+                              args: argparse.Namespace,
+                              counts: dict[str, int]) -> None:
+    if not args.probe_publishers:
+        return
+    probed = out_dir / "publisher_queue_probed.csv"
+    publisher_counts = publisher_probe.probe_csv(
+        input_path,
+        probed,
+        limit=args.probe_limit,
+        sleep_s=args.probe_sleep,
+    )
+    counts["publisher_probed"] = sum(publisher_counts.values())
+
+
 def run(args: argparse.Namespace) -> dict[str, str]:
     args = normalize_args(args)
     warnings = preflight_warnings(args)
@@ -482,46 +652,8 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     dedupe_papers.dedupe(merged, deduped, "doi", "title")
     counts["deduped"] = len(read_rows(deduped))
 
-    triage_input = deduped
-    if not args.skip_crossref:
-        triage_input = out_dir / "verified_candidates.csv"
-        crossref_counts = crossref_verify.verify_csv(
-            deduped,
-            triage_input,
-            strict=False,
-            title_lookup=True,
-        )
-        counts["crossref_verified"] = crossref_counts.get("verified", 0)
-        counts["crossref_title_recovered"] = crossref_counts.get("title_recovered", 0)
-        counts["crossref_mismatch"] = crossref_counts.get("mismatch", 0)
-        counts["crossref_lookup_failed"] = crossref_counts.get("lookup_failed", 0)
-        counts["crossref_missing_doi"] = crossref_counts.get("missing_doi", 0)
-        counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
-
-    triaged = out_dir / "triaged_candidates.csv"
-    triage_counts = semantic_triage.triage_csv(
-        triage_input,
-        triaged,
-        profile_path=profile_path(args),
-        required_concepts=args.required_concept,
-        optional_concepts=args.optional_concept,
-        negative_concepts=args.negative_concept,
-        year_from=args.year_from,
-        year_to=args.year_to,
-        require_doi=not args.allow_missing_doi,
-        exclude_article_types=args.exclude_article_type,
-    )
-    counts["triaged"] = triage_counts["rows"]
-    counts["triage_high"] = triage_counts["high"]
-    counts["triage_medium"] = triage_counts["medium"]
-    counts["triage_needs_review"] = triage_counts["needs_review"]
-    counts["triage_low"] = triage_counts["low"]
-    counts["metadata_blocked"] = triage_counts["metadata_blocked"]
-    validate_stage.validate_stage(
-        triaged,
-        out_dir / "triage_validation.md",
-        "triage",
-    )
+    triage_input = run_crossref_stage(deduped, out_dir, args, counts)
+    triaged = run_triage_stage(triage_input, out_dir, args, counts)
 
     queue_priorities = parse_set(args.queue_priorities, DEFAULT_QUEUE_PRIORITIES)
     selected = out_dir / "selected_candidates.csv"
@@ -538,69 +670,10 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         if not args.skip_crossref else len(read_rows(selected))
     )
 
-    if args.enrich_unpaywall:
-        oa_annotated = out_dir / "oa_annotated_candidates.csv"
-        unpaywall_counts = unpaywall_lookup.annotate_csv(
-            verified,
-            oa_annotated,
-            email=args.unpaywall_email,
-            sleep_s=args.unpaywall_sleep,
-        )
-        counts["unpaywall_ok"] = unpaywall_counts.get("ok", 0)
-        counts["unpaywall_skipped_missing_email"] = unpaywall_counts.get("skipped_missing_email", 0)
-        counts["unpaywall_missing_doi"] = unpaywall_counts.get("missing_doi", 0)
-        counts["unpaywall_not_found"] = unpaywall_counts.get("not_found", 0)
-        counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
-        verified = oa_annotated
-
-    strict_path: Path | None = None
-    backup_path: Path | None = None
-    metric_input = verified
-    metrics_requested = args.min_if is not None or args.metrics
-    if metrics_requested and not args.skip_journal_metrics:
-        annotated = out_dir / "metrics_annotated_candidates.csv"
-        strict_path = out_dir / "strict_candidates.csv"
-        backup_path = out_dir / "backup_candidates.csv"
-        journal_metrics.filter_csv(
-            verified,
-            annotated,
-            metrics_path=args.metrics or journal_metrics.DEFAULT_METRICS,
-            min_if=args.min_if,
-            pass_output=strict_path,
-            backup_output=backup_path,
-        )
-        counts["metric_pass"] = len(read_rows(strict_path))
-        counts["metric_backup"] = len(read_rows(backup_path))
-        metric_input = strict_path if args.queue_strict_only else annotated
-
-    publisher_queue = out_dir / "publisher_queue.csv"
-    queue_counts = build_publisher_queue.build_queue(
-        metric_input,
-        publisher_queue,
-        decisions=None,
-        priorities=queue_priorities,
-        screenshot_root=str(args.screenshot_root),
-        require_doi=not args.allow_missing_doi,
-        include_metadata_blocked=args.include_metadata_blocked,
-        fields_needed=args.fields_needed,
-        page_required_fields=args.page_required_field,
-    )
-    counts["publisher_queue"] = queue_counts["queued"]
-    validate_stage.validate_stage(
-        publisher_queue,
-        out_dir / "publisher_queue_validation.md",
-        "queue",
-    )
-
-    if args.probe_publishers:
-        probed = out_dir / "publisher_queue_probed.csv"
-        publisher_counts = publisher_probe.probe_csv(
-            publisher_queue,
-            probed,
-            limit=args.probe_limit,
-            sleep_s=args.probe_sleep,
-        )
-        counts["publisher_probed"] = sum(publisher_counts.values())
+    verified = run_unpaywall_stage(verified, out_dir, args, counts)
+    metric_input, strict_path, backup_path = run_metrics_stage(verified, out_dir, args, counts)
+    publisher_queue = run_queue_stage(metric_input, out_dir, args, counts, queue_priorities)
+    run_publisher_probe_stage(publisher_queue, out_dir, args, counts)
 
     make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities, warnings=warnings)
     processing_report.write_report(out_dir, out_dir / "processing_report.md")
@@ -660,6 +733,13 @@ def main() -> None:
     parser.add_argument("--skip-crossref", action="store_true", default=None)
     parser.add_argument("--strict-discovery", action="store_true", default=None,
                         help="Fail when provider errors prevent a reliable candidate set")
+    parser.add_argument("--parallel-providers", action="store_true", default=None,
+                        help="Run different discovery providers for the same query concurrently")
+    parser.add_argument("--serial-providers", dest="parallel_providers",
+                        action="store_false",
+                        help="Disable provider concurrency even if config enables it")
+    parser.add_argument("--provider-workers", type=int, default=None,
+                        help="Max provider worker threads when --parallel-providers is set")
     parser.add_argument("--enrich-unpaywall", action="store_true", default=None,
                         help="Annotate verified DOI rows with Unpaywall OA links")
     parser.add_argument("--skip-unpaywall", action="store_true", default=None,

@@ -26,6 +26,7 @@ import urllib.request
 from pathlib import Path
 
 from litminer.engine.common import write_csv_atomic
+from litminer.sources.api.errors import ProviderSearchError
 
 # Configuration
 
@@ -58,20 +59,6 @@ OUTPUT_FIELDS = [
     "discovery_query",
     "source_note",
 ]
-
-
-class ProviderSearchError(RuntimeError):
-    """Raised when a provider query fails, preserving any rows already fetched."""
-
-    def __init__(
-        self,
-        message: str,
-        partial_results: list[dict[str, str]] | None = None,
-        status: str = "error",
-    ) -> None:
-        super().__init__(message)
-        self.partial_results = partial_results or []
-        self.status = status
 
 
 class RateLimitError(RuntimeError):

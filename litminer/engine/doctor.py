@@ -42,6 +42,8 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "publisher_probe_limit": (int, type(None)),
         "publisher_probe_sleep": (int, float),
         "strict_discovery": (bool,),
+        "parallel_providers": (bool,),
+        "provider_workers": (int, type(None)),
         "unpaywall_sleep": (int, float),
     },
     "outputs": {
@@ -117,7 +119,13 @@ def validate_config(path: Path) -> list[Check]:
 
     limits = data.get("limits", {})
     if isinstance(limits, dict):
-        for key in ("max_results_per_query", "semantic_query_limit", "semantic_max_results", "publisher_probe_limit"):
+        for key in (
+            "max_results_per_query",
+            "semantic_query_limit",
+            "semantic_max_results",
+            "publisher_probe_limit",
+            "provider_workers",
+        ):
             value = limits.get(key)
             if value is not None and isinstance(value, int) and value < 0:
                 checks.append(Check("config", "error", f"{key} must not be negative"))

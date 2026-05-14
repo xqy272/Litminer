@@ -26,7 +26,24 @@ def normalize_doi(value: object) -> str:
     """Normalize DOI-like text to lowercase bare DOI form."""
     text = cell_text(value).strip().lower()
     text = DOI_PREFIX_RE.sub("", text)
-    return text.strip().rstrip(".,;)[]")
+    return _strip_trailing_doi_punctuation(text.strip())
+
+
+def _strip_trailing_doi_punctuation(text: str) -> str:
+    """Strip prose punctuation without damaging balanced DOI parentheses."""
+    while text:
+        last = text[-1]
+        if last in ".,;":
+            text = text[:-1].rstrip()
+            continue
+        if last == ")" and "(" not in text:
+            text = text[:-1].rstrip()
+            continue
+        if last == "]" and "[" not in text:
+            text = text[:-1].rstrip()
+            continue
+        break
+    return text
 
 
 def fieldnames_from_rows(

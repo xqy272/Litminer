@@ -142,17 +142,6 @@ def match_metric(
     # Do not use substring matching here. It is too easy to turn
     # "Chemical Engineering Journal Advances" into "Chemical Engineering Journal".
     # All acceptable variants must be explicit aliases or ISSN matches.
-    normalized_names = [normalize_journal(name) for name in row_journal_names(row)]
-    for metric in metrics:
-        metric_names = [normalize_journal(metric.journal)] + [
-            normalize_journal(alias) for alias in metric.aliases
-        ]
-        for row_name in normalized_names:
-            if not row_name:
-                continue
-            for metric_name in metric_names:
-                if metric_name and row_name == metric_name:
-                    return metric
     return None
 
 

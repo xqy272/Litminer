@@ -13,8 +13,10 @@ import json
 import os
 import sys
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -169,6 +171,53 @@ def run_provider(provider: str, query: str, year_from: int | None,
     raise ValueError(f"Unsupported provider: {provider}")
 
 
+def _run_provider_call(
+    provider: str,
+    query_id: str,
+    query: str,
+    year_from: int | None,
+    year_to: int | None,
+    provider_max: int,
+    openalex_api_key: str | None,
+    openalex_mailto: str | None,
+    openalex_work_types: str | list[str] | None,
+) -> dict[str, Any]:
+    started_at = utc_now()
+    status = "ok"
+    error = ""
+    rows: list[dict[str, str]] = []
+    try:
+        rows = run_provider(
+            provider,
+            query,
+            year_from=year_from,
+            year_to=year_to,
+            max_results=provider_max,
+            openalex_api_key=openalex_api_key,
+            openalex_mailto=openalex_mailto,
+            openalex_work_types=openalex_work_types,
+        )
+    except Exception as exc:
+        rows = getattr(exc, "partial_results", []) or []
+        status = str(getattr(exc, "status", "error") or "error")
+        if rows and status == "error":
+            status = "partial_error"
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"WARNING: {provider} query {query_id} failed: {error}", file=sys.stderr)
+    if status == "ok" and not rows:
+        status = "empty_result"
+
+    return {
+        "provider": provider,
+        "provider_max": provider_max,
+        "rows": rows,
+        "status": status,
+        "error": error,
+        "started_at": started_at,
+        "ended_at": utc_now(),
+    }
+
+
 def discover_api(queries: list[str],
                  output_csv: Path,
                  sources: list[str] | None = None,
@@ -181,6 +230,8 @@ def discover_api(queries: list[str],
                   openalex_mailto: str | None = None,
                   openalex_work_types: str | list[str] | None = "article",
                   strict_discovery: bool = False,
+                  parallel_providers: bool = False,
+                  provider_workers: int | None = None,
                   trace_csv: Path | None = None,
                   report_md: Path | None = None,
                   run_id: str | None = None) -> dict[str, object]:
@@ -193,6 +244,7 @@ def discover_api(queries: list[str],
 
     for q_index, query in enumerate(queries, start=1):
         query_id = f"q{q_index:03d}"
+        plan: list[tuple[str, int]] = []
         for provider in providers:
             if provider == "semantic_scholar" and semantic_query_limit is not None:
                 if q_index > semantic_query_limit:
@@ -202,31 +254,46 @@ def discover_api(queries: list[str],
                 if provider == "semantic_scholar" and semantic_max_results is not None
                 else max_results_per_query
             )
-            started_at = utc_now()
-            status = "ok"
-            error = ""
-            rows: list[dict[str, str]] = []
-            try:
-                rows = run_provider(
+            plan.append((provider, provider_max))
+
+        if parallel_providers and len(plan) > 1:
+            workers = max(1, min(len(plan), provider_workers or len(plan)))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(
+                        _run_provider_call,
+                        provider,
+                        query_id,
+                        query,
+                        year_from,
+                        year_to,
+                        provider_max,
+                        openalex_api_key,
+                        openalex_mailto,
+                        openalex_work_types,
+                    )
+                    for provider, provider_max in plan
+                ]
+                provider_results = [future.result() for future in futures]
+        else:
+            provider_results = [
+                _run_provider_call(
                     provider,
+                    query_id,
                     query,
-                    year_from=year_from,
-                    year_to=year_to,
-                    max_results=provider_max,
-                    openalex_api_key=openalex_api_key,
-                    openalex_mailto=openalex_mailto,
-                    openalex_work_types=openalex_work_types,
+                    year_from,
+                    year_to,
+                    provider_max,
+                    openalex_api_key,
+                    openalex_mailto,
+                    openalex_work_types,
                 )
-            except Exception as exc:
-                partial_rows = getattr(exc, "partial_results", []) or []
-                rows = partial_rows
-                status = str(getattr(exc, "status", "error") or "error")
-                if rows and status == "error":
-                    status = "partial_error"
-                error = f"{type(exc).__name__}: {exc}"
-                print(f"WARNING: {provider} query {query_id} failed: {error}", file=sys.stderr)
-            if status == "ok" and not rows:
-                status = "empty_result"
+                for provider, provider_max in plan
+            ]
+
+        for provider_result in provider_results:
+            provider = str(provider_result["provider"])
+            rows = provider_result["rows"]
 
             for rank, row in enumerate(rows, start=1):
                 candidates.append(enrich_row(
@@ -246,12 +313,12 @@ def discover_api(queries: list[str],
                 "query": query,
                 "year_from": str(year_from or ""),
                 "year_to": str(year_to or ""),
-                "max_results": str(provider_max),
+                "max_results": str(provider_result["provider_max"]),
                 "returned_count": str(len(rows)),
-                "status": status,
-                "error": error,
-                "started_at": started_at,
-                "ended_at": utc_now(),
+                "status": str(provider_result["status"]),
+                "error": str(provider_result["error"]),
+                "started_at": str(provider_result["started_at"]),
+                "ended_at": str(provider_result["ended_at"]),
             })
 
     write_csv(candidates, output_csv, DEFAULT_OUTPUT_FIELDS)
@@ -375,6 +442,10 @@ def main() -> None:
                         help="OpenAlex work type filter. Comma/pipe-separated; use 'all' to disable.")
     parser.add_argument("--strict-discovery", action="store_true",
                         help="Fail if provider errors prevent a reliable candidate set")
+    parser.add_argument("--parallel-providers", action="store_true",
+                        help="Run different providers for the same query concurrently")
+    parser.add_argument("--provider-workers", type=int, default=None,
+                        help="Max provider worker threads when --parallel-providers is set")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--report-output", type=Path, default=None)
@@ -397,6 +468,8 @@ def main() -> None:
         openalex_mailto=args.openalex_mailto,
         openalex_work_types=args.openalex_work_types,
         strict_discovery=args.strict_discovery,
+        parallel_providers=args.parallel_providers,
+        provider_workers=args.provider_workers,
         trace_csv=args.trace_output,
         report_md=args.report_output,
     )

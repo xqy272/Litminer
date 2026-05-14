@@ -33,6 +33,7 @@ python -m litminer.sources.mcp.test_server
 | `litminer_search_arxiv` | Search arXiv preprints through the official Atom API. |
 | `litminer_search_europe_pmc` | Search Europe PMC biomedical/life-science metadata. |
 | `litminer_verify_crossref` | Verify one DOI against Crossref metadata. |
+| `litminer_batch_verify_crossref` | Verify multiple DOIs against Crossref metadata. |
 | `litminer_search_crossref_title` | Search Crossref by one title to recover a DOI. |
 | `litminer_batch_crossref_title_search` | Search Crossref by multiple titles. |
 | `litminer_dedupe` | Deduplicate a candidate CSV by DOI, then title. |
@@ -44,6 +45,7 @@ python -m litminer.sources.mcp.test_server
 | `litminer_probe_publishers` | Resolve DOI landing pages and detect access/PDF/SI link status. |
 | `litminer_import_websearch` | Normalize WebSearch leads as unverified candidates. |
 | `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
+| `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
 | `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
 
 ## Example: Run Workflow

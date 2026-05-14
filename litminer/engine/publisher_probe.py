@@ -28,6 +28,8 @@ USER_AGENT = f"litminer/{__version__} (+https://github.com/xqy272/Litminer)"
 REQUEST_TIMEOUT = 30
 HTML_LIMIT = 500_000
 ALLOWED_SCHEMES = {"http", "https"}
+DNS_CACHE_TTL_SECONDS = 300.0
+_DNS_CACHE: dict[str, tuple[float, list]] = {}
 
 PDF_LINK_RE = re.compile(
     r"""href=["']([^"']*(?:pdf|article/pii|download)[^"']*)["'][^>]*>(.{0,120}?(?:pdf|download).{0,120}?)<""",
@@ -110,6 +112,16 @@ def publisher_family(domain: str) -> str:
     return "unknown"
 
 
+def _resolve_host(host: str) -> list:
+    now = time.monotonic()
+    cached = _DNS_CACHE.get(host)
+    if cached and now - cached[0] < DNS_CACHE_TTL_SECONDS:
+        return cached[1]
+    infos = socket.getaddrinfo(host, None)
+    _DNS_CACHE[host] = (now, infos)
+    return infos
+
+
 def validate_public_http_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme.lower() not in ALLOWED_SCHEMES:
@@ -122,7 +134,7 @@ def validate_public_http_url(url: str) -> None:
         raise ValueError(f"Blocked local host: {host}")
 
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = _resolve_host(host)
     except socket.gaierror as exc:
         raise ValueError(f"Could not resolve host: {host}") from exc
 

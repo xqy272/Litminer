@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from litminer.engine.common import normalize_doi, write_csv_atomic
+from litminer.sources.api.errors import ProviderSearchError
 
 
 ARXIV_BASE = "https://export.arxiv.org/api/query"
@@ -46,20 +47,6 @@ OUTPUT_FIELDS = [
     "discovery_query",
     "source_note",
 ]
-
-
-class ProviderSearchError(RuntimeError):
-    """Raised when arXiv search fails, preserving partial results."""
-
-    def __init__(
-        self,
-        message: str,
-        partial_results: list[dict[str, str]] | None = None,
-        status: str = "error",
-    ) -> None:
-        super().__init__(message)
-        self.partial_results = partial_results or []
-        self.status = status
 
 
 def _clean_text(value: str | None) -> str:

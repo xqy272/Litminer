@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 from litminer.engine.common import cell_text, normalize_doi, read_csv_rows, write_csv_atomic
@@ -136,8 +137,7 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
 
     write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
 
-    import sys as _sys
-    print(f"Deduplication: {len(rows)} -> {len(output_rows)} (removed {len(rows) - len(output_rows)} duplicates)", file=_sys.stderr)
+    print(f"Deduplication: {len(rows)} -> {len(output_rows)} (removed {len(rows) - len(output_rows)} duplicates)", file=sys.stderr)
 
 
 def main() -> None:

@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,8 @@ PRIORITY_ORDER = {
     "low": 3,
 }
 MAX_PATTERN_LENGTH = 300
-_PATTERN_CACHE: dict[tuple[str, bool], re.Pattern[str]] = {}
+MAX_PATTERN_CACHE_SIZE = 512
+_PATTERN_CACHE: OrderedDict[tuple[str, bool], re.Pattern[str]] = OrderedDict()
 
 
 @dataclass
@@ -230,6 +232,7 @@ def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
         raise ValueError(f"Pattern is too long ({len(pattern)} > {MAX_PATTERN_LENGTH})")
     cache_key = (pattern, allow_regex)
     if cache_key in _PATTERN_CACHE:
+        _PATTERN_CACHE.move_to_end(cache_key)
         return _PATTERN_CACHE[cache_key]
     if pattern.startswith("re:"):
         if not allow_regex:
@@ -242,6 +245,9 @@ def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
             escaped = rf"\b{escaped}\b"
         compiled = re.compile(escaped, re.I)
     _PATTERN_CACHE[cache_key] = compiled
+    _PATTERN_CACHE.move_to_end(cache_key)
+    while len(_PATTERN_CACHE) > MAX_PATTERN_CACHE_SIZE:
+        _PATTERN_CACHE.popitem(last=False)
     return compiled
 
 

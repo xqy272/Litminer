@@ -53,6 +53,16 @@ def _user_agent() -> str:
     return USER_AGENT
 
 
+def _retry_wait_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 60.0))
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
 def _fetch_json(url: str) -> dict:
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
@@ -65,7 +75,7 @@ def _fetch_json(url: str) -> dict:
                 raise RuntimeError(f"HTTP {e.code}: {e.reason}") from e
             last_error = e
             if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
+                wait = _retry_wait_seconds(e, attempt)
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
                 time.sleep(wait)
         except (urllib.error.URLError, json.JSONDecodeError, OSError,

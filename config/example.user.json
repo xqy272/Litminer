@@ -24,6 +24,8 @@
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
     "strict_discovery": false,
+    "parallel_providers": false,
+    "provider_workers": null,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
