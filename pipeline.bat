@@ -5,7 +5,7 @@ REM Usage: pipeline.bat "your search query" YEAR [OPENALEX_API_KEY]
 set "QUERY=%~1"
 set "YEAR=%~2"
 set "KEY=%~3"
-set "OUT=check"
+set "OUT=.litminer\runs"
 
 if "%QUERY%"=="" goto :usage
 if "%YEAR%"=="" goto :usage

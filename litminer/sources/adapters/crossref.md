@@ -25,8 +25,8 @@ Verify a candidate CSV:
 
 ```bash
 python -m litminer.sources.api.crossref_verify \
-  --input work/candidates.csv \
-  --output work/verified_candidates.csv \
+  --input .litminer/runs/litminer_run/candidates.csv \
+  --output .litminer/runs/litminer_run/verified_candidates.csv \
   --title-lookup
 ```
 

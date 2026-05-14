@@ -34,6 +34,8 @@ Litminer is domain-neutral. The Agent derives queries, year ranges, required con
 - `litminer/engine/build_publisher_queue.py`: publisher-page evidence queue generation.
 - `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
 - `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
+- `litminer/engine/doctor.py`: installation, environment, MCP workspace, and config sanity checks.
+- `litminer/engine/offline_smoke.py`: no-network end-to-end smoke test using an embedded fixture.
 - `litminer/engine/websearch_import.py`: import WebSearch leads as unverified candidates.
 - `litminer/engine/validate_stage.py`: CSV stage validation.
 - `litminer/sources/api/registry.py`: provider registry and capability metadata.
@@ -52,8 +54,10 @@ Installation and environment policy:
 - Run scripts directly with Python 3.10+ when possible; runtime code is intentionally stdlib-only.
 - If package installation is needed for console scripts or development tools, create a `.venv` inside the Litminer clone and install there.
 - If MCP is configured, prefer pointing the MCP command at the `.venv` Python when a virtualenv exists.
-- Keep MCP code root and user workspace separate. `litminer/sources/mcp/server.py` imports code from the Litminer clone, while file arguments resolve under `LITMINER_WORKSPACE_ROOT` or the MCP process `cwd`.
+- Keep code root and runtime workspace separate. The Litminer clone is the skill/code directory; default runtime outputs belong under `.litminer/` in `LITMINER_WORKSPACE_ROOT` or, when unset, the process `cwd`.
+- In MCP mode, file arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Path escapes must remain rejected.
 - Do not document hand-copying a subset of files as an install method unless the project ships a dedicated release package or plugin.
+- Before beta release or user handoff, run `python -m litminer.engine.doctor` and `python -m litminer.engine.offline_smoke`.
 
 Allowed in config:
 
@@ -107,7 +111,7 @@ python -m litminer.engine.run_lit_search \
   --optional-concept "secondary=term3|term4" \
   --negative-concept "negative=term5|term6" \
   --config config/default.json \
-  --output-dir work/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
 
 Use repeated `--query` when recall matters. Add source flags only when useful:
@@ -138,9 +142,9 @@ python -m litminer.engine.api_discovery \
   --query "USER_QUERY_HERE" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
-  --output work/api_candidates.csv \
-  --trace-output work/api_discovery_trace.csv \
-  --report-output work/api_discovery_report.md
+  --output .litminer/runs/litminer_run/api_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/api_discovery_trace.csv \
+  --report-output .litminer/runs/litminer_run/api_discovery_report.md
 ```
 
 ### Crossref Verification
@@ -192,7 +196,7 @@ The publisher probe is heuristic and safe by design:
 
 ## MCP Use
 
-The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly. File path arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset.
+The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly. File path arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Default MCP workflow outputs should go under `.litminer/` in that workspace.
 
 Start/test:
 
@@ -248,11 +252,13 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
 ```
 
 Optional network smoke tests when source wrappers changed:
 
 ```bash
-python -m litminer.engine.api_discovery --query "all:graphene" --sources arxiv --max-results-per-query 1 --output check/arxiv_smoke.csv
-python -m litminer.engine.api_discovery --query "cancer immunotherapy" --sources europe_pmc --max-results-per-query 1 --output check/europe_pmc_smoke.csv
+python -m litminer.engine.api_discovery --query "all:graphene" --sources arxiv --max-results-per-query 1 --output .litminer/runs/source_smoke/arxiv_smoke.csv
+python -m litminer.engine.api_discovery --query "cancer immunotherapy" --sources europe_pmc --max-results-per-query 1 --output .litminer/runs/source_smoke/europe_pmc_smoke.csv
 ```

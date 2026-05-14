@@ -1,7 +1,7 @@
 {
   "channels": {
     "openalex": true,
-    "semantic_scholar": false,
+    "semantic_scholar": true,
     "arxiv": false,
     "europe_pmc": false,
     "crossref": true,
@@ -17,11 +17,11 @@
     "contact_email_env": "LITMINER_CONTACT_EMAIL"
   },
   "limits": {
-    "max_results_per_query": 100,
+    "max_results_per_query": 80,
     "semantic_query_limit": 3,
     "semantic_max_results": 50,
-    "publisher_probe_limit": null,
-    "publisher_probe_sleep": 0.5,
+    "publisher_probe_limit": 20,
+    "publisher_probe_sleep": 1.0,
     "unpaywall_sleep": 0.1
   },
   "outputs": {

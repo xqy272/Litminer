@@ -36,6 +36,7 @@ from litminer.engine import publisher_probe
 from litminer.engine import processing_report
 from litminer.engine import semantic_triage
 from litminer.engine import validate_stage
+from litminer.engine import workspace
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import unpaywall_lookup
 
@@ -63,8 +64,8 @@ RUNTIME_DEFAULTS = {
         "unpaywall_sleep": 0.1,
     },
     "outputs": {
-        "default_output_dir": "check/litminer_run",
-        "screenshot_root": "work/screenshots",
+        "default_output_dir": workspace.DEFAULT_RUN_DIR,
+        "screenshot_root": workspace.DEFAULT_SCREENSHOT_ROOT,
     },
     "evidence": {
         "require_doi_for_queue": True,
@@ -131,9 +132,11 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     api = config.get("api", {})
 
     if getattr(args, "output_dir", None) is None:
-        args.output_dir = Path(outputs.get("default_output_dir") or "check/litminer_run")
+        args.output_dir = workspace.resolve_workspace_path(outputs.get("default_output_dir") or workspace.DEFAULT_RUN_DIR)
     if getattr(args, "screenshot_root", None) is None:
-        args.screenshot_root = Path(outputs.get("screenshot_root") or "work/screenshots")
+        args.screenshot_root = workspace.resolve_workspace_path(
+            outputs.get("screenshot_root") or workspace.DEFAULT_SCREENSHOT_ROOT
+        )
     discovery_sources_from_config = getattr(args, "discovery_sources", None) is None
     if discovery_sources_from_config:
         sources = []
@@ -256,6 +259,7 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         output,
         sources=sources,
         year_from=args.year_from,
+        year_to=args.year_to,
         max_results_per_query=args.max_results_per_query,
         semantic_query_limit=args.semantic_query_limit,
         semantic_max_results=args.semantic_max_results,
@@ -302,11 +306,38 @@ def profile_path(args: argparse.Namespace) -> Path | None:
     return args.triage_profile
 
 
+def preflight_warnings(args: argparse.Namespace) -> list[str]:
+    warnings: list[str] = []
+    if args.enrich_unpaywall and not args.unpaywall_email:
+        warnings.append(
+            "Unpaywall is enabled but no email was resolved from --unpaywall-email, "
+            "UNPAYWALL_EMAIL, or LITMINER_CONTACT_EMAIL; Unpaywall rows will be skipped."
+        )
+    if not args.probe_publishers and (args.fields_needed or args.page_required_field):
+        warnings.append(
+            "Publisher-page fields were requested but publisher probing is disabled; "
+            "publisher_queue.csv will be created without resolved access/html/pdf status."
+        )
+    try:
+        sources = api_discovery.parse_sources(args.discovery_sources)
+    except SystemExit:
+        sources = []
+    if "semantic_scholar" in sources and not (
+        os.environ.get("SEMANTIC_SCHOLAR_API_KEY") or os.environ.get("S2_API_KEY")
+    ):
+        warnings.append(
+            "Semantic Scholar is selected without SEMANTIC_SCHOLAR_API_KEY/S2_API_KEY; "
+            "the free unauthenticated API is more likely to return HTTP 429 rate limits."
+        )
+    return warnings
+
+
 def make_report(out_dir: Path, counts: dict[str, int],
                 args: argparse.Namespace,
                 strict_path: Path | None,
                 backup_path: Path | None,
-                queue_priorities: set[str]) -> None:
+                queue_priorities: set[str],
+                warnings: list[str] | None = None) -> None:
     target = args.target_count
     feasible_count = counts.get("publisher_queue", 0)
     blocking_reasons: list[str] = []
@@ -389,6 +420,11 @@ def make_report(out_dir: Path, counts: dict[str, int],
     if backup_path:
         lines.append(f"- Metric backup table: `{backup_path.name}`")
 
+    if warnings:
+        lines.extend(["", "## Configuration Warnings", ""])
+        for warning in warnings:
+            lines.append(f"- {warning}")
+
     lines.extend([
         "",
         "## Next Actions",
@@ -404,6 +440,9 @@ def make_report(out_dir: Path, counts: dict[str, int],
 
 def run(args: argparse.Namespace) -> dict[str, str]:
     args = normalize_args(args)
+    warnings = preflight_warnings(args)
+    for warning in warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
@@ -545,7 +584,7 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         )
         counts["publisher_probed"] = sum(publisher_counts.values())
 
-    make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities)
+    make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities, warnings=warnings)
     processing_report.write_report(out_dir, out_dir / "processing_report.md")
     return {
         "output_dir": str(out_dir),

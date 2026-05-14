@@ -1,9 +1,12 @@
 import argparse
 import csv
 import json
+import os
 import sys
 import tempfile
 import unittest
+import urllib.error
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,13 +17,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from litminer.engine import api_discovery
 from litminer.engine import dedupe_papers
+from litminer.engine import doctor
+from litminer.engine import offline_smoke
 from litminer.engine import publisher_probe
 from litminer.engine import processing_report
 from litminer.engine import run_lit_search
 from litminer.engine import semantic_triage
+from litminer.engine import workspace
 from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import europe_pmc_search
+from litminer.sources.api import semantic_scholar_search
 from litminer.sources.api import unpaywall_lookup
 from litminer.sources.mcp import server as mcp_server
 
@@ -48,6 +55,66 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(trace_rows[0]["status"], "error")
             self.assertIn("boom", trace_rows[0]["error"])
             self.assertIn("Provider Statuses", report.read_text(encoding="utf-8"))
+
+    def test_api_discovery_passes_year_to_to_providers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+
+            with patch("litminer.engine.api_discovery.openalex_search.search", return_value=[]) as search:
+                api_discovery.discover_api(
+                    ["query"],
+                    output,
+                    sources=["openalex"],
+                    year_from=2024,
+                    year_to=2026,
+                    trace_csv=trace,
+                )
+
+            self.assertEqual(search.call_args.kwargs["year_from"], 2024)
+            self.assertEqual(search.call_args.kwargs["year_to"], 2026)
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual(trace_rows[0]["year_to"], "2026")
+
+    def test_semantic_scholar_429_uses_rate_limited_status(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "0"
+        error = urllib.error.HTTPError(
+            url="https://api.semanticscholar.org/graph/v1/paper/search",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=headers,
+            fp=None,
+        )
+
+        with (
+            patch("litminer.sources.api.semantic_scholar_search.urllib.request.urlopen", side_effect=error),
+            patch("litminer.sources.api.semantic_scholar_search.time.sleep") as sleep,
+        ):
+            with self.assertRaises(semantic_scholar_search.ProviderSearchError) as caught:
+                semantic_scholar_search.search("clinical rag", year_from=2024, max_results=1)
+
+        self.assertEqual(caught.exception.status, "rate_limited")
+        self.assertEqual(sleep.call_count, semantic_scholar_search.RATE_LIMIT_RETRIES - 1)
+
+    def test_preflight_warnings_surface_configuration_gaps(self) -> None:
+        args = argparse.Namespace(
+            enrich_unpaywall=True,
+            unpaywall_email=None,
+            probe_publishers=False,
+            fields_needed=["publisher evidence"],
+            page_required_field=None,
+            discovery_sources="semantic_scholar",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            warnings = run_lit_search.preflight_warnings(args)
+
+        self.assertTrue(any("Unpaywall is enabled" in warning for warning in warnings))
+        self.assertTrue(any("Publisher-page fields" in warning for warning in warnings))
+        self.assertTrue(any("Semantic Scholar is selected" in warning for warning in warnings))
 
     def test_run_report_marks_empty_candidate_set_not_feasible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,6 +389,31 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(normalized.queue_priorities, "high,medium")
             self.assertTrue(normalized.include_metadata_blocked)
             self.assertTrue(normalized.allow_missing_doi)
+            self.assertEqual(normalized.output_dir, tmp_path / "configured_run")
+            self.assertEqual(normalized.screenshot_root, tmp_path / "shots")
+
+    def test_runtime_defaults_use_dot_litminer_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp)
+            args = argparse.Namespace(config=None)
+
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(workspace_root)}):
+                normalized = run_lit_search.normalize_args(args)
+
+            self.assertEqual(normalized.output_dir, workspace_root / ".litminer" / "runs" / "litminer_run")
+            self.assertEqual(normalized.screenshot_root, workspace_root / ".litminer" / "screenshots")
+
+    def test_workspace_path_falls_back_to_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            original_cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                with patch.dict(os.environ, {}, clear=True):
+                    resolved = workspace.resolve_workspace_path(".litminer/runs/litminer_run")
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(resolved, Path(tmp).resolve() / ".litminer" / "runs" / "litminer_run")
 
     def test_explicit_discovery_sources_override_config_channels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -554,6 +646,34 @@ class LitminerCoreTests(unittest.TestCase):
         row = publisher_probe.probe_row({"publisher_url": "http://127.0.0.1:9/private"})
         self.assertEqual(row["access_status"], "blocked_url")
         self.assertIn("Blocked", row["publisher_probe_error"])
+
+    def test_doctor_validates_config_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad_config.json"
+            path.write_text(
+                json.dumps({"limits": {"max_results_per_query": "many"}}),
+                encoding="utf-8",
+            )
+
+            checks = doctor.validate_config(path)
+
+        self.assertTrue(any(check.status == "error" for check in checks))
+        self.assertTrue(any("max_results_per_query" in check.message for check in checks))
+
+    def test_doctor_accepts_example_user_config(self) -> None:
+        checks = doctor.validate_config(PROJECT_ROOT / "config" / "example.user.json")
+
+        self.assertFalse([check for check in checks if check.status == "error"])
+
+    def test_offline_smoke_generates_expected_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "smoke"
+
+            result = offline_smoke.run(output_dir)
+
+            self.assertGreaterEqual(int(result["publisher_queue_rows"]), 1)
+            self.assertTrue((output_dir / "processing_report.md").exists())
+            self.assertTrue((output_dir / "publisher_queue.csv").exists())
 
 
 if __name__ == "__main__":

@@ -46,6 +46,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 
+from litminer.engine import workspace
+
 # Lazy imports: only load when a tool is called.
 _openalex_search = None
 _crossref_verify = None
@@ -58,8 +60,7 @@ _import_lock = threading.Lock()
 
 def _workspace_root() -> Path:
     """Return the user workspace root for MCP file operations."""
-    configured = os.environ.get("LITMINER_WORKSPACE_ROOT", "").strip()
-    return Path(configured).expanduser().resolve(strict=False) if configured else Path.cwd().resolve(strict=False)
+    return workspace.workspace_root()
 
 
 def _workspace_path(value: str, label: str = "path", must_exist: bool = False) -> Path:
@@ -169,6 +170,7 @@ def tool_search_openalex(args: dict) -> dict:
     results = oa.search(
         query=args["query"],
         year_from=args.get("year_from"),
+        year_to=args.get("year_to"),
         max_results=args.get("max_results", 200),
         api_key=args.get("api_key") or os.environ.get("OPENALEX_API_KEY"),
         mailto=args.get("mailto"),
@@ -191,6 +193,7 @@ def tool_search_semantic_scholar(args: dict) -> dict:
         results.extend(s2.search(
             query=args["query"],
             year_from=args.get("year_from"),
+            year_to=args.get("year_to"),
             max_results=max_results,
         ))
     if args.get("citation_expand"):
@@ -214,6 +217,7 @@ def tool_search_arxiv(args: dict) -> dict:
     results = mod.search(
         query=args["query"],
         year_from=args.get("year_from"),
+        year_to=args.get("year_to"),
         max_results=args.get("max_results", 100),
     )
     return {
@@ -230,6 +234,7 @@ def tool_search_europe_pmc(args: dict) -> dict:
     results = mod.search(
         query=args["query"],
         year_from=args.get("year_from"),
+        year_to=args.get("year_to"),
         max_results=args.get("max_results", 100),
     )
     return {
@@ -417,7 +422,10 @@ def tool_discover_api(args: dict) -> dict:
     )
     if not queries:
         raise ValueError("Provide queries or query_file")
-    output_csv = _workspace_path(args.get("output_csv", "check/api_candidates.csv"), "output_csv")
+    output_csv = _workspace_path(
+        args.get("output_csv", f"{workspace.DEFAULT_RUN_DIR}/api_candidates.csv"),
+        "output_csv",
+    )
     trace_csv = _optional_workspace_path(args.get("trace_csv"), "trace_csv") or output_csv.with_name("api_discovery_trace.csv")
     report_md = _optional_workspace_path(args.get("report_md"), "report_md") or output_csv.with_name("api_discovery_report.md")
     result = mod.discover_api(
@@ -425,6 +433,7 @@ def tool_discover_api(args: dict) -> dict:
         output_csv,
         sources=mod.parse_sources(args.get("sources", "openalex")),
         year_from=args.get("year_from"),
+        year_to=args.get("year_to"),
         max_results_per_query=args.get("max_results_per_query", 100),
         semantic_query_limit=args.get("semantic_query_limit"),
         semantic_max_results=args.get("semantic_max_results"),
@@ -493,7 +502,10 @@ def tool_build_publisher_queue(args: dict) -> dict:
         priorities=_set(args.get("priorities"), {"high", "medium", "needs_review"}),
         statuses=_set(args.get("statuses")),
         include_metadata_blocked=args.get("include_metadata_blocked", False),
-        screenshot_root=str(_workspace_path(args.get("screenshot_root", "work/screenshots"), "screenshot_root")),
+        screenshot_root=str(_workspace_path(
+            args.get("screenshot_root", workspace.DEFAULT_SCREENSHOT_ROOT),
+            "screenshot_root",
+        )),
         require_doi=not args.get("allow_missing_doi", False),
         fields_needed=args.get("fields_needed"),
         page_required_fields=args.get("page_required_fields"),
@@ -543,7 +555,7 @@ def tool_run_lit_search(args: dict) -> dict:
         query_file=_optional_workspace_path(args.get("query_file"), "query_file", must_exist=True),
         year_from=args.get("year_from"),
         year_to=args.get("year_to"),
-        output_dir=_workspace_path(args.get("output_dir", "check/litminer_run"), "output_dir"),
+        output_dir=_workspace_path(args.get("output_dir", workspace.DEFAULT_RUN_DIR), "output_dir"),
         discovery_sources=args.get("discovery_sources"),
         include_arxiv=args.get("include_arxiv"),
         include_europe_pmc=args.get("include_europe_pmc"),
@@ -574,7 +586,10 @@ def tool_run_lit_search(args: dict) -> dict:
         target_count=args.get("target_count"),
         queue_strict_only=args.get("queue_strict_only", False),
         allow_missing_doi=args.get("allow_missing_doi"),
-        screenshot_root=_workspace_path(args.get("screenshot_root", "work/screenshots"), "screenshot_root"),
+        screenshot_root=_workspace_path(
+            args.get("screenshot_root", workspace.DEFAULT_SCREENSHOT_ROOT),
+            "screenshot_root",
+        ),
         probe_publishers=args.get("probe_publishers"),
         probe_limit=args.get("probe_limit"),
         probe_sleep=args.get("probe_sleep"),
@@ -591,6 +606,7 @@ TOOLS: dict[str, dict] = {
         "parameters": {
             "query": {"type": "string", "required": True, "description": "Search query"},
             "year_from": {"type": "integer", "required": False, "description": "Minimum publication year"},
+            "year_to": {"type": "integer", "required": False, "description": "Maximum publication year"},
             "max_results": {"type": "integer", "required": False, "description": "Max results (default 200)"},
             "api_key": {"type": "string", "required": False, "description": "OpenAlex API key"},
             "mailto": {"type": "string", "required": False, "description": "OpenAlex polite-pool contact email"},
@@ -602,6 +618,7 @@ TOOLS: dict[str, dict] = {
         "parameters": {
             "query": {"type": "string", "required": False, "description": "Search query"},
             "year_from": {"type": "integer", "required": False, "description": "Minimum publication year"},
+            "year_to": {"type": "integer", "required": False, "description": "Maximum publication year"},
             "max_results": {"type": "integer", "required": False, "description": "Max results"},
             "citation_expand": {"type": "string", "required": False, "description": "Seed DOI for forward citations"},
             "reference_expand": {"type": "string", "required": False, "description": "Seed DOI for references"},
@@ -613,6 +630,7 @@ TOOLS: dict[str, dict] = {
         "parameters": {
             "query": {"type": "string", "required": True, "description": "arXiv search query, e.g. all:graphene"},
             "year_from": {"type": "integer", "required": False, "description": "Minimum publication year"},
+            "year_to": {"type": "integer", "required": False, "description": "Maximum publication year"},
             "max_results": {"type": "integer", "required": False, "description": "Max results"},
         },
     },
@@ -622,6 +640,7 @@ TOOLS: dict[str, dict] = {
         "parameters": {
             "query": {"type": "string", "required": True, "description": "Europe PMC search query"},
             "year_from": {"type": "integer", "required": False, "description": "Minimum publication year"},
+            "year_to": {"type": "integer", "required": False, "description": "Maximum publication year"},
             "max_results": {"type": "integer", "required": False, "description": "Max results"},
         },
     },
@@ -674,6 +693,7 @@ TOOLS: dict[str, dict] = {
             "query_file": {"type": "string", "required": False, "description": "File with one query per line"},
             "sources": {"type": "string", "required": False, "description": "Comma-separated providers: openalex, semantic_scholar, arxiv, europe_pmc"},
             "year_from": {"type": "integer", "required": False, "description": "Minimum publication year"},
+            "year_to": {"type": "integer", "required": False, "description": "Maximum publication year"},
             "max_results_per_query": {"type": "integer", "required": False, "description": "Max results per query"},
             "semantic_query_limit": {"type": "integer", "required": False, "description": "Max query count for Semantic Scholar"},
             "semantic_max_results": {"type": "integer", "required": False, "description": "Semantic Scholar max results per query"},

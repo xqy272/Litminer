@@ -22,12 +22,12 @@ Then run:
 
 ```bash
 python -m litminer.engine.journal_metrics \
-  --input work/verified_candidates.csv \
-  --output work/metrics_annotated_candidates.csv \
-  --metrics work/verified_journal_metrics.csv \
+  --input .litminer/runs/litminer_run/verified_candidates.csv \
+  --output .litminer/runs/litminer_run/metrics_annotated_candidates.csv \
+  --metrics .litminer/verified_journal_metrics.csv \
   --min-if 10 \
-  --pass-output work/strict_candidates.csv \
-  --backup-output work/backup_candidates.csv
+  --pass-output .litminer/runs/litminer_run/strict_candidates.csv \
+  --backup-output .litminer/runs/litminer_run/backup_candidates.csv
 ```
 
 ## Boundaries

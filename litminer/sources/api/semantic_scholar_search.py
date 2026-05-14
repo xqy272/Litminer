@@ -18,6 +18,7 @@ import argparse
 import csv
 import http.client
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -31,6 +32,10 @@ S2_BASE = "https://api.semanticscholar.org/graph/v1"
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 RESULTS_PER_QUERY = 100
+RATE_LIMIT_RETRIES = int(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_RETRIES", "4"))
+RATE_LIMIT_BACKOFF_SECONDS = float(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS", "10"))
+RATE_LIMIT_MAX_WAIT_SECONDS = float(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_WAIT_SECONDS", "60"))
+API_KEY_ENV_NAMES = ("SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY")
 
 # Fields to request from S2 API
 S2_FIELDS = (
@@ -68,17 +73,67 @@ class ProviderSearchError(RuntimeError):
         self.status = status
 
 
+class RateLimitError(RuntimeError):
+    """Raised when Semantic Scholar continues to rate-limit after retries."""
+
+
+def _semantic_scholar_api_key() -> str:
+    for name in API_KEY_ENV_NAMES:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _build_headers() -> dict[str, str]:
-    return {"Accept": "application/json"}
+    headers = {"Accept": "application/json"}
+    api_key = _semantic_scholar_api_key()
+    if api_key:
+        headers["x-api-key"] = api_key
+    return headers
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after:
+        try:
+            return min(float(retry_after), RATE_LIMIT_MAX_WAIT_SECONDS)
+        except ValueError:
+            pass
+    wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+    return min(wait, RATE_LIMIT_MAX_WAIT_SECONDS)
 
 
 def _fetch_json(url: str) -> dict:
     last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
+    max_attempts = max(MAX_RETRIES, RATE_LIMIT_RETRIES)
+    for attempt in range(max_attempts):
         try:
             req = urllib.request.Request(url, headers=_build_headers())
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_error = e
+            if e.code == 429:
+                if attempt < RATE_LIMIT_RETRIES - 1:
+                    wait = _retry_after_seconds(e, attempt)
+                    print(
+                        f"  Rate limited by Semantic Scholar (429). "
+                        f"Retry {attempt + 1}/{RATE_LIMIT_RETRIES} after {wait:g}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise RateLimitError(
+                    "Semantic Scholar rate limit persisted after "
+                    f"{RATE_LIMIT_RETRIES} attempts"
+                ) from e
+            if attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            break
         except (urllib.error.URLError, json.JSONDecodeError, OSError,
                 http.client.IncompleteRead) as e:
             last_error = e
@@ -86,6 +141,8 @@ def _fetch_json(url: str) -> dict:
                 wait = 2 ** attempt
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
                 time.sleep(wait)
+                continue
+            break
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
 
 
@@ -147,6 +204,7 @@ def _paper_to_row(paper: dict, source_query: str = "", source_note: str = "") ->
 def search(
     query: str,
     year_from: int | None = None,
+    year_to: int | None = None,
     max_results: int = 200,
 ) -> list[dict[str, str]]:
     """Search Semantic Scholar and return uniform-schema rows."""
@@ -165,8 +223,12 @@ def search(
                 "offset": str(offset),
                 "fields": S2_FIELDS,
             }
-            if year_from:
+            if year_from is not None and year_to is not None:
+                params["year"] = f"{year_from}-{year_to}"
+            elif year_from is not None:
                 params["year"] = f"{year_from}-"
+            elif year_to is not None:
+                params["year"] = f"-{year_to}"
 
             url = f"{S2_BASE}/paper/search?{urllib.parse.urlencode(params)}"
             data = _fetch_json(url)
@@ -194,7 +256,10 @@ def search(
             if len(papers) < RESULTS_PER_QUERY:
                 break
     except Exception as e:
-        status = "partial_error" if results else "error"
+        if isinstance(e, RateLimitError):
+            status = "partial_rate_limited" if results else "rate_limited"
+        else:
+            status = "partial_error" if results else "error"
         message = f"Semantic Scholar search failed at offset {offset}: {e}"
         print(
             f"  ERROR: {message}. Partial rows={len(results)}.",
@@ -294,6 +359,7 @@ def main() -> None:
     )
     parser.add_argument("--query", type=str, help="Search query string")
     parser.add_argument("--year-from", type=int, default=None, help="Minimum publication year")
+    parser.add_argument("--year-to", type=int, default=None, help="Maximum publication year")
     parser.add_argument("--max-results", type=int, default=200, help="Max results (default: 200)")
     parser.add_argument("--citation-expand", type=str, default=None,
                         help="DOI of seed paper for forward citation expansion")
@@ -306,7 +372,12 @@ def main() -> None:
 
     try:
         if args.query:
-            results.extend(search(args.query, args.year_from, args.max_results))
+            results.extend(search(
+                args.query,
+                year_from=args.year_from,
+                year_to=args.year_to,
+                max_results=args.max_results,
+            ))
 
         if args.citation_expand:
             results.extend(get_citations(args.citation_expand, args.max_results))

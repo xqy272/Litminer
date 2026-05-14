@@ -63,6 +63,7 @@ TRACE_FIELDS = [
     "query_id",
     "query",
     "year_from",
+    "year_to",
     "max_results",
     "returned_count",
     "status",
@@ -138,12 +139,14 @@ def enrich_row(row: dict[str, str], provider: str, query_id: str, query: str,
 
 
 def run_provider(provider: str, query: str, year_from: int | None,
+                 year_to: int | None,
                  max_results: int, openalex_api_key: str | None,
                  openalex_mailto: str | None = None) -> list[dict[str, str]]:
     if provider == "openalex":
         return openalex_search.search(
             query=query,
             year_from=year_from,
+            year_to=year_to,
             max_results=max_results,
             api_key=openalex_api_key or os.environ.get("OPENALEX_API_KEY"),
             mailto=openalex_mailto,
@@ -152,18 +155,21 @@ def run_provider(provider: str, query: str, year_from: int | None,
         return semantic_scholar_search.search(
             query=query,
             year_from=year_from,
+            year_to=year_to,
             max_results=max_results,
         )
     if provider == "arxiv":
         return arxiv_search.search(
             query=query,
             year_from=year_from,
+            year_to=year_to,
             max_results=max_results,
         )
     if provider == "europe_pmc":
         return europe_pmc_search.search(
             query=query,
             year_from=year_from,
+            year_to=year_to,
             max_results=max_results,
         )
     raise ValueError(f"Unsupported provider: {provider}")
@@ -173,6 +179,7 @@ def discover_api(queries: list[str],
                  output_csv: Path,
                  sources: list[str] | None = None,
                  year_from: int | None = None,
+                 year_to: int | None = None,
                  max_results_per_query: int = 100,
                  semantic_query_limit: int | None = None,
                  semantic_max_results: int | None = None,
@@ -208,6 +215,7 @@ def discover_api(queries: list[str],
                     provider,
                     query,
                     year_from=year_from,
+                    year_to=year_to,
                     max_results=provider_max,
                     openalex_api_key=openalex_api_key,
                     openalex_mailto=openalex_mailto,
@@ -240,6 +248,7 @@ def discover_api(queries: list[str],
                 "query_id": query_id,
                 "query": query,
                 "year_from": str(year_from or ""),
+                "year_to": str(year_to or ""),
                 "max_results": str(provider_max),
                 "returned_count": str(len(rows)),
                 "status": status,
@@ -344,6 +353,7 @@ def main() -> None:
     parser.add_argument("--sources", default="openalex",
                         help="Comma-separated providers: openalex, semantic_scholar, arxiv, europe_pmc")
     parser.add_argument("--year-from", type=int, default=None)
+    parser.add_argument("--year-to", type=int, default=None)
     parser.add_argument("--max-results-per-query", type=int, default=100)
     parser.add_argument("--semantic-query-limit", type=int, default=None)
     parser.add_argument("--semantic-max-results", type=int, default=None)
@@ -364,6 +374,7 @@ def main() -> None:
         args.output,
         sources=parse_sources(args.sources),
         year_from=args.year_from,
+        year_to=args.year_to,
         max_results_per_query=args.max_results_per_query,
         semantic_query_limit=args.semantic_query_limit,
         semantic_max_results=args.semantic_max_results,

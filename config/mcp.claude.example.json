@@ -1,0 +1,12 @@
+{
+  "type": "stdio",
+  "command": "python",
+  "args": [
+    "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+  ],
+  "cwd": "D:/path/to/your/project",
+  "env": {
+    "LITMINER_WORKSPACE_ROOT": "D:/path/to/your/project",
+    "LITMINER_CONTACT_EMAIL": "you@example.org"
+  }
+}

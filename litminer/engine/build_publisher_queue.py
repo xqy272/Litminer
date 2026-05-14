@@ -9,6 +9,8 @@ import re
 import sys
 from pathlib import Path
 
+from litminer.engine import workspace
+
 
 DEFAULT_QUEUE_PRIORITIES = {"high", "medium", "needs_review"}
 DEFAULT_FIELDS_NEEDED = [
@@ -145,7 +147,7 @@ def extraction_priority(row: dict[str, str]) -> str:
 
 def build_queue(input_path: Path, output_path: Path,
                 decisions: set[str] | None = None,
-                screenshot_root: str = "work/screenshots",
+                screenshot_root: str = workspace.DEFAULT_SCREENSHOT_ROOT,
                 require_doi: bool = True,
                 priorities: set[str] | None = None,
                 statuses: set[str] | None = None,
@@ -352,7 +354,7 @@ def main() -> None:
                         help="Task-specific field needed from publisher page; repeat or comma-separate")
     parser.add_argument("--page-required-field", action="append", default=None,
                         help="Generic publisher-page evidence field; repeat or comma-separate")
-    parser.add_argument("--screenshot-root", default="work/screenshots")
+    parser.add_argument("--screenshot-root", default=None)
     parser.add_argument("--allow-missing-doi", action="store_true",
                         help="Queue selected rows even when DOI is missing")
     args = parser.parse_args()
@@ -364,7 +366,7 @@ def main() -> None:
         priorities=_parse_set(args.priorities) or DEFAULT_QUEUE_PRIORITIES,
         statuses=_parse_set(args.statuses),
         include_metadata_blocked=args.include_metadata_blocked,
-        screenshot_root=args.screenshot_root,
+        screenshot_root=args.screenshot_root or str(workspace.resolve_workspace_path(workspace.DEFAULT_SCREENSHOT_ROOT)),
         require_doi=not args.allow_missing_doi,
         fields_needed=args.fields_needed,
         page_required_fields=args.page_required_field,

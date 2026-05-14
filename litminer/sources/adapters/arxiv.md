@@ -12,9 +12,9 @@ python -m litminer.engine.api_discovery \
   --sources arxiv \
   --year-from 2026 \
   --max-results-per-query 50 \
-  --output work/arxiv_candidates.csv \
-  --trace-output work/arxiv_trace.csv \
-  --report-output work/arxiv_report.md
+  --output .litminer/runs/litminer_run/arxiv_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/arxiv_trace.csv \
+  --report-output .litminer/runs/litminer_run/arxiv_report.md
 ```
 
 Advanced arXiv query syntax can be passed directly. Prefer explicit arXiv

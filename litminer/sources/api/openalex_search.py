@@ -146,17 +146,19 @@ def _extract_authors(work: dict) -> str:
 
 # HTTP helpers
 
-def _build_url(query: str, year_from: int | None, page: int, per_page: int,
+def _build_url(query: str, year_from: int | None, year_to: int | None, page: int, per_page: int,
                api_key: str | None = None, mailto: str | None = None) -> str:
     params: dict[str, str] = {
         "search": query,
         "per-page": str(per_page),
         "page": str(page),
     }
+    filters = ["type:article"]
     if year_from:
-        params["filter"] = f"from_publication_date:{year_from}-01-01,type:article"
-    else:
-        params["filter"] = "type:article"
+        filters.append(f"from_publication_date:{year_from}-01-01")
+    if year_to:
+        filters.append(f"to_publication_date:{year_to}-12-31")
+    params["filter"] = ",".join(filters)
     if api_key:
         params["api_key"] = api_key
     if mailto:
@@ -201,7 +203,7 @@ def _fetch_json(url: str) -> dict:
 
 # Core search
 
-def search(query: str, year_from: int | None = None, max_results: int = 200,
+def search(query: str, year_from: int | None = None, year_to: int | None = None, max_results: int = 200,
            api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
     """Run a single query against OpenAlex and return uniform-schema rows.
 
@@ -216,12 +218,12 @@ def search(query: str, year_from: int | None = None, max_results: int = 200,
     mailto = mailto if mailto is not None else DEFAULT_MAILTO
 
     print(f"Searching OpenAlex: {query!r}", file=sys.stderr)
-    if year_from:
-        print(f"  Year filter: >= {year_from}", file=sys.stderr)
+    if year_from or year_to:
+        print(f"  Year filter: {year_from or '*'}..{year_to or '*'}", file=sys.stderr)
 
     try:
         while len(results) < max_results:
-            url = _build_url(query, year_from, page, PER_PAGE, api_key=api_key, mailto=mailto)
+            url = _build_url(query, year_from, year_to, page, PER_PAGE, api_key=api_key, mailto=mailto)
             data = _fetch_json(url)
 
             if total_hits is None:
@@ -276,7 +278,7 @@ def search(query: str, year_from: int | None = None, max_results: int = 200,
 
 # Batch search from file
 
-def search_from_file(query_file: Path, year_from: int | None, max_results: int,
+def search_from_file(query_file: Path, year_from: int | None, year_to: int | None, max_results: int,
                      api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
     """Run multiple queries from a file, one per line."""
     queries = [line.strip() for line in query_file.read_text(encoding="utf-8").splitlines()
@@ -286,7 +288,7 @@ def search_from_file(query_file: Path, year_from: int | None, max_results: int,
 
     for query in queries:
         try:
-            batch = search(query, year_from=year_from, max_results=max_results,
+            batch = search(query, year_from=year_from, year_to=year_to, max_results=max_results,
                            api_key=api_key, mailto=mailto)
         except ProviderSearchError as exc:
             for row in exc.partial_results:
@@ -334,6 +336,7 @@ def main() -> None:
     parser.add_argument("--query", type=str, help="Single search query string")
     parser.add_argument("--query-file", type=Path, help="File with one query per line")
     parser.add_argument("--year-from", type=int, default=None, help="Minimum publication year")
+    parser.add_argument("--year-to", type=int, default=None, help="Maximum publication year")
     parser.add_argument("--max-results", type=int, default=200, help="Max results per query (default: 200)")
     parser.add_argument("--output", type=Path, required=True, help="Output CSV path")
     parser.add_argument("--api-key", type=str, default=None,
@@ -345,7 +348,7 @@ def main() -> None:
     if not args.query and not args.query_file:
         parser.error("Either --query or --query-file is required.")
 
-    common = {"year_from": args.year_from, "max_results": args.max_results,
+    common = {"year_from": args.year_from, "year_to": args.year_to, "max_results": args.max_results,
               "api_key": args.api_key, "mailto": args.mailto}
     try:
         if args.query_file:

@@ -73,6 +73,38 @@ Use Litminer to find recent papers, verify DOI metadata, annotate OA links, and 
 
 Codex also provides `$skill-installer` for downloading skills from other repositories. This README documents direct `git clone` because it is explicit, auditable, and easy to update. `[[skills.config]]` is mainly for enable/disable overrides on discovered skills, not a required Litminer installation step. If Litminer later needs one-click installation, bundled MCP config, or richer distribution metadata, package it as a Codex plugin.
 
+### Post-Install Configuration And Check
+
+For skill-only use, no extra configuration file is usually required. Confirm that one of these paths exists:
+
+```text
+~/.claude/skills/litminer/SKILL.md
+~/.agents/skills/litminer/SKILL.md
+target-project/.claude/skills/litminer/SKILL.md
+target-project/.agents/skills/litminer/SKILL.md
+```
+
+Then restart or reload Claude Code / Codex skills and ask the Agent to use Litminer in natural language.
+
+After installation, run a local check and offline smoke test from the Litminer directory:
+
+```bash
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
+```
+
+These commands do not need API keys. `offline_smoke` does not access the network; it uses an embedded fixture and writes `processing_report.md` and `publisher_queue.csv` under `.litminer/runs/offline_smoke/` in the active workspace.
+
+If Codex has discovered the skill and you want an explicit enable/disable override, add this to user-level `~/.codex/config.toml` or project-level `.codex/config.toml`:
+
+```toml
+[[skills.config]]
+path = "C:/Users/your-name/.agents/skills/litminer"
+enabled = true
+```
+
+This block is not required for normal installation. Use it only when debugging skill enablement or applying a team/project override.
+
 ### Optional MCP Tools
 
 The skill tells the Agent when to use Litminer. MCP exposes Litminer operations as callable tools. MCP is optional.
@@ -86,9 +118,11 @@ python -m litminer.sources.mcp.test_server
 MCP uses two path roots:
 
 - Skill install directory: the Litminer code location, such as `~/.claude/skills/litminer` or `~/.agents/skills/litminer`.
-- User workspace: where input CSVs, reports, `check/`, and `work/` outputs live. Set it with `LITMINER_WORKSPACE_ROOT`; when unset, the MCP process `cwd` is used.
+- User workspace: where input CSVs, reports, and default `.litminer/` runtime outputs live. Set it with `LITMINER_WORKSPACE_ROOT`; when unset, the MCP process `cwd` is used. MCP rejects paths outside this workspace.
 
 Codex MCP example:
+
+The config file is usually user-level `~/.codex/config.toml` or project-level `.codex/config.toml`. Replace the paths below with your skill install directory and user workspace:
 
 ```toml
 [mcp_servers.litminer]
@@ -105,6 +139,13 @@ env_vars = [
 ]
 ```
 
+If you use a virtual environment, you can set `command` to that Python executable, for example `C:/Users/your-name/.agents/skills/litminer/.venv/Scripts/python.exe` on Windows.
+
+Template files are available:
+
+- Codex MCP: [config/mcp.codex.example.toml](config/mcp.codex.example.toml)
+- Claude Code MCP: [config/mcp.claude.example.json](config/mcp.claude.example.json)
+
 Official references:
 
 - Claude Code Skills: <https://docs.claude.com/en/docs/claude-code/skills>
@@ -112,6 +153,18 @@ Official references:
 - Codex Agent Skills: <https://developers.openai.com/codex/skills>
 - Codex config reference: <https://developers.openai.com/codex/config-reference#configtoml>
 - Codex plugins: <https://developers.openai.com/codex/plugins/build>
+
+## File Locations And Boundaries
+
+Litminer separates the install directory from the runtime workspace:
+
+- The install directory contains code and documentation only. `git clone https://github.com/xqy272/Litminer.git .../litminer` writes only repository files into that `litminer` directory; it does not create search outputs, virtual environments, or global Python packages.
+- CLI defaults write runtime outputs under `.litminer/` in the active workspace, such as `.litminer/runs/litminer_run/`, `.litminer/runs/offline_smoke/`, and `.litminer/screenshots/`.
+- If `LITMINER_WORKSPACE_ROOT` is set, CLI default relative outputs resolve under that directory. If it is unset, they resolve under the process `cwd`.
+- In MCP mode, all file arguments must stay under `LITMINER_WORKSPACE_ROOT`; if unset, they must stay under the MCP process `cwd`. Path escapes are rejected.
+- Explicit `--output-dir`, `--output`, MCP tool arguments, and absolute paths are treated as explicit user choices and are outside the default-location guarantee.
+
+Recommended setup: point MCP `LITMINER_WORKSPACE_ROOT` at the target project root and add the target project's `.litminer/` to `.gitignore`. Avoid writing search outputs into the skill install directory by default, because multi-project outputs should not be mixed with code.
 
 ## Python Environment And Isolation
 
@@ -152,12 +205,123 @@ python -m pip install -e ".[dev]"
 
 The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `litminer/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
 
-Optional API contact environment variables:
+## API, Source, And Publisher Configuration
 
-- `OPENALEX_MAILTO` or `LITMINER_CONTACT_EMAIL`
-- `CROSSREF_MAILTO` or `LITMINER_CONTACT_EMAIL`
-- `UNPAYWALL_EMAIL` or `LITMINER_CONTACT_EMAIL`
-- `OPENALEX_API_KEY` when available
+Litminer has two configuration layers:
+
+- Environment variables: API contact emails and optional API keys. Set them in your shell, Agent/MCP config, or system environment.
+- Runtime config JSON: source switches, limits, output paths, and publisher-probe policy. Save it per project and pass it with `--config`.
+
+### API Contact And Keys
+
+Most sources do not require API keys. OpenAlex, Crossref, and Unpaywall recommend or require a contact email. Litminer first reads source-specific variables, then falls back to `LITMINER_CONTACT_EMAIL`.
+
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `LITMINER_CONTACT_EMAIL` | General contact email fallback for OpenAlex, Crossref, and Unpaywall. | Recommended |
+| `OPENALEX_MAILTO` | OpenAlex polite-pool contact email. | Recommended |
+| `CROSSREF_MAILTO` | Crossref User-Agent contact email. | Recommended |
+| `UNPAYWALL_EMAIL` | Unpaywall query email. Without it, the Unpaywall stage is marked skipped. | Required for Unpaywall |
+| `OPENALEX_API_KEY` | OpenAlex API key. Usually not needed unless your access policy requires it. | Optional |
+
+You can copy variable names from [.env.example](.env.example), but do not commit real emails or keys.
+
+macOS / Linux:
+
+```bash
+export LITMINER_CONTACT_EMAIL="you@example.org"
+export UNPAYWALL_EMAIL="you@example.org"
+# Optional
+export OPENALEX_API_KEY="your-openalex-api-key"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:LITMINER_CONTACT_EMAIL = "you@example.org"
+$env:UNPAYWALL_EMAIL = "you@example.org"
+# Optional
+$env:OPENALEX_API_KEY = "your-openalex-api-key"
+```
+
+When using MCP, you can also put these in the MCP server `env` or `env_vars`. Use `env` for fixed values and `env_vars` to forward variable names from the local machine.
+
+### Sources, Limits, And Publisher Policy
+
+The default runtime config is [config/default.json](config/default.json). Do not put personal emails, API keys, or topic-specific search terms in that file. For project-specific settings, create a workspace file such as `.litminer/config.json`:
+
+```json
+{
+  "channels": {
+    "openalex": true,
+    "semantic_scholar": true,
+    "arxiv": true,
+    "europe_pmc": false,
+    "crossref": true,
+    "unpaywall": true,
+    "publisher_probe": true
+  },
+  "limits": {
+    "max_results_per_query": 80,
+    "semantic_query_limit": 3,
+    "semantic_max_results": 50,
+    "publisher_probe_limit": 20,
+    "publisher_probe_sleep": 1.0,
+    "unpaywall_sleep": 0.1
+  },
+  "outputs": {
+    "default_output_dir": ".litminer/runs/litminer_run",
+    "screenshot_root": ".litminer/screenshots"
+  },
+  "evidence": {
+    "require_doi_for_queue": true,
+    "queue_priorities": "high,medium,needs_review",
+    "include_metadata_blocked": false
+  }
+}
+```
+
+You can also copy [config/example.user.json](config/example.user.json) and edit it per project.
+
+Pass it at runtime:
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --query "your literature query" \
+  --year-from 2026 \
+  --config .litminer/config.json
+```
+
+When calling through MCP, set the tool `config` argument to a JSON path inside the workspace. The path must stay under `LITMINER_WORKSPACE_ROOT`; do not point it to an arbitrary file outside the workspace or the skill install directory.
+
+Check a config file:
+
+```bash
+python -m litminer.engine.doctor --config .litminer/config.json
+```
+
+For one-off runs, you can skip JSON and override behavior with CLI flags:
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --query "your literature query" \
+  --year-from 2026 \
+  --discovery-sources openalex,semantic_scholar,arxiv,europe_pmc \
+  --max-results-per-query 80 \
+  --enrich-unpaywall \
+  --probe-publishers \
+  --probe-limit 20 \
+  --probe-sleep 1.0 \
+  --fields-needed "dataset,external validation,benchmark"
+```
+
+Publisher-related settings:
+
+- `--fields-needed` / `page_required_fields`: fields the Agent should inspect on publisher pages, such as dataset, validation method, external benchmark, or supplementary links.
+- `queue_priorities` / `--queue-priorities`: triage priorities included in `publisher_queue.csv`.
+- `require_doi_for_queue` / `--allow-missing-doi`: by default, a DOI is required for publisher queueing; use `--allow-missing-doi` only when explicitly needed.
+- `publisher_probe` / `--probe-publishers`: lightweight reachability and PDF/SI-link probing only. It does not parse PDFs or bypass paywalls.
+- `publisher_probe_limit` / `--probe-limit` and `publisher_probe_sleep` / `--probe-sleep`: control probe count and delay to avoid hitting publisher pages too aggressively.
 
 ## Quick Start
 
@@ -169,7 +333,7 @@ python -m litminer.engine.run_lit_search \
   --optional-concept "benchmark=benchmark|dataset" \
   --negative-concept "review=review article|survey" \
   --config config/default.json \
-  --output-dir check/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
 
 The query and concepts are examples. In normal use, the Agent derives them from the user's request.
@@ -217,6 +381,19 @@ Litminer does not:
 
 Agent-facing rules and operating details live in [CLAUDE.md](CLAUDE.md) and [SKILL.md](SKILL.md).
 
+## Beta Limits, Failures, And Retries
+
+For the first beta, run `python -m litminer.engine.doctor` and `python -m litminer.engine.offline_smoke` before live searches. If either fails, fix local Python, paths, or config before using network-backed sources.
+
+Common cases:
+
+- API request failure or rate limit: reduce `max_results_per_query`, use fewer sources, and retry later; do not treat an empty failed source as final evidence.
+- Unpaywall reports `skipped_missing_email`: set `UNPAYWALL_EMAIL` or `LITMINER_CONTACT_EMAIL`, then rerun.
+- Crossref reports `lookup_failed` or `mismatch`: keep the blocking status; do not fabricate DOI values. Broaden discovery or verify manually when needed.
+- Publisher pages are unreachable: lower `--probe-limit`, increase `--probe-sleep`, or skip probing and inspect `publisher_queue.csv` manually.
+- Too few candidates: add queries, enable Semantic Scholar/arXiv/Europe PMC, or relax required concepts. Do not invent papers to reach a target count.
+- MCP path errors: ensure inputs, outputs, and `config` all live under `LITMINER_WORKSPACE_ROOT`.
+
 ## Verification
 
 ```bash
@@ -225,4 +402,10 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
 ```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

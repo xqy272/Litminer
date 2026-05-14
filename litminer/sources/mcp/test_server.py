@@ -87,7 +87,10 @@ def main():
         resp = send_request(proc, {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                 "name": "litminer_dedupe",
-                "arguments": {"input_csv": "nonexistent.csv", "output_csv": "check/mcp_test_output.csv"}
+                "arguments": {
+                    "input_csv": "nonexistent.csv",
+                    "output_csv": ".litminer/runs/mcp_test_output.csv",
+                }
             }
         })
         # Dedupe will fail because input does not exist; that is expected.

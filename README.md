@@ -85,6 +85,38 @@ git clone https://github.com/xqy272/Litminer.git .agents/skills/litminer
 
 Codex 也提供 `$skill-installer`，可以从其他仓库下载 skill；但本项目文档推荐直接 `git clone`，因为路径明确、便于审查和更新。`[[skills.config]]` 主要用于对已发现的 skill 做启用/禁用覆盖，不是安装 Litminer 的必要步骤。后续如果希望提供真正的一键安装、MCP 配置打包或更完整的分发元数据，应把 Litminer 进一步打包为 Codex plugin。
 
+### 安装后配置与检查
+
+只使用 skill 时，通常不需要再写配置文件。用户只需要确认目录结构满足下面任意一种形式：
+
+```text
+~/.claude/skills/litminer/SKILL.md
+~/.agents/skills/litminer/SKILL.md
+目标项目/.claude/skills/litminer/SKILL.md
+目标项目/.agents/skills/litminer/SKILL.md
+```
+
+然后重启或刷新 Claude Code / Codex 的 skills，直接用自然语言要求“使用 Litminer”即可。
+
+安装成功后可以在 Litminer 目录运行一次本地检查和离线冒烟测试：
+
+```bash
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
+```
+
+这两个命令不需要 API key。`offline_smoke` 不访问网络，会用内置样本在当前工作区的 `.litminer/runs/offline_smoke/` 下生成 `processing_report.md` 和 `publisher_queue.csv`。
+
+如果 Codex 已发现该 skill 但你想显式启用或禁用它，可以在用户级 `~/.codex/config.toml` 或项目级 `.codex/config.toml` 中添加覆盖项：
+
+```toml
+[[skills.config]]
+path = "C:/Users/your-name/.agents/skills/litminer"
+enabled = true
+```
+
+正常安装不需要这段配置；只有排查 skill 启用状态或做团队项目覆盖时才建议添加。
+
 ### 可选：接入 MCP 工具
 
 Skill 负责让 Agent 知道什么时候使用 Litminer；MCP 负责把 Litminer 的核心能力暴露为工具。二者可以同时使用，但 MCP 不是运行本项目的必要条件。
@@ -98,7 +130,7 @@ python -m litminer.sources.mcp.test_server
 MCP 有两个路径概念：
 
 - Skill 安装目录：Litminer 代码所在位置，例如 `~/.claude/skills/litminer` 或 `~/.agents/skills/litminer`。
-- 用户工作区：输入 CSV、输出报告和 `check/`、`work/` 产物所在位置。通过 `LITMINER_WORKSPACE_ROOT` 指定；未指定时使用 MCP 进程的 `cwd`。
+- 用户工作区：输入 CSV、输出报告和默认 `.litminer/` 运行产物所在位置。通过 `LITMINER_WORKSPACE_ROOT` 指定；未指定时使用 MCP 进程的 `cwd`。MCP 会拒绝访问工作区之外的路径。
 
 Claude Code 可用 JSON 方式添加 stdio MCP 服务。下面示例把代码放在 skill 安装目录，把输出写入目标项目目录：
 
@@ -117,6 +149,8 @@ claude mcp add-json litminer '{
 
 Codex 可在 `config.toml` 中添加：
 
+配置文件位置通常是用户级 `~/.codex/config.toml`，或目标项目内的 `.codex/config.toml`。把下面的路径替换成你自己的 skill 安装目录和用户工作区目录：
+
 ```toml
 [mcp_servers.litminer]
 command = "python"
@@ -132,6 +166,13 @@ env_vars = [
 ]
 ```
 
+如果使用虚拟环境，也可以把 `command` 改成虚拟环境里的 Python，例如 Windows 的 `C:/Users/your-name/.agents/skills/litminer/.venv/Scripts/python.exe`。
+
+可直接参考模板文件：
+
+- Codex MCP: [config/mcp.codex.example.toml](config/mcp.codex.example.toml)
+- Claude Code MCP: [config/mcp.claude.example.json](config/mcp.claude.example.json)
+
 如果只想通过命令行脚本使用 Litminer，可以跳过 MCP。
 
 相关官方文档：
@@ -141,6 +182,18 @@ env_vars = [
 - Codex Agent Skills: <https://developers.openai.com/codex/skills>
 - Codex config reference: <https://developers.openai.com/codex/config-reference#configtoml>
 - Codex plugins: <https://developers.openai.com/codex/plugins/build>
+
+## 文件落点与边界
+
+Litminer 把“安装目录”和“运行工作区”分开处理：
+
+- 安装目录只放代码和文档。执行 `git clone https://github.com/xqy272/Litminer.git .../litminer` 只会写入该 `litminer` 目录，不会创建检索结果、虚拟环境或全局 Python 包。
+- CLI 默认产物写入当前工作区的 `.litminer/`，例如 `.litminer/runs/litminer_run/`、`.litminer/runs/offline_smoke/` 和 `.litminer/screenshots/`。
+- 如果设置了 `LITMINER_WORKSPACE_ROOT`，CLI 的默认相对输出路径会基于该目录解析；如果未设置，则基于当前命令的 `cwd` 解析。
+- MCP 模式下，所有文件参数都必须位于 `LITMINER_WORKSPACE_ROOT` 内；未设置时必须位于 MCP 进程 `cwd` 内。路径逃逸会被拒绝。
+- 用户显式传入 `--output-dir`、`--output`、MCP 工具参数或绝对路径时，Litminer 会尊重该显式选择；这类情况不属于默认落点承诺。
+
+因此，推荐把 MCP 的 `LITMINER_WORKSPACE_ROOT` 指向目标项目根目录，并把目标项目的 `.litminer/` 加入 `.gitignore`。不建议把检索结果默认写进 skill 安装目录，否则多项目结果会和代码混在一起。
 
 ## Python 环境与污染控制
 
@@ -181,12 +234,123 @@ python -m pip install -e ".[dev]"
 
 当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`litminer/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。如果后续要做更干净的用户侧安装体验，应提供独立 release 包或 plugin，而不是依赖用户手工挑选文件。
 
-可选 API 联系信息：
+## API、来源与出版社配置
 
-- `OPENALEX_MAILTO` 或 `LITMINER_CONTACT_EMAIL`
-- `CROSSREF_MAILTO` 或 `LITMINER_CONTACT_EMAIL`
-- `UNPAYWALL_EMAIL` 或 `LITMINER_CONTACT_EMAIL`
-- `OPENALEX_API_KEY`，如果你有 OpenAlex API key
+Litminer 的配置分两层：
+
+- 环境变量：放 API 联系邮箱和可选 API key，适合写在 shell、Agent/MCP 配置或系统环境变量里。
+- 运行配置 JSON：放检索来源开关、限额、输出目录、出版社探测策略，适合按项目保存并通过 `--config` 传入。
+
+### API 联系信息与密钥
+
+多数来源不要求 API key。OpenAlex、Crossref 和 Unpaywall 建议或要求提供联系邮箱；Litminer 会优先使用专用变量，找不到时回退到 `LITMINER_CONTACT_EMAIL`。
+
+| 变量 | 用途 | 是否必需 |
+|------|------|----------|
+| `LITMINER_CONTACT_EMAIL` | 通用联系邮箱，作为 OpenAlex/Crossref/Unpaywall 的回退值。 | 推荐 |
+| `OPENALEX_MAILTO` | OpenAlex polite pool 联系邮箱。 | 推荐 |
+| `CROSSREF_MAILTO` | Crossref User-Agent 联系邮箱。 | 推荐 |
+| `UNPAYWALL_EMAIL` | Unpaywall 查询邮箱。未设置时 Unpaywall 阶段会标记为 skipped。 | 使用 Unpaywall 时必需 |
+| `OPENALEX_API_KEY` | OpenAlex API key。普通使用通常不需要；如你的访问策略要求 key 再设置。 | 可选 |
+
+可以从 [.env.example](.env.example) 复制变量名，但不要把真实邮箱或 key 提交到仓库。
+
+macOS / Linux：
+
+```bash
+export LITMINER_CONTACT_EMAIL="you@example.org"
+export UNPAYWALL_EMAIL="you@example.org"
+# 可选
+export OPENALEX_API_KEY="your-openalex-api-key"
+```
+
+Windows PowerShell：
+
+```powershell
+$env:LITMINER_CONTACT_EMAIL = "you@example.org"
+$env:UNPAYWALL_EMAIL = "you@example.org"
+# 可选
+$env:OPENALEX_API_KEY = "your-openalex-api-key"
+```
+
+如果通过 MCP 使用 Litminer，也可以把这些变量写到 MCP 配置的 `env` 或 `env_vars` 中。`env` 适合固定值，`env_vars` 适合让 Agent 从本机环境转发变量名。
+
+### 来源、限额和出版社策略
+
+默认配置在 [config/default.json](config/default.json)。建议不要直接把个人邮箱、API key 或某个课题的检索词写入这个文件；如果需要项目级配置，可以在你的工作区创建例如 `.litminer/config.json`：
+
+```json
+{
+  "channels": {
+    "openalex": true,
+    "semantic_scholar": true,
+    "arxiv": true,
+    "europe_pmc": false,
+    "crossref": true,
+    "unpaywall": true,
+    "publisher_probe": true
+  },
+  "limits": {
+    "max_results_per_query": 80,
+    "semantic_query_limit": 3,
+    "semantic_max_results": 50,
+    "publisher_probe_limit": 20,
+    "publisher_probe_sleep": 1.0,
+    "unpaywall_sleep": 0.1
+  },
+  "outputs": {
+    "default_output_dir": ".litminer/runs/litminer_run",
+    "screenshot_root": ".litminer/screenshots"
+  },
+  "evidence": {
+    "require_doi_for_queue": true,
+    "queue_priorities": "high,medium,needs_review",
+    "include_metadata_blocked": false
+  }
+}
+```
+
+也可以从 [config/example.user.json](config/example.user.json) 复制后按项目修改。
+
+运行时传入：
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --query "your literature query" \
+  --year-from 2026 \
+  --config .litminer/config.json
+```
+
+如果通过 MCP 调用，把工具参数里的 `config` 设为工作区内的 JSON 路径；该路径必须位于 `LITMINER_WORKSPACE_ROOT` 下，不能指向 skill 安装目录外的任意文件。
+
+检查配置文件：
+
+```bash
+python -m litminer.engine.doctor --config .litminer/config.json
+```
+
+也可以不用 JSON，直接在单次运行中覆盖关键行为：
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --query "your literature query" \
+  --year-from 2026 \
+  --discovery-sources openalex,semantic_scholar,arxiv,europe_pmc \
+  --max-results-per-query 80 \
+  --enrich-unpaywall \
+  --probe-publishers \
+  --probe-limit 20 \
+  --probe-sleep 1.0 \
+  --fields-needed "dataset,external validation,benchmark"
+```
+
+出版社相关配置的含义：
+
+- `--fields-needed` / `page_required_fields`：告诉 Agent 后续看出版社页面时要关注哪些字段，例如数据集、验证方式、外部基准、补充材料链接。
+- `queue_priorities` / `--queue-priorities`：决定哪些 triage 优先级进入 `publisher_queue.csv`。
+- `require_doi_for_queue` / `--allow-missing-doi`：默认要求 DOI 才进入出版社队列；如果明确允许缺 DOI，可用 `--allow-missing-doi`。
+- `publisher_probe` / `--probe-publishers`：只做轻量页面可达性、PDF/SI 链接提示探测，不解析 PDF，也不绕过付费墙。
+- `publisher_probe_limit` / `--probe-limit` 和 `publisher_probe_sleep` / `--probe-sleep`：控制探测数量和请求间隔，避免过快访问出版社页面。
 
 ## 快速开始
 
@@ -200,7 +364,7 @@ python -m litminer.engine.run_lit_search \
   --optional-concept "benchmark=benchmark|dataset" \
   --negative-concept "review=review article|survey" \
   --config config/default.json \
-  --output-dir check/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
 
 Windows 辅助命令：
@@ -253,17 +417,17 @@ python -m litminer.engine.api_discovery \
   --query "user topic query" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
-  --output check/api_candidates.csv \
-  --trace-output check/api_discovery_trace.csv \
-  --report-output check/api_discovery_report.md
+  --output .litminer/runs/litminer_run/api_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/api_discovery_trace.csv \
+  --report-output .litminer/runs/litminer_run/api_discovery_report.md
 ```
 
 对已有 CSV 做语义初筛：
 
 ```bash
 python -m litminer.engine.semantic_triage \
-  --input check/deduped_candidates.csv \
-  --output check/triaged_candidates.csv \
+  --input .litminer/runs/litminer_run/deduped_candidates.csv \
+  --output .litminer/runs/litminer_run/triaged_candidates.csv \
   --required-concept "main=term1|term2" \
   --optional-concept "secondary=term3|term4" \
   --negative-concept "negative=term5|term6" \
@@ -275,20 +439,33 @@ python -m litminer.engine.semantic_triage \
 
 ```bash
 python -m litminer.engine.build_publisher_queue \
-  --input check/oa_annotated_candidates.csv \
-  --output check/publisher_queue.csv \
+  --input .litminer/runs/litminer_run/oa_annotated_candidates.csv \
+  --output .litminer/runs/litminer_run/publisher_queue.csv \
   --priorities high,medium,needs_review \
   --fields-needed "field_from_user_request"
 ```
 
-如果跳过 Unpaywall，则把 `--input` 改成 `check/triaged_candidates.csv` 或 `check/selected_candidates.csv`。不要直接用只有 Crossref 字段的 `verified_candidates.csv` 配合 `--priorities`，因为优先级字段来自语义初筛阶段。
+如果跳过 Unpaywall，则把 `--input` 改成 `.litminer/runs/litminer_run/triaged_candidates.csv` 或 `.litminer/runs/litminer_run/selected_candidates.csv`。不要直接用只有 Crossref 字段的 `verified_candidates.csv` 配合 `--priorities`，因为优先级字段来自语义初筛阶段。
 
 生成处理摘要：
 
 ```bash
 python -m litminer.engine.processing_report \
-  --output-dir check/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
+
+## 内测限制、失败和重试
+
+第一版内测建议先跑 `python -m litminer.engine.doctor` 和 `python -m litminer.engine.offline_smoke`。如果这两步失败，优先修复本地 Python、目录或配置问题，再运行真实检索。
+
+常见情况：
+
+- API 请求失败或限流：减少 `max_results_per_query`，减少来源数量，稍后重试；不要把失败来源的空结果当作最终事实。
+- Unpaywall 显示 `skipped_missing_email`：设置 `UNPAYWALL_EMAIL` 或 `LITMINER_CONTACT_EMAIL` 后重跑。
+- Crossref `lookup_failed` 或 `mismatch`：保留阻塞状态，不要手工伪造 DOI；必要时扩大检索或人工核验。
+- 出版社页面不可达：降低 `--probe-limit`，提高 `--probe-sleep`，或跳过自动探测后人工检查 `publisher_queue.csv`。
+- 候选数量过少：增加查询词、启用 Semantic Scholar/arXiv/Europe PMC，或放宽 required concepts；不要为了凑数生成不存在的论文。
+- MCP 路径报错：确认输入、输出和 `config` 都在 `LITMINER_WORKSPACE_ROOT` 下。
 
 ## 项目边界
 
@@ -310,6 +487,8 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
 ```
 
 ## 项目结构
@@ -319,6 +498,7 @@ Litminer/
 |-- README.md
 |-- README.en.md
 |-- README.zh-CN.md
+|-- LICENSE
 |-- SKILL.md
 |-- CLAUDE.md
 |-- config/
@@ -327,3 +507,7 @@ Litminer/
 |-- references/
 `-- test/
 ```
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。

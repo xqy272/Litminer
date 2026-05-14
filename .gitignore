@@ -17,5 +17,6 @@ env/
 
 check/
 work/
+.litminer/
 *.log
 .litminer_probe_test

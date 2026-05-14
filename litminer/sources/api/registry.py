@@ -60,7 +60,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         supports_year_filter="yes",
         supports_doi_lookup="external_ids",
         returns_abstract="often",
-        rate_limit_policy="retry_with_backoff",
+        rate_limit_policy="retry_with_backoff_and_retry_after",
     ),
     "arxiv": ProviderSpec(
         name="arxiv",

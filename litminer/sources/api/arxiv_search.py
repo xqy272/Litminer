@@ -145,15 +145,17 @@ def entry_to_row(entry: ET.Element, source_query: str = "") -> dict[str, str]:
     }
 
 
-def _with_year_filter(query: str, year_from: int | None) -> str:
-    if not year_from:
+def _with_year_filter(query: str, year_from: int | None, year_to: int | None = None) -> str:
+    if not year_from and not year_to:
         return query
-    return f"({query}) AND submittedDate:[{year_from}01010000 TO 999912312359]"
+    start = f"{year_from}01010000" if year_from else "000001010000"
+    end = f"{year_to}12312359" if year_to else "999912312359"
+    return f"({query}) AND submittedDate:[{start} TO {end}]"
 
 
-def _build_url(query: str, year_from: int | None, start: int, max_results: int) -> str:
+def _build_url(query: str, year_from: int | None, year_to: int | None, start: int, max_results: int) -> str:
     params = {
-        "search_query": _with_year_filter(query, year_from),
+        "search_query": _with_year_filter(query, year_from, year_to),
         "start": str(start),
         "max_results": str(max_results),
         "sortBy": "relevance",
@@ -179,16 +181,22 @@ def _fetch_xml(url: str) -> ET.Element:
     raise RuntimeError(f"arXiv request failed: {last_error}")
 
 
-def _year_ok(row: dict[str, str], year_from: int | None) -> bool:
-    if not year_from:
+def _year_ok(row: dict[str, str], year_from: int | None, year_to: int | None = None) -> bool:
+    if not year_from and not year_to:
         return True
     try:
-        return int(row.get("publication_year", "0")) >= year_from
+        year = int(row.get("publication_year", "0"))
     except ValueError:
         return True
+    if year_from and year < year_from:
+        return False
+    if year_to and year > year_to:
+        return False
+    return True
 
 
 def search(query: str, year_from: int | None = None,
+           year_to: int | None = None,
            max_results: int = 100) -> list[dict[str, str]]:
     """Search arXiv and return uniform-schema rows.
 
@@ -202,7 +210,7 @@ def search(query: str, year_from: int | None = None,
     try:
         while len(results) < max_results:
             page_size = min(RESULTS_PER_PAGE, max_results - len(results))
-            root = _fetch_xml(_build_url(query, year_from, start, page_size))
+            root = _fetch_xml(_build_url(query, year_from, year_to, start, page_size))
             entries = root.findall("atom:entry", NS)
             if not entries:
                 break
@@ -211,7 +219,7 @@ def search(query: str, year_from: int | None = None,
                 arxiv_id = row.get("arxiv_id", "")
                 if arxiv_id and arxiv_id in seen_ids:
                     continue
-                if not _year_ok(row, year_from):
+                if not _year_ok(row, year_from, year_to):
                     continue
                 if arxiv_id:
                     seen_ids.add(arxiv_id)
@@ -247,10 +255,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Search arXiv for literature candidates.")
     parser.add_argument("--query", required=True, help="arXiv search query")
     parser.add_argument("--year-from", type=int, default=None, help="Minimum publication year")
+    parser.add_argument("--year-to", type=int, default=None, help="Maximum publication year")
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    to_csv(search(args.query, year_from=args.year_from, max_results=args.max_results), args.output)
+    to_csv(search(args.query, year_from=args.year_from, year_to=args.year_to, max_results=args.max_results), args.output)
 
 
 if __name__ == "__main__":

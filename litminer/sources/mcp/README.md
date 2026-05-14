@@ -8,8 +8,9 @@ queueing.
 
 File path arguments are resolved relative to `LITMINER_WORKSPACE_ROOT`. If that
 environment variable is unset, they resolve relative to the MCP process `cwd`.
-Paths are rejected if they escape the workspace root. This keeps the skill code
-directory separate from user output files.
+Paths are rejected if they escape the workspace root. Default workflow outputs
+go under `.litminer/` inside that workspace, keeping the skill code directory
+separate from user output files.
 
 ## Run
 
@@ -62,7 +63,7 @@ python -m litminer.sources.mcp.test_server
       "include_arxiv": false,
       "include_europe_pmc": false,
       "enrich_unpaywall": true,
-      "output_dir": "check/mcp_run"
+      "output_dir": ".litminer/runs/mcp_run"
     }
   }
 }

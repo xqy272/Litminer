@@ -163,16 +163,18 @@ def record_to_row(record: dict[str, Any], source_query: str = "") -> dict[str, s
     }
 
 
-def _with_year_filter(query: str, year_from: int | None) -> str:
-    if not year_from:
+def _with_year_filter(query: str, year_from: int | None, year_to: int | None = None) -> str:
+    if not year_from and not year_to:
         return query
-    return f"({query}) AND FIRST_PDATE:[{year_from}-01-01 TO 9999-12-31]"
+    start = f"{year_from}-01-01" if year_from else "0000-01-01"
+    end = f"{year_to}-12-31" if year_to else "9999-12-31"
+    return f"({query}) AND FIRST_PDATE:[{start} TO {end}]"
 
 
-def _build_url(query: str, year_from: int | None, page_size: int,
+def _build_url(query: str, year_from: int | None, year_to: int | None, page_size: int,
                cursor_mark: str) -> str:
     params = {
-        "query": _with_year_filter(query, year_from),
+        "query": _with_year_filter(query, year_from, year_to),
         "format": "json",
         "resultType": "core",
         "pageSize": str(page_size),
@@ -198,16 +200,22 @@ def _fetch_json(url: str) -> dict[str, Any]:
     raise RuntimeError(f"Europe PMC request failed: {last_error}")
 
 
-def _year_ok(row: dict[str, str], year_from: int | None) -> bool:
-    if not year_from:
+def _year_ok(row: dict[str, str], year_from: int | None, year_to: int | None = None) -> bool:
+    if not year_from and not year_to:
         return True
     try:
-        return int(row.get("publication_year", "0")) >= year_from
+        year = int(row.get("publication_year", "0"))
     except ValueError:
         return True
+    if year_from and year < year_from:
+        return False
+    if year_to and year > year_to:
+        return False
+    return True
 
 
 def search(query: str, year_from: int | None = None,
+           year_to: int | None = None,
            max_results: int = 100) -> list[dict[str, str]]:
     """Search Europe PMC and return uniform-schema rows."""
     results: list[dict[str, str]] = []
@@ -218,7 +226,7 @@ def search(query: str, year_from: int | None = None,
     try:
         while len(results) < max_results:
             page_size = min(RESULTS_PER_PAGE, max_results - len(results))
-            data = _fetch_json(_build_url(query, year_from, page_size, cursor))
+            data = _fetch_json(_build_url(query, year_from, year_to, page_size, cursor))
             records = data.get("resultList", {}).get("result", [])
             if not isinstance(records, list) or not records:
                 break
@@ -227,7 +235,7 @@ def search(query: str, year_from: int | None = None,
                 key = row.get("doi") or row.get("europe_pmc_id") or row.get("title")
                 if key and key in seen_keys:
                     continue
-                if not _year_ok(row, year_from):
+                if not _year_ok(row, year_from, year_to):
                     continue
                 if key:
                     seen_keys.add(key)
@@ -262,10 +270,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Search Europe PMC for literature candidates.")
     parser.add_argument("--query", required=True, help="Europe PMC search query")
     parser.add_argument("--year-from", type=int, default=None, help="Minimum publication year")
+    parser.add_argument("--year-to", type=int, default=None, help="Maximum publication year")
     parser.add_argument("--max-results", type=int, default=100)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    to_csv(search(args.query, year_from=args.year_from, max_results=args.max_results), args.output)
+    to_csv(search(args.query, year_from=args.year_from, year_to=args.year_to, max_results=args.max_results), args.output)
 
 
 if __name__ == "__main__":

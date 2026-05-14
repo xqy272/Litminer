@@ -24,9 +24,9 @@ python -m litminer.engine.api_discovery \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
   --max-results-per-query 100 \
-  --output work/api_candidates.csv \
-  --trace-output work/api_discovery_trace.csv \
-  --report-output work/api_discovery_report.md
+  --output .litminer/runs/litminer_run/api_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/api_discovery_trace.csv \
+  --report-output .litminer/runs/litminer_run/api_discovery_report.md
 ```
 
 Use `litminer/engine/api_discovery.py` for normal work because it records provider,
@@ -42,8 +42,8 @@ After discovery and deduplication, verify metadata through Crossref:
 
 ```bash
 python -m litminer.sources.api.crossref_verify \
-  --input work/deduped_candidates.csv \
-  --output work/verified_candidates.csv \
+  --input .litminer/runs/litminer_run/deduped_candidates.csv \
+  --output .litminer/runs/litminer_run/verified_candidates.csv \
   --title-lookup
 ```
 
@@ -56,8 +56,8 @@ After Crossref verification, use Unpaywall to collect structured access hints:
 
 ```bash
 python -m litminer.sources.api.unpaywall_lookup \
-  --input work/verified_candidates.csv \
-  --output work/oa_annotated_candidates.csv \
+  --input .litminer/runs/litminer_run/verified_candidates.csv \
+  --output .litminer/runs/litminer_run/oa_annotated_candidates.csv \
   --email "you@example.org"
 ```
 

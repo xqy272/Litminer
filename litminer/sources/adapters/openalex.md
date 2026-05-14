@@ -20,7 +20,7 @@ python -m litminer.sources.api.openalex_search \
   --query "user topic query" \
   --year-from 2026 \
   --max-results 200 \
-  --output work/candidates_openalex.csv
+  --output .litminer/runs/litminer_run/candidates_openalex.csv
 ```
 
 Run multiple query variants when recall matters. The Agent should derive query
@@ -31,9 +31,9 @@ families from the active user request, not from project defaults.
 Recommended next steps:
 
 ```bash
-python -m litminer.engine.dedupe_papers work/candidates_openalex.csv work/deduped_candidates.csv
-python -m litminer.engine.semantic_triage --input work/deduped_candidates.csv --output work/triaged_candidates.csv --required-concept "concept=term1|term2"
-python -m litminer.sources.api.crossref_verify --input work/triaged_candidates.csv --output work/verified_candidates.csv --title-lookup
+python -m litminer.engine.dedupe_papers .litminer/runs/litminer_run/candidates_openalex.csv .litminer/runs/litminer_run/deduped_candidates.csv
+python -m litminer.engine.semantic_triage --input .litminer/runs/litminer_run/deduped_candidates.csv --output .litminer/runs/litminer_run/triaged_candidates.csv --required-concept "concept=term1|term2"
+python -m litminer.sources.api.crossref_verify --input .litminer/runs/litminer_run/triaged_candidates.csv --output .litminer/runs/litminer_run/verified_candidates.csv --title-lookup
 ```
 
 ## Reliability Boundary

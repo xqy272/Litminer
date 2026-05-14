@@ -14,6 +14,8 @@ litminer-run = "litminer.engine.run_lit_search:main"
 litminer-discover-api = "litminer.engine.api_discovery:main"
 litminer-triage = "litminer.engine.semantic_triage:main"
 litminer-mcp = "litminer.sources.mcp.server:main"
+litminer-doctor = "litminer.engine.doctor:main"
+litminer-smoke = "litminer.engine.offline_smoke:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]

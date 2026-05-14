@@ -24,8 +24,8 @@ and access-link hints:
 
 ```bash
 python -m litminer.sources.api.unpaywall_lookup \
-  --input work/verified_candidates.csv \
-  --output work/oa_annotated_candidates.csv \
+  --input .litminer/runs/litminer_run/verified_candidates.csv \
+  --output .litminer/runs/litminer_run/oa_annotated_candidates.csv \
   --email "you@example.org"
 ```
 

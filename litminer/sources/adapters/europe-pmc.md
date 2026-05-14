@@ -12,9 +12,9 @@ python -m litminer.engine.api_discovery \
   --sources europe_pmc \
   --year-from 2026 \
   --max-results-per-query 50 \
-  --output work/europe_pmc_candidates.csv \
-  --trace-output work/europe_pmc_trace.csv \
-  --report-output work/europe_pmc_report.md
+  --output .litminer/runs/litminer_run/europe_pmc_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/europe_pmc_trace.csv \
+  --report-output .litminer/runs/litminer_run/europe_pmc_report.md
 ```
 
 ## Evidence Boundary

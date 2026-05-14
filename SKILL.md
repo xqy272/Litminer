@@ -62,6 +62,26 @@ Do not put user goals, literature topics, search queries, required concepts, or
 requested extraction fields into global config. The Agent should infer those
 from the current conversation and pass them as runtime arguments.
 
+For setup checks, run:
+
+```bash
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
+```
+
+Use `doctor --config PATH` before trusting a user-provided runtime config.
+
+Runtime file boundary:
+
+- Treat the Litminer clone as the skill/code directory, not as the user's data
+  directory.
+- Default CLI and MCP workflow outputs should live under `.litminer/` in the
+  active workspace.
+- If `LITMINER_WORKSPACE_ROOT` is set, use it as the workspace root; otherwise
+  default relative outputs resolve under the process `cwd`.
+- In MCP mode, never read or write paths outside `LITMINER_WORKSPACE_ROOT` or
+  the MCP process `cwd` fallback.
+
 ## Source Policy
 
 | Source | Use For | Boundary |
@@ -106,7 +126,7 @@ python -m litminer.engine.run_lit_search \
   --required-concept "main=term1|term2" \
   --optional-concept "secondary=term3|term4" \
   --config config/default.json \
-  --output-dir work/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
 
 Use multiple `--query` values when recall matters. Add
@@ -121,9 +141,9 @@ python -m litminer.engine.api_discovery \
   --query "USER_QUERY_HERE" \
   --sources openalex,semantic_scholar,arxiv,europe_pmc \
   --year-from 2026 \
-  --output work/api_candidates.csv \
-  --trace-output work/api_discovery_trace.csv \
-  --report-output work/api_discovery_report.md
+  --output .litminer/runs/litminer_run/api_candidates.csv \
+  --trace-output .litminer/runs/litminer_run/api_discovery_trace.csv \
+  --report-output .litminer/runs/litminer_run/api_discovery_report.md
 ```
 
 Prefer this over raw provider wrappers because it records provider, query ID,
@@ -133,8 +153,8 @@ rank, source trace, and per-source status.
 
 ```bash
 python -m litminer.engine.semantic_triage \
-  --input work/deduped_candidates.csv \
-  --output work/triaged_candidates.csv \
+  --input .litminer/runs/litminer_run/deduped_candidates.csv \
+  --output .litminer/runs/litminer_run/triaged_candidates.csv \
   --required-concept "main=term1|term2" \
   --optional-concept "secondary=term3|term4" \
   --negative-concept "negative=term5|term6" \
@@ -160,17 +180,17 @@ commands unless the Agent explicitly applies a downstream hard filter.
 
 ```bash
 python -m litminer.sources.api.crossref_verify \
-  --input work/selected_candidates.csv \
-  --output work/verified_candidates.csv \
+  --input .litminer/runs/litminer_run/selected_candidates.csv \
+  --output .litminer/runs/litminer_run/verified_candidates.csv \
   --title-lookup
 
 python -m litminer.sources.api.unpaywall_lookup \
-  --input work/verified_candidates.csv \
-  --output work/oa_annotated_candidates.csv
+  --input .litminer/runs/litminer_run/verified_candidates.csv \
+  --output .litminer/runs/litminer_run/oa_annotated_candidates.csv
 
 python -m litminer.engine.build_publisher_queue \
-  --input work/oa_annotated_candidates.csv \
-  --output work/publisher_queue.csv \
+  --input .litminer/runs/litminer_run/oa_annotated_candidates.csv \
+  --output .litminer/runs/litminer_run/publisher_queue.csv \
   --priorities high,medium,needs_review \
   --fields-needed "field_from_user_request"
 ```
@@ -179,8 +199,8 @@ Optional publisher probe:
 
 ```bash
 python -m litminer.engine.publisher_probe \
-  --input work/publisher_queue.csv \
-  --output work/publisher_queue_probed.csv \
+  --input .litminer/runs/litminer_run/publisher_queue.csv \
+  --output .litminer/runs/litminer_run/publisher_queue_probed.csv \
   --limit 20
 ```
 
@@ -191,15 +211,15 @@ Generate a compact automated processing report:
 
 ```bash
 python -m litminer.engine.processing_report \
-  --output-dir work/litminer_run
+  --output-dir .litminer/runs/litminer_run
 ```
 
 ### 6. Import WebSearch Leads Only As Supplement
 
 ```bash
 python -m litminer.engine.websearch_import \
-  --input work/websearch_raw.csv \
-  --output work/websearch_candidates.csv \
+  --input .litminer/runs/litminer_run/websearch_raw.csv \
+  --output .litminer/runs/litminer_run/websearch_candidates.csv \
   --query "gap-focused query"
 ```
 
