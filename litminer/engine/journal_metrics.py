@@ -15,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from litminer.engine.common import write_csv_atomic
+
 
 PROJECT_DEFAULT_METRICS = Path(__file__).resolve().parents[2] / "references" / "journal_metrics_seed.csv"
 PACKAGE_DEFAULT_METRICS = Path(__file__).resolve().parents[1] / "references" / "journal_metrics_seed.csv"
@@ -238,27 +240,15 @@ def filter_csv(input_path: Path, output_path: Path,
         if status in ("pass", "fail", "unverified"):
             counts[status] += 1
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(annotated)
+    write_csv_atomic(annotated, output_path, fieldnames=fieldnames)
 
     if pass_output is not None:
         pass_rows = [row for row in annotated if row.get("metric_filter_status") == "pass"]
-        pass_output.parent.mkdir(parents=True, exist_ok=True)
-        with pass_output.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(pass_rows)
+        write_csv_atomic(pass_rows, pass_output, fieldnames=fieldnames)
 
     if backup_output is not None:
         backup_rows = [row for row in annotated if row.get("metric_filter_status") != "pass"]
-        backup_output.parent.mkdir(parents=True, exist_ok=True)
-        with backup_output.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(backup_rows)
+        write_csv_atomic(backup_rows, backup_output, fieldnames=fieldnames)
 
     print(
         "Journal metrics: "

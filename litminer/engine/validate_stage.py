@@ -4,17 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 from pathlib import Path
 
-
-STAGE_REQUIRED = {
-    "candidate": ["title", "publication_year", "journal"],
-    "triage": ["triage_priority", "triage_score", "triage_reasons"],
-    "metadata": ["title", "doi", "journal", "publication_year"],
-    "queue": ["title", "doi", "doi_url", "publisher_url", "fields_needed", "next_action"],
-    "preliminary": ["title", "doi", "journal", "publication_year", "evidence_grade", "evidence_pointer"],
-}
+from litminer.engine.common import read_csv_rows, write_text_atomic
+from litminer.engine.schema import STAGE_REQUIRED
 
 
 def empty(value: str) -> bool:
@@ -25,12 +18,10 @@ def validate_stage(input_path: Path, output_path: Path, stage: str) -> int:
     if stage not in STAGE_REQUIRED:
         raise SystemExit(f"Unknown stage: {stage}. Expected one of {sorted(STAGE_REQUIRED)}")
 
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = set(reader.fieldnames)
-        rows = list(reader)
+    input_fields, rows = read_csv_rows(input_path)
+    if not input_fields:
+        raise SystemExit("Input CSV has no header")
+    fieldnames = set(input_fields)
 
     issues: list[tuple[int | str, str, str, str]] = []
     for field in STAGE_REQUIRED[stage]:
@@ -69,8 +60,7 @@ def validate_stage(input_path: Path, output_path: Path, stage: str) -> int:
     else:
         lines.append("No issues found.")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(output_path, "\n".join(lines) + "\n")
     return len(fails)
 
 

@@ -13,6 +13,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from litminer.engine.common import normalize_doi, write_csv_atomic
+
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>]+", re.I)
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
@@ -64,11 +66,7 @@ def first_value(row: dict[str, str], fields: list[str]) -> str:
 
 
 def clean_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".,;)[]")
+    return normalize_doi(value)
 
 
 def extract_doi(*values: str) -> str:
@@ -151,11 +149,7 @@ def import_websearch(input_csv: Path, output_csv: Path,
         for index, row in enumerate(source_rows, start=1)
     ]
 
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with output_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames_for(rows), extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(rows, output_csv, fieldnames=fieldnames_for(rows))
 
     with_doi = sum(1 for row in rows if row.get("doi"))
     return {"rows": len(rows), "with_doi": with_doi, "without_doi": len(rows) - with_doi}

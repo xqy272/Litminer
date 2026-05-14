@@ -205,6 +205,8 @@ python -m pip install -e ".[dev]"
 
 The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `litminer/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
 
+The current distribution boundary is clone-as-skill first. `pip install -e .` is appropriate for local development and console scripts, but a regular wheel install is not yet a complete skill installation because Agent discovery still depends on `SKILL.md`, config templates, and documentation folders. Until a dedicated plugin or release bundle exists, do not present wheel installation as the full Agent onboarding path.
+
 ## API, Source, And Publisher Configuration
 
 Litminer has two configuration layers:
@@ -267,6 +269,7 @@ The default runtime config is [config/default.json](config/default.json). Do not
     "semantic_max_results": 50,
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
+    "strict_discovery": false,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -276,7 +279,8 @@ The default runtime config is [config/default.json](config/default.json). Do not
   "evidence": {
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",
-    "include_metadata_blocked": false
+    "include_metadata_blocked": false,
+    "queue_strict_only": true
   }
 }
 ```
@@ -308,6 +312,7 @@ python -m litminer.engine.run_lit_search \
   --year-from 2026 \
   --discovery-sources openalex,semantic_scholar,arxiv,europe_pmc \
   --max-results-per-query 80 \
+  --openalex-work-types article \
   --enrich-unpaywall \
   --probe-publishers \
   --probe-limit 20 \
@@ -320,6 +325,9 @@ Publisher-related settings:
 - `--fields-needed` / `page_required_fields`: fields the Agent should inspect on publisher pages, such as dataset, validation method, external benchmark, or supplementary links.
 - `queue_priorities` / `--queue-priorities`: triage priorities included in `publisher_queue.csv`.
 - `require_doi_for_queue` / `--allow-missing-doi`: by default, a DOI is required for publisher queueing; use `--allow-missing-doi` only when explicitly needed.
+- `strict_discovery` / `--strict-discovery`: fail the workflow when API provider errors make the candidate set unreliable instead of only producing an empty-result report.
+- `openalex_work_types` / `--openalex-work-types`: controls OpenAlex work type filtering. The default is `article`; pass `all` to disable the type filter.
+- `queue_strict_only` / `--queue-strict-only` / `--queue-all-metric-statuses`: with `--min-if`, Litminer defaults to queueing only metric-pass rows. Use queue-all mode when you want annotation without hard filtering.
 - `publisher_probe` / `--probe-publishers`: lightweight reachability and PDF/SI-link probing only. It does not parse PDFs or bypass paywalls.
 - `publisher_probe_limit` / `--probe-limit` and `publisher_probe_sleep` / `--probe-sleep`: control probe count and delay to avoid hitting publisher pages too aggressively.
 

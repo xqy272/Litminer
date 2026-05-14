@@ -44,9 +44,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_PROTOCOL_VERSION = "2025-11-25"
-
+from litminer import __version__
 from litminer.engine import workspace
+
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION, "2024-11-05"}
+MAX_STDIN_LINE_BYTES = int(os.environ.get("LITMINER_MCP_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
 
 # Lazy imports: only load when a tool is called.
 _openalex_search = None
@@ -174,6 +177,7 @@ def tool_search_openalex(args: dict) -> dict:
         max_results=args.get("max_results", 200),
         api_key=args.get("api_key") or os.environ.get("OPENALEX_API_KEY"),
         mailto=args.get("mailto"),
+        work_types=args.get("work_types", "article"),
     )
     return {
         "count": len(results),
@@ -439,6 +443,8 @@ def tool_discover_api(args: dict) -> dict:
         semantic_max_results=args.get("semantic_max_results"),
         openalex_api_key=args.get("openalex_api_key") or os.environ.get("OPENALEX_API_KEY"),
         openalex_mailto=args.get("openalex_mailto"),
+        openalex_work_types=args.get("openalex_work_types", "article"),
+        strict_discovery=args.get("strict_discovery", False),
         trace_csv=trace_csv,
         report_md=report_md,
     )
@@ -459,6 +465,7 @@ def tool_semantic_triage(args: dict) -> dict:
         year_to=args.get("year_to"),
         require_doi=args.get("require_doi", False),
         exclude_article_types=args.get("exclude_article_types") or [],
+        allow_regex=not args.get("disable_regex_concepts", False),
     )
     return {"status": "ok", "output": args["output_csv"], "counts": counts}
 
@@ -555,7 +562,7 @@ def tool_run_lit_search(args: dict) -> dict:
         query_file=_optional_workspace_path(args.get("query_file"), "query_file", must_exist=True),
         year_from=args.get("year_from"),
         year_to=args.get("year_to"),
-        output_dir=_workspace_path(args.get("output_dir", workspace.DEFAULT_RUN_DIR), "output_dir"),
+        output_dir=_optional_workspace_path(args.get("output_dir"), "output_dir"),
         discovery_sources=args.get("discovery_sources"),
         include_arxiv=args.get("include_arxiv"),
         include_europe_pmc=args.get("include_europe_pmc"),
@@ -571,6 +578,7 @@ def tool_run_lit_search(args: dict) -> dict:
         page_required_field=args.get("page_required_fields"),
         openalex_api_key=args.get("openalex_api_key"),
         openalex_mailto=args.get("openalex_mailto"),
+        openalex_work_types=args.get("openalex_work_types"),
         enrich_unpaywall=args.get("enrich_unpaywall"),
         skip_unpaywall=args.get("skip_unpaywall"),
         unpaywall_email=args.get("unpaywall_email"),
@@ -581,15 +589,14 @@ def tool_run_lit_search(args: dict) -> dict:
         semantic_query_limit=args.get("semantic_query_limit"),
         semantic_max_results=args.get("semantic_max_results"),
         skip_crossref=args.get("skip_crossref"),
+        strict_discovery=args.get("strict_discovery"),
         metrics=_optional_workspace_path(args.get("metrics_csv"), "metrics_csv", must_exist=True),
         min_if=args.get("min_if"),
+        skip_journal_metrics=args.get("skip_journal_metrics"),
         target_count=args.get("target_count"),
-        queue_strict_only=args.get("queue_strict_only", False),
+        queue_strict_only=args.get("queue_strict_only"),
         allow_missing_doi=args.get("allow_missing_doi"),
-        screenshot_root=_workspace_path(
-            args.get("screenshot_root", workspace.DEFAULT_SCREENSHOT_ROOT),
-            "screenshot_root",
-        ),
+        screenshot_root=_optional_workspace_path(args.get("screenshot_root"), "screenshot_root"),
         probe_publishers=args.get("probe_publishers"),
         probe_limit=args.get("probe_limit"),
         probe_sleep=args.get("probe_sleep"),
@@ -610,6 +617,7 @@ TOOLS: dict[str, dict] = {
             "max_results": {"type": "integer", "required": False, "description": "Max results (default 200)"},
             "api_key": {"type": "string", "required": False, "description": "OpenAlex API key"},
             "mailto": {"type": "string", "required": False, "description": "OpenAlex polite-pool contact email"},
+            "work_types": {"type": "string", "required": False, "description": "OpenAlex work types; comma/pipe-separated, or 'all'"},
         },
     },
     "litminer_search_semantic_scholar": {
@@ -699,6 +707,8 @@ TOOLS: dict[str, dict] = {
             "semantic_max_results": {"type": "integer", "required": False, "description": "Semantic Scholar max results per query"},
             "openalex_api_key": {"type": "string", "required": False, "description": "OpenAlex API key"},
             "openalex_mailto": {"type": "string", "required": False, "description": "OpenAlex polite-pool contact email"},
+            "openalex_work_types": {"type": "string", "required": False, "description": "OpenAlex work types; comma/pipe-separated, or 'all'"},
+            "strict_discovery": {"type": "boolean", "required": False, "description": "Fail when provider errors prevent a reliable candidate set"},
             "output_csv": {"type": "string", "required": False, "description": "Unified candidate output CSV"},
             "trace_csv": {"type": "string", "required": False, "description": "Discovery trace CSV"},
             "report_md": {"type": "string", "required": False, "description": "Discovery report markdown"},
@@ -718,6 +728,7 @@ TOOLS: dict[str, dict] = {
             "year_to": {"type": "integer", "required": False, "description": "Maximum publication year metadata flag"},
             "require_doi": {"type": "boolean", "required": False, "description": "Mark missing DOI as metadata-blocking"},
             "exclude_article_types": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Metadata article types to mark blocked"},
+            "disable_regex_concepts": {"type": "boolean", "required": False, "description": "Reject re: concepts instead of compiling caller regex"},
         },
     },
     "litminer_filter_journal_metrics": {
@@ -800,18 +811,21 @@ TOOLS: dict[str, dict] = {
             "page_required_fields": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Generic publisher-page evidence fields"},
             "openalex_api_key": {"type": "string", "required": False, "description": "OpenAlex API key"},
             "openalex_mailto": {"type": "string", "required": False, "description": "OpenAlex polite-pool contact email"},
+            "openalex_work_types": {"type": "string", "required": False, "description": "OpenAlex work types; comma/pipe-separated, or 'all'"},
             "max_results_per_query": {"type": "integer", "required": False, "description": "Max results per discovery provider/query"},
             "skip_openalex": {"type": "boolean", "required": False, "description": "Skip OpenAlex discovery"},
             "include_semantic_scholar": {"type": "boolean", "required": False, "description": "Run Semantic Scholar too"},
             "semantic_query_limit": {"type": "integer", "required": False, "description": "Max query count for Semantic Scholar"},
             "semantic_max_results": {"type": "integer", "required": False, "description": "Semantic Scholar max results per query"},
             "skip_crossref": {"type": "boolean", "required": False, "description": "Skip Crossref verification"},
+            "strict_discovery": {"type": "boolean", "required": False, "description": "Fail when provider errors prevent a reliable candidate set"},
             "enrich_unpaywall": {"type": "boolean", "required": False, "description": "Annotate verified rows with Unpaywall OA links"},
             "skip_unpaywall": {"type": "boolean", "required": False, "description": "Disable Unpaywall annotation"},
             "unpaywall_email": {"type": "string", "required": False, "description": "Unpaywall email"},
             "unpaywall_sleep": {"type": "number", "required": False, "description": "Delay between Unpaywall requests"},
             "metrics_csv": {"type": "string", "required": False, "description": "Verified metrics CSV"},
             "min_if": {"type": "number", "required": False, "description": "Minimum IF threshold"},
+            "skip_journal_metrics": {"type": "boolean", "required": False, "description": "Disable journal metric annotation/filtering"},
             "target_count": {"type": "integer", "required": False, "description": "Requested count"},
             "queue_strict_only": {"type": "boolean", "required": False, "description": "Queue only metric-pass rows"},
             "allow_missing_doi": {"type": "boolean", "required": False, "description": "Allow rows without DOI into queue"},
@@ -877,12 +891,19 @@ def handle_request(request: dict) -> dict | None:
             request.get("params", {}).get("protocolVersion")
             or DEFAULT_PROTOCOL_VERSION
         )
+        if requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            return _jsonrpc_error(
+                request,
+                -32602,
+                f"Unsupported protocolVersion: {requested_version}. "
+                f"Supported: {', '.join(sorted(SUPPORTED_PROTOCOL_VERSIONS))}",
+            )
         return {
             "jsonrpc": "2.0",
             "id": request.get("id"),
             "result": {
                 "protocolVersion": requested_version,
-                "serverInfo": {"name": "litminer", "version": "1.0.0"},
+                "serverInfo": {"name": "litminer", "version": __version__},
                 "capabilities": {"tools": {"listChanged": False}},
             },
         }
@@ -899,8 +920,18 @@ def handle_request(request: dict) -> dict | None:
 def main() -> None:
     """Run the MCP server over stdio."""
     print("Litminer MCP Server starting on stdio", file=sys.stderr)
-    for line in sys.stdin:
-        line = line.strip()
+    for raw_line in sys.stdin.buffer:
+        if len(raw_line) > MAX_STDIN_LINE_BYTES:
+            print(json.dumps({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32700,
+                    "message": f"Input line exceeds {MAX_STDIN_LINE_BYTES} bytes",
+                },
+            }), flush=True)
+            continue
+        line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
             continue
         try:

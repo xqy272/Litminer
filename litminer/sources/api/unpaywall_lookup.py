@@ -8,7 +8,6 @@ PDFs and does not bypass access controls.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sys
@@ -19,6 +18,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
@@ -46,14 +47,6 @@ OUTPUT_COLUMNS = [
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".,;)[]")
 
 
 def resolve_email(email: str | None = None) -> str:
@@ -141,12 +134,9 @@ def annotate_row(row: dict[str, str], email: str | None = None,
 def annotate_csv(input_path: Path, output_path: Path,
                  email: str | None = None,
                  sleep_s: float = 0.1) -> dict[str, int]:
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     for col in OUTPUT_COLUMNS:
         if col not in fieldnames:
@@ -163,11 +153,7 @@ def annotate_csv(input_path: Path, output_path: Path,
         if sleep_s:
             time.sleep(sleep_s)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
+    write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
 
     print(f"Unpaywall annotation: {len(output_rows)} rows -> {output_path}", file=sys.stderr)
     for key, value in sorted(counts.items()):

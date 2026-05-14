@@ -14,7 +14,8 @@
     "openalex_mailto_env": "OPENALEX_MAILTO",
     "crossref_mailto_env": "CROSSREF_MAILTO",
     "unpaywall_email_env": "UNPAYWALL_EMAIL",
-    "contact_email_env": "LITMINER_CONTACT_EMAIL"
+    "contact_email_env": "LITMINER_CONTACT_EMAIL",
+    "openalex_work_types": "article"
   },
   "limits": {
     "max_results_per_query": 80,
@@ -22,6 +23,7 @@
     "semantic_max_results": 50,
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
+    "strict_discovery": false,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -32,6 +34,7 @@
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",
     "include_metadata_blocked": false,
+    "queue_strict_only": true,
     "unknown_value": "Unknown"
   }
 }

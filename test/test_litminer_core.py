@@ -56,6 +56,30 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertIn("boom", trace_rows[0]["error"])
             self.assertIn("Provider Statuses", report.read_text(encoding="utf-8"))
 
+    def test_api_discovery_strict_mode_fails_on_provider_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+            report = tmp_path / "report.md"
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=RuntimeError("boom")):
+                with self.assertRaises(RuntimeError):
+                    api_discovery.discover_api(
+                        ["query"],
+                        output,
+                        sources=["openalex"],
+                        trace_csv=trace,
+                        report_md=report,
+                        strict_discovery=True,
+                    )
+
+            self.assertTrue(output.exists())
+            self.assertTrue(trace.exists())
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual(trace_rows[0]["status"], "error")
+
     def test_api_discovery_passes_year_to_to_providers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -77,6 +101,27 @@ class LitminerCoreTests(unittest.TestCase):
             with trace.open(encoding="utf-8", newline="") as handle:
                 trace_rows = list(csv.DictReader(handle))
             self.assertEqual(trace_rows[0]["year_to"], "2026")
+
+    def test_openalex_work_type_filter_is_configurable(self) -> None:
+        article_url = api_discovery.openalex_search._build_url(
+            "query",
+            None,
+            None,
+            1,
+            10,
+            work_types="article|review",
+        )
+        all_url = api_discovery.openalex_search._build_url(
+            "query",
+            None,
+            None,
+            1,
+            10,
+            work_types="all",
+        )
+
+        self.assertIn("type%3Aarticle%7Creview", article_url)
+        self.assertNotIn("filter=", all_url)
 
     def test_semantic_scholar_429_uses_rate_limited_status(self) -> None:
         headers = Message()
@@ -389,8 +434,58 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(normalized.queue_priorities, "high,medium")
             self.assertTrue(normalized.include_metadata_blocked)
             self.assertTrue(normalized.allow_missing_doi)
+            self.assertFalse(normalized.queue_strict_only)
             self.assertEqual(normalized.output_dir, tmp_path / "configured_run")
             self.assertEqual(normalized.screenshot_root, tmp_path / "shots")
+
+    def test_min_if_defaults_to_strict_metric_queue(self) -> None:
+        args = argparse.Namespace(config=None, min_if=5.0)
+
+        normalized = run_lit_search.normalize_args(args)
+
+        self.assertTrue(normalized.queue_strict_only)
+
+    def test_mcp_full_run_uses_configured_output_dir_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp)
+            input_csv = workspace_root / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal,abstract\n"
+                "Paper,,2026,Journal A,Reports external validation.\n",
+                encoding="utf-8",
+            )
+            config_path = workspace_root / "config.json"
+            configured_run = workspace_root / "configured_run"
+            config_path.write_text(
+                json.dumps({
+                    "channels": {
+                        "crossref": False,
+                        "unpaywall": False,
+                        "publisher_probe": False,
+                    },
+                    "outputs": {
+                        "default_output_dir": "configured_run",
+                        "screenshot_root": "screens",
+                    },
+                    "evidence": {
+                        "require_doi_for_queue": False,
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(workspace_root)}):
+                result = mcp_server.tool_run_lit_search({
+                    "input_csv": "input.csv",
+                    "config": "config.json",
+                    "required_concepts": ["validation=external validation"],
+                    "allow_missing_doi": True,
+                    "skip_crossref": True,
+                    "skip_unpaywall": True,
+                })
+
+            self.assertEqual(Path(result["output_dir"]), configured_run)
+            self.assertTrue((configured_run / "processing_report.md").exists())
 
     def test_runtime_defaults_use_dot_litminer_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -583,6 +678,17 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIn("escapes Litminer workspace", response["error"]["message"])
         self.assertNotIn("data", response["error"])
 
+    def test_mcp_rejects_unsupported_protocol_version(self) -> None:
+        response = mcp_server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "1900-01-01"},
+        })
+
+        self.assertIn("error", response)
+        self.assertEqual(response["error"]["code"], -32602)
+
     def test_mcp_uses_configured_workspace_root_for_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -635,6 +741,24 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertEqual(match["crossref_doi"], "10.1234/right")
         self.assertIn("crossref_recovered_doi_confidence", match)
+
+    def test_crossref_title_lookup_failures_are_rate_limited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "output.csv"
+            lines = ["title,doi,publication_year,journal"]
+            lines.extend(f"Missing DOI paper {index},,2026,Journal A" for index in range(10))
+            input_csv.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            with (
+                patch("litminer.sources.api.crossref_verify.search_by_title", return_value=[]),
+                patch("litminer.sources.api.crossref_verify.time.sleep") as sleep,
+            ):
+                counts = crossref_verify.verify_csv(input_csv, output_csv, title_lookup=True)
+
+            self.assertEqual(counts["title_lookup_failed"], 10)
+            sleep.assert_called_once_with(0.5)
 
     def test_publisher_probe_marks_heuristic_status(self) -> None:
         row = publisher_probe.probe_row({})

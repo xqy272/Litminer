@@ -22,7 +22,6 @@ Crossref is treated as the ground truth for DOI, title, journal, year, and type.
 from __future__ import annotations
 
 import argparse
-import csv
 import difflib
 import http.client
 import json
@@ -34,6 +33,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 # Configuration
 
@@ -75,17 +76,6 @@ def _fetch_json(url: str) -> dict:
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
                 time.sleep(wait)
     raise RuntimeError(f"Crossref request failed: {last_error}")
-
-
-# Normalization
-
-def normalize_doi(doi: str) -> str:
-    """Normalize DOI to lowercase, strip prefix and trailing junk."""
-    doi = doi.strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if doi.startswith(prefix):
-            doi = doi[len(prefix):]
-    return doi.strip().rstrip(".")
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -285,12 +275,9 @@ def _best_title_match(title: str, input_row: dict[str, str] | None = None,
 def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                title_lookup: bool = False) -> dict[str, int]:
     """Verify all DOIs in a CSV file and write augmented output."""
-    with input_path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     if "doi" not in fieldnames:
         fieldnames.append("doi")
@@ -316,6 +303,13 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "missing_doi": 0,
         "title_lookup_failed": 0,
     }
+    request_count = 0
+
+    def polite_pause() -> None:
+        nonlocal request_count
+        request_count += 1
+        if request_count % 10 == 0:
+            time.sleep(0.5)
 
     for i, row in enumerate(rows):
         doi = row.get("doi", "").strip()
@@ -323,6 +317,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             if title_lookup:
                 title = row.get("title", "").strip()
                 meta = _best_title_match(title, input_row=row)
+                polite_pause()
                 if meta is None:
                     row["crossref_mismatches"] = "NO_DOI_TITLE_LOOKUP_FAILED"
                     row["crossref_status"] = "title_lookup_failed"
@@ -337,8 +332,6 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 row["crossref_status"] = "title_recovered"
                 row["crossref_verified"] = "true"
                 counts["title_recovered"] += 1
-                if i % 10 == 9:
-                    time.sleep(0.5)
                 continue
             row["crossref_mismatches"] = "NO_DOI"
             row["crossref_status"] = "missing_doi"
@@ -347,6 +340,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             continue
 
         meta = verify_doi(doi)
+        polite_pause()
         if meta is None:
             row["crossref_mismatches"] = "CROSSREF_LOOKUP_FAILED"
             row["crossref_status"] = "lookup_failed"
@@ -374,11 +368,6 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             row["crossref_status"] = "verified"
             row["crossref_verified"] = "true"
             counts["verified"] += 1
-
-        # Rate limiting: be gentle to Crossref
-        if i % 10 == 9:
-            time.sleep(0.5)
-
     trusted_count = counts["verified"] + counts["title_recovered"]
     print(
         f"Verified: {trusted_count} rows "
@@ -388,11 +377,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         file=sys.stderr,
     )
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(rows, output_path, fieldnames=fieldnames)
 
     print(f"Wrote verified results to {output_path}", file=sys.stderr)
     return counts

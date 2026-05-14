@@ -15,7 +15,6 @@ Handles:
 from __future__ import annotations
 
 import argparse
-import csv
 import http.client
 import json
 import os
@@ -25,6 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from litminer.engine.common import write_csv_atomic
 
 # Configuration
 
@@ -342,12 +343,8 @@ def get_references(doi: str, max_results: int = 100) -> list[dict[str, str]]:
 # CSV output
 
 def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(results[0].keys()) if results else OUTPUT_FIELDS
-    with output_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(results)
+    write_csv_atomic(results, output_path, fieldnames=fieldnames)
     print(f"Wrote {len(results)} rows to {output_path}", file=sys.stderr)
 
 

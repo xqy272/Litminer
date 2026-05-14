@@ -16,7 +16,6 @@ It does not perform final literature-review judgement and does not parse PDFs.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import re
@@ -37,6 +36,7 @@ from litminer.engine import processing_report
 from litminer.engine import semantic_triage
 from litminer.engine import validate_stage
 from litminer.engine import workspace
+from litminer.engine.common import read_csv_rows, write_csv_atomic, write_text_atomic
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import unpaywall_lookup
 
@@ -61,6 +61,7 @@ RUNTIME_DEFAULTS = {
         "semantic_max_results": 50,
         "publisher_probe_limit": None,
         "publisher_probe_sleep": 0.5,
+        "strict_discovery": False,
         "unpaywall_sleep": 0.1,
     },
     "outputs": {
@@ -71,6 +72,7 @@ RUNTIME_DEFAULTS = {
         "require_doi_for_queue": True,
         "queue_priorities": "high,medium,needs_review",
         "include_metadata_blocked": False,
+        "queue_strict_only": True,
     },
     "api": {
         "openalex_api_key_env": "OPENALEX_API_KEY",
@@ -78,30 +80,19 @@ RUNTIME_DEFAULTS = {
         "crossref_mailto_env": "CROSSREF_MAILTO",
         "unpaywall_email_env": "UNPAYWALL_EMAIL",
         "contact_email_env": "LITMINER_CONTACT_EMAIL",
+        "openalex_work_types": "article",
     },
 }
 
 
 def write_rows(rows: list[dict[str, str]], output: Path,
                fallback_fields: list[str] | None = None) -> None:
-    fields: list[str] = []
-    for row in rows:
-        for key in row:
-            if key not in fields:
-                fields.append(key)
-    if not fields and fallback_fields:
-        fields = list(fallback_fields)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(rows, output, fallback_fields=fallback_fields)
 
 
 def read_rows(path: Path) -> list[dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        return list(reader)
+    _fieldnames, rows = read_csv_rows(path)
+    return rows
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -159,6 +150,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.skip_openalex = not bool(channels.get("openalex", True))
     if getattr(args, "skip_crossref", None) is None:
         args.skip_crossref = not bool(channels.get("crossref", True))
+    if getattr(args, "skip_journal_metrics", None) is None:
+        args.skip_journal_metrics = not bool(channels.get("journal_metrics", True))
     if getattr(args, "probe_publishers", None) is None:
         args.probe_publishers = bool(channels.get("publisher_probe", False))
     if getattr(args, "skip_unpaywall", None):
@@ -178,6 +171,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.probe_sleep = float(limits.get("publisher_probe_sleep", 0.5))
     if getattr(args, "unpaywall_sleep", None) is None:
         args.unpaywall_sleep = float(limits.get("unpaywall_sleep", 0.1))
+    if getattr(args, "strict_discovery", None) is None:
+        args.strict_discovery = bool(limits.get("strict_discovery", False))
 
     if getattr(args, "queue_priorities", None) is None:
         args.queue_priorities = evidence.get("queue_priorities") or "high,medium,needs_review"
@@ -185,6 +180,11 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.include_metadata_blocked = bool(evidence.get("include_metadata_blocked", False))
     if getattr(args, "allow_missing_doi", None) is None:
         args.allow_missing_doi = not bool(evidence.get("require_doi_for_queue", True))
+    if getattr(args, "queue_strict_only", None) is None:
+        min_if = getattr(args, "min_if", None)
+        args.queue_strict_only = bool(
+            min_if is not None and evidence.get("queue_strict_only", True)
+        )
 
     if getattr(args, "openalex_api_key", None) is None:
         key_env = api.get("openalex_api_key_env") or "OPENALEX_API_KEY"
@@ -197,6 +197,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
             or os.environ.get(str(contact_env))
             or None
         )
+    if getattr(args, "openalex_work_types", None) is None:
+        args.openalex_work_types = api.get("openalex_work_types", "article")
 
     crossref_env = api.get("crossref_mailto_env") or "CROSSREF_MAILTO"
     contact_env = api.get("contact_email_env") or "LITMINER_CONTACT_EMAIL"
@@ -239,7 +241,7 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         return []
 
     query_file = out_dir / "queries.txt"
-    query_file.write_text("\n".join(queries) + "\n", encoding="utf-8")
+    write_text_atomic(query_file, "\n".join(queries) + "\n")
 
     sources = api_discovery.parse_sources(args.discovery_sources)
     if args.skip_openalex:
@@ -265,6 +267,8 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         semantic_max_results=args.semantic_max_results,
         openalex_api_key=args.openalex_api_key,
         openalex_mailto=args.openalex_mailto,
+        openalex_work_types=args.openalex_work_types,
+        strict_discovery=args.strict_discovery,
         trace_csv=out_dir / "api_discovery_trace.csv",
         report_md=out_dir / "api_discovery_report.md",
     )
@@ -274,12 +278,11 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
 def select_by_priority(input_path: Path, output_path: Path,
                        priorities: set[str],
                        include_metadata_blocked: bool = False) -> int:
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fields = list(reader.fieldnames)
-        rows = list(reader)
+    fields, rows = read_csv_rows(input_path)
+    if not fields:
+        raise SystemExit("Input CSV has no header")
+    if priorities and "triage_priority" not in fields:
+        raise SystemExit("Input CSV has no triage_priority column for priority selection")
 
     selected = []
     for row in rows:
@@ -329,6 +332,17 @@ def preflight_warnings(args: argparse.Namespace) -> list[str]:
             "Semantic Scholar is selected without SEMANTIC_SCHOLAR_API_KEY/S2_API_KEY; "
             "the free unauthenticated API is more likely to return HTTP 429 rate limits."
         )
+    metrics_requested = getattr(args, "min_if", None) is not None or getattr(args, "metrics", None) is not None
+    if metrics_requested and getattr(args, "skip_journal_metrics", False):
+        warnings.append(
+            "Journal metrics were requested but journal_metrics is disabled; "
+            "metric annotation/filtering will be skipped."
+        )
+    if getattr(args, "min_if", None) is not None and not getattr(args, "queue_strict_only", False):
+        warnings.append(
+            "A minimum impact-factor threshold is set, but queue_strict_only is disabled; "
+            "metric-fail and unverified rows may still enter the publisher queue."
+        )
     return warnings
 
 
@@ -346,7 +360,9 @@ def make_report(out_dir: Path, counts: dict[str, int],
     if counts.get("triaged", 0) == 0:
         blocking_reasons.append("No rows reached semantic triage.")
     if feasible_count == 0:
-        if args.min_if is not None and counts.get("metric_pass", 0) == 0:
+        if args.min_if is not None and getattr(args, "skip_journal_metrics", False):
+            blocking_reasons.append("Metric filtering was requested but journal metrics are disabled.")
+        elif args.min_if is not None and counts.get("metric_pass", 0) == 0:
             blocking_reasons.append("No metric-pass candidates are available under the current IF threshold.")
         else:
             blocking_reasons.append("No candidates reached the publisher evidence queue under the current constraints.")
@@ -363,6 +379,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         f"Year from: `{args.year_from or 'none'}`",
         f"Target count: `{target if target is not None else 'not specified'}`",
         f"Minimum IF: `{args.min_if if args.min_if is not None else 'not specified'}`",
+        f"Metric queue mode: `{'strict-pass-only' if args.queue_strict_only else 'annotate-only'}`",
         f"Queued triage priorities: `{', '.join(sorted(queue_priorities))}`",
         f"Overall: `{'FEASIBLE' if feasible else 'NOT_FEASIBLE'}`",
         "",
@@ -435,7 +452,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "- Record PDF/SI URLs when publisher pages expose them; PDF parsing is outside Litminer core.",
         "- Treat WebSearch as supplemental only; metadata and publisher pages remain the primary evidence path.",
     ])
-    (out_dir / "feasibility_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(out_dir / "feasibility_report.md", "\n".join(lines) + "\n")
 
 
 def run(args: argparse.Namespace) -> dict[str, str]:
@@ -539,7 +556,8 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     strict_path: Path | None = None
     backup_path: Path | None = None
     metric_input = verified
-    if args.min_if is not None or args.metrics:
+    metrics_requested = args.min_if is not None or args.metrics
+    if metrics_requested and not args.skip_journal_metrics:
         annotated = out_dir / "metrics_annotated_candidates.csv"
         strict_path = out_dir / "strict_candidates.csv"
         backup_path = out_dir / "backup_candidates.csv"
@@ -628,6 +646,8 @@ def main() -> None:
     parser.add_argument("--openalex-api-key", default=None)
     parser.add_argument("--openalex-mailto", default=None,
                         help="Contact email for OpenAlex polite pool")
+    parser.add_argument("--openalex-work-types", default=None,
+                        help="OpenAlex work type filter; comma/pipe-separated, or 'all' to disable")
     parser.add_argument("--discovery-sources", default=None,
                         help="Comma-separated API providers: openalex, semantic_scholar, arxiv, europe_pmc")
     parser.add_argument("--max-results-per-query", type=int, default=None)
@@ -638,6 +658,8 @@ def main() -> None:
     parser.add_argument("--semantic-query-limit", type=int, default=None)
     parser.add_argument("--semantic-max-results", type=int, default=None)
     parser.add_argument("--skip-crossref", action="store_true", default=None)
+    parser.add_argument("--strict-discovery", action="store_true", default=None,
+                        help="Fail when provider errors prevent a reliable candidate set")
     parser.add_argument("--enrich-unpaywall", action="store_true", default=None,
                         help="Annotate verified DOI rows with Unpaywall OA links")
     parser.add_argument("--skip-unpaywall", action="store_true", default=None,
@@ -647,9 +669,19 @@ def main() -> None:
     parser.add_argument("--unpaywall-sleep", type=float, default=None)
     parser.add_argument("--metrics", type=Path, default=None)
     parser.add_argument("--min-if", type=float, default=None)
+    parser.add_argument("--skip-journal-metrics", dest="skip_journal_metrics",
+                        action="store_true", default=None,
+                        help="Disable journal metric annotation/filtering")
+    parser.add_argument("--enable-journal-metrics", dest="skip_journal_metrics",
+                        action="store_false",
+                        help="Enable journal metric annotation/filtering even if config disables it")
     parser.add_argument("--target-count", type=int, default=None)
-    parser.add_argument("--queue-strict-only", action="store_true",
+    parser.add_argument("--queue-strict-only", dest="queue_strict_only",
+                        action="store_true", default=None,
                         help="When metrics filtering is active, queue only metric-pass rows")
+    parser.add_argument("--queue-all-metric-statuses", dest="queue_strict_only",
+                        action="store_false",
+                        help="When metrics filtering is active, keep fail/unverified rows in queue candidates")
     parser.add_argument("--allow-missing-doi", action="store_true", default=None)
     parser.add_argument("--screenshot-root", type=Path, default=None)
     parser.add_argument("--probe-publishers", action="store_true", default=None)

@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import re
 import sys
 from pathlib import Path
 
 from litminer.engine import workspace
+from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 
 DEFAULT_QUEUE_PRIORITIES = {"high", "medium", "needs_review"}
@@ -29,14 +29,6 @@ DEFAULT_PAGE_REQUIRED_FIELDS = [
     "results_or_key_claim_section",
     "evidence_pointer",
 ]
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".")
 
 
 def safe_name(value: str) -> str:
@@ -154,11 +146,9 @@ def build_queue(input_path: Path, output_path: Path,
                 include_metadata_blocked: bool = False,
                 fields_needed: list[str] | str | None = None,
                 page_required_fields: list[str] | str | None = None) -> dict[str, int]:
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     requested_fields = _parse_fields(fields_needed, DEFAULT_FIELDS_NEEDED)
     required_page_fields = _parse_fields(page_required_fields, DEFAULT_PAGE_REQUIRED_FIELDS)
@@ -313,11 +303,7 @@ def build_queue(input_path: Path, output_path: Path,
         row.get("title", "").lower(),
     ))
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=output_fields)
-        writer.writeheader()
-        writer.writerows(queued)
+    write_csv_atomic(queued, output_path, fieldnames=output_fields)
 
     print(f"Publisher evidence queue: {len(queued)} rows -> {output_path}", file=sys.stderr)
     if skipped_filter:

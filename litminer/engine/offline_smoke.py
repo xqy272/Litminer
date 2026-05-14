@@ -16,6 +16,7 @@ from pathlib import Path
 
 from litminer.engine import run_lit_search
 from litminer.engine import workspace
+from litminer.engine.common import write_csv_atomic
 
 
 FIXTURE_ROWS = [
@@ -56,12 +57,8 @@ FIXTURE_ROWS = [
 
 
 def write_fixture(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(FIXTURE_ROWS[0].keys())
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(FIXTURE_ROWS)
+    write_csv_atomic(FIXTURE_ROWS, path, fieldnames=fieldnames)
 
 
 def read_count(path: Path) -> int:

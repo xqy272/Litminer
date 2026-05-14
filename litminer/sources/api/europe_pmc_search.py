@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import html
 import http.client
 import json
@@ -16,6 +15,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from litminer.engine.common import normalize_doi, write_csv_atomic
 
 
 EUROPE_PMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -58,14 +59,6 @@ class ProviderSearchError(RuntimeError):
         super().__init__(message)
         self.partial_results = partial_results or []
         self.status = status
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".,;)[]")
 
 
 def _clean_text(value: Any) -> str:
@@ -257,12 +250,8 @@ def search(query: str, year_from: int | None = None,
 
 
 def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(results[0].keys()) if results else OUTPUT_FIELDS
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(results)
+    write_csv_atomic(results, output_path, fieldnames=fieldnames)
     print(f"Wrote {len(results)} rows to {output_path}", file=sys.stderr)
 
 

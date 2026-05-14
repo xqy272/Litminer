@@ -8,6 +8,8 @@ import csv
 import sys
 from pathlib import Path
 
+from litminer.engine.common import write_csv_atomic
+
 
 def merge_csv(inputs: list[Path], output: Path, allow_missing: bool = False) -> None:
     fieldnames: list[str] = []
@@ -40,11 +42,7 @@ def merge_csv(inputs: list[Path], output: Path, allow_missing: bool = False) -> 
     if not fieldnames:
         raise SystemExit("No input rows or headers to merge")
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(rows, output, fieldnames=fieldnames)
 
     print(f"Merged {len(rows)} rows from {len(inputs)} inputs -> {output}", file=sys.stderr)
 

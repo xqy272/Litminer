@@ -9,7 +9,6 @@ action.
 from __future__ import annotations
 
 import argparse
-import csv
 import html
 import ipaddress
 import re
@@ -22,8 +21,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from litminer import __version__
+from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
-USER_AGENT = "litminer/1.0 (+https://github.com/openai/litminer-agent)"
+USER_AGENT = f"litminer/{__version__} (+https://github.com/xqy272/Litminer)"
 REQUEST_TIMEOUT = 30
 HTML_LIMIT = 500_000
 ALLOWED_SCHEMES = {"http", "https"}
@@ -70,14 +71,6 @@ PUBLISHER_FAMILIES = [
     ("degruyter.com", "de_gruyter"),
     ("sagepub.com", "sage"),
 ]
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".")
 
 
 def first_value(row: dict[str, str], fields: list[str]) -> str:
@@ -399,12 +392,9 @@ def probe_row(row: dict[str, str]) -> dict[str, str]:
 def probe_csv(input_path: Path, output_path: Path,
               limit: int | None = None,
               sleep_s: float = 0.5) -> dict[str, int]:
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     probe_cols = [
         "publisher_probe_start_url",
@@ -445,11 +435,7 @@ def probe_csv(input_path: Path, output_path: Path,
         if sleep_s:
             time.sleep(sleep_s)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
+    write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
 
     print(f"Publisher probe: {sum(counts.values())} probed -> {output_path}", file=sys.stderr)
     for key, value in sorted(counts.items()):

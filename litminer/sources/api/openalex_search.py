@@ -16,10 +16,10 @@ The script handles:
 from __future__ import annotations
 
 import argparse
-import csv
 import http.client
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+from litminer.engine.common import write_csv_atomic
 
 # Configuration
 
@@ -95,6 +97,20 @@ def _extract_doi(work: dict) -> str:
     return ""
 
 
+def _normalize_work_types(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        if value.strip().lower() in {"", "*", "all", "none"}:
+            return []
+        raw = re.split(r"[,;|]", value)
+    else:
+        raw = []
+        for item in value:
+            raw.extend(re.split(r"[,;|]", str(item)))
+    return [item.strip().lower().replace("_", "-") for item in raw if item.strip()]
+
+
 def _extract_landing_page_url(work: dict) -> str:
     """Return a usable article landing URL, preferring DOI resolution."""
     doi = _extract_doi(work)
@@ -147,18 +163,23 @@ def _extract_authors(work: dict) -> str:
 # HTTP helpers
 
 def _build_url(query: str, year_from: int | None, year_to: int | None, page: int, per_page: int,
-               api_key: str | None = None, mailto: str | None = None) -> str:
+               api_key: str | None = None, mailto: str | None = None,
+               work_types: str | list[str] | None = "article") -> str:
     params: dict[str, str] = {
         "search": query,
         "per-page": str(per_page),
         "page": str(page),
     }
-    filters = ["type:article"]
+    filters = []
+    types = _normalize_work_types(work_types)
+    if types:
+        filters.append(f"type:{'|'.join(types)}")
     if year_from:
         filters.append(f"from_publication_date:{year_from}-01-01")
     if year_to:
         filters.append(f"to_publication_date:{year_to}-12-31")
-    params["filter"] = ",".join(filters)
+    if filters:
+        params["filter"] = ",".join(filters)
     if api_key:
         params["api_key"] = api_key
     if mailto:
@@ -204,7 +225,8 @@ def _fetch_json(url: str) -> dict:
 # Core search
 
 def search(query: str, year_from: int | None = None, year_to: int | None = None, max_results: int = 200,
-           api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
+           api_key: str | None = None, mailto: str | None = None,
+           work_types: str | list[str] | None = "article") -> list[dict[str, str]]:
     """Run a single query against OpenAlex and return uniform-schema rows.
 
     Handles pagination automatically. Stops when max_results is reached
@@ -223,7 +245,16 @@ def search(query: str, year_from: int | None = None, year_to: int | None = None,
 
     try:
         while len(results) < max_results:
-            url = _build_url(query, year_from, year_to, page, PER_PAGE, api_key=api_key, mailto=mailto)
+            url = _build_url(
+                query,
+                year_from,
+                year_to,
+                page,
+                PER_PAGE,
+                api_key=api_key,
+                mailto=mailto,
+                work_types=work_types,
+            )
             data = _fetch_json(url)
 
             if total_hits is None:
@@ -279,7 +310,8 @@ def search(query: str, year_from: int | None = None, year_to: int | None = None,
 # Batch search from file
 
 def search_from_file(query_file: Path, year_from: int | None, year_to: int | None, max_results: int,
-                     api_key: str | None = None, mailto: str | None = None) -> list[dict[str, str]]:
+                     api_key: str | None = None, mailto: str | None = None,
+                     work_types: str | list[str] | None = "article") -> list[dict[str, str]]:
     """Run multiple queries from a file, one per line."""
     queries = [line.strip() for line in query_file.read_text(encoding="utf-8").splitlines()
                if line.strip() and not line.strip().startswith("#")]
@@ -289,7 +321,7 @@ def search_from_file(query_file: Path, year_from: int | None, year_to: int | Non
     for query in queries:
         try:
             batch = search(query, year_from=year_from, year_to=year_to, max_results=max_results,
-                           api_key=api_key, mailto=mailto)
+                           api_key=api_key, mailto=mailto, work_types=work_types)
         except ProviderSearchError as exc:
             for row in exc.partial_results:
                 doi = row["doi"]
@@ -318,12 +350,8 @@ def search_from_file(query_file: Path, year_from: int | None, year_to: int | Non
 # CSV output
 
 def to_csv(results: list[dict[str, str]], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = list(results[0].keys()) if results else OUTPUT_FIELDS
-    with output_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(results)
+    write_csv_atomic(results, output_path, fieldnames=fieldnames)
     print(f"Wrote {len(results)} rows to {output_path}", file=sys.stderr)
 
 
@@ -343,13 +371,15 @@ def main() -> None:
                         help="OpenAlex API key, if required by your OpenAlex access policy")
     parser.add_argument("--mailto", type=str, default=DEFAULT_MAILTO,
                         help="Contact email for OpenAlex polite pool; also reads OPENALEX_MAILTO or LITMINER_CONTACT_EMAIL")
+    parser.add_argument("--work-types", type=str, default="article",
+                        help="OpenAlex work type filter (comma/pipe-separated); use 'all' to disable")
     args = parser.parse_args()
 
     if not args.query and not args.query_file:
         parser.error("Either --query or --query-file is required.")
 
     common = {"year_from": args.year_from, "year_to": args.year_to, "max_results": args.max_results,
-              "api_key": args.api_key, "mailto": args.mailto}
+              "api_key": args.api_key, "mailto": args.mailto, "work_types": args.work_types}
     try:
         if args.query_file:
             results = search_from_file(args.query_file, **common)

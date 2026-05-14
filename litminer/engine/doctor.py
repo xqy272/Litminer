@@ -33,6 +33,7 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "crossref_mailto_env": (str,),
         "unpaywall_email_env": (str,),
         "contact_email_env": (str,),
+        "openalex_work_types": (str,),
     },
     "limits": {
         "max_results_per_query": (int,),
@@ -40,6 +41,7 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "semantic_max_results": (int, type(None)),
         "publisher_probe_limit": (int, type(None)),
         "publisher_probe_sleep": (int, float),
+        "strict_discovery": (bool,),
         "unpaywall_sleep": (int, float),
     },
     "outputs": {
@@ -50,6 +52,7 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "require_doi_for_queue": (bool,),
         "queue_priorities": (str,),
         "include_metadata_blocked": (bool,),
+        "queue_strict_only": (bool,),
         "unknown_value": (str,),
     },
 }

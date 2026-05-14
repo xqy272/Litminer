@@ -234,6 +234,8 @@ python -m pip install -e ".[dev]"
 
 当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`litminer/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。如果后续要做更干净的用户侧安装体验，应提供独立 release 包或 plugin，而不是依赖用户手工挑选文件。
 
+当前发布边界是“clone-as-skill 优先”。`pip install -e .` 适合本地开发和 console scripts，但普通 wheel 安装还不等同于完整 skill 安装，因为 Agent 发现仍需要 `SKILL.md`、配置模板和文档目录。除非后续发布独立 plugin/release 包，否则不要把 wheel 安装描述为完整的 Agent 接入方式。
+
 ## API、来源与出版社配置
 
 Litminer 的配置分两层：
@@ -296,6 +298,7 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
     "semantic_max_results": 50,
     "publisher_probe_limit": 20,
     "publisher_probe_sleep": 1.0,
+    "strict_discovery": false,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -305,7 +308,8 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
   "evidence": {
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",
-    "include_metadata_blocked": false
+    "include_metadata_blocked": false,
+    "queue_strict_only": true
   }
 }
 ```
@@ -337,6 +341,7 @@ python -m litminer.engine.run_lit_search \
   --year-from 2026 \
   --discovery-sources openalex,semantic_scholar,arxiv,europe_pmc \
   --max-results-per-query 80 \
+  --openalex-work-types article \
   --enrich-unpaywall \
   --probe-publishers \
   --probe-limit 20 \
@@ -349,6 +354,9 @@ python -m litminer.engine.run_lit_search \
 - `--fields-needed` / `page_required_fields`：告诉 Agent 后续看出版社页面时要关注哪些字段，例如数据集、验证方式、外部基准、补充材料链接。
 - `queue_priorities` / `--queue-priorities`：决定哪些 triage 优先级进入 `publisher_queue.csv`。
 - `require_doi_for_queue` / `--allow-missing-doi`：默认要求 DOI 才进入出版社队列；如果明确允许缺 DOI，可用 `--allow-missing-doi`。
+- `strict_discovery` / `--strict-discovery`：当 API 来源报错导致候选集不可靠时让流程失败，而不是只生成空结果报告。
+- `openalex_work_types` / `--openalex-work-types`：控制 OpenAlex 的 work type 过滤，默认 `article`；可传 `all` 关闭类型过滤。
+- `queue_strict_only` / `--queue-strict-only` / `--queue-all-metric-statuses`：使用 `--min-if` 时默认只把 metric-pass 行送入 queue；如只想标注不硬过滤，可显式选择 queue all metric statuses。
 - `publisher_probe` / `--probe-publishers`：只做轻量页面可达性、PDF/SI 链接提示探测，不解析 PDF，也不绕过付费墙。
 - `publisher_probe_limit` / `--probe-limit` 和 `publisher_probe_sleep` / `--probe-sleep`：控制探测数量和请求间隔，避免过快访问出版社页面。
 

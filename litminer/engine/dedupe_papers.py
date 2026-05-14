@@ -9,12 +9,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import re
 from pathlib import Path
 
+from litminer.engine.common import cell_text, normalize_doi, read_csv_rows, write_csv_atomic
 
-DOI_PREFIX_RE = re.compile(r"^(https?://(dx\.)?doi\.org/|doi:\s*)", re.I)
 NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 
 MERGED_LIST_COLUMNS = {
@@ -38,32 +37,24 @@ ALTERNATE_VALUE_COLUMNS = {
 }
 
 
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    value = DOI_PREFIX_RE.sub("", value)
-    return value.strip().rstrip(".")
-
-
 def normalize_title(value: str) -> str:
     value = (value or "").strip().lower()
     value = NON_WORD_RE.sub(" ", value)
     return " ".join(value.split())
 
 
-def cell_text(value: object) -> str:
-    """Normalize csv cells, including DictReader overflow lists, to text."""
-    if value is None:
-        return ""
-    if isinstance(value, list):
-        return " ".join(str(item) for item in value if item is not None)
-    return str(value)
-
-
 def row_key(row: dict[str, str], doi_field: str, title_field: str) -> tuple[str, str]:
     doi = normalize_doi(cell_text(row.get(doi_field, "")))
     if doi:
         return ("doi", doi)
-    return ("title", normalize_title(cell_text(row.get(title_field, ""))))
+    title = normalize_title(cell_text(row.get(title_field, "")))
+    if not title:
+        return ("row", "")
+    year = cell_text(row.get("crossref_year") or row.get("publication_year") or row.get("year") or "").strip()
+    journal = normalize_title(cell_text(row.get("crossref_container") or row.get("journal") or ""))
+    if year or journal:
+        return ("title_context", f"{title}|year={year}|journal={journal}")
+    return ("title_without_context", title)
 
 
 def row_quality(row: dict[str, str]) -> int:
@@ -119,12 +110,9 @@ def merge_group(rows: list[dict[str, str]]) -> dict[str, str]:
 
 
 def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str) -> None:
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     if "duplicate_count" not in fieldnames:
         fieldnames.append("duplicate_count")
@@ -136,7 +124,7 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
 
     for index, row in enumerate(rows):
         key = row_key(row, doi_field, title_field)
-        if not key[1]:
+        if not key[1] or key[0] == "title_without_context":
             key = ("row", str(index))
         grouped.setdefault(key, []).append(row)
 
@@ -146,11 +134,7 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
         row["duplicate_count"] = str(len(group_rows))
         output_rows.append(row)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
+    write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
 
     import sys as _sys
     print(f"Deduplication: {len(rows)} -> {len(output_rows)} (removed {len(rows) - len(output_rows)} duplicates)", file=_sys.stderr)

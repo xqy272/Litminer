@@ -10,13 +10,14 @@ inclusion.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.I)
@@ -51,6 +52,8 @@ PRIORITY_ORDER = {
     "needs_review": 2,
     "low": 3,
 }
+MAX_PATTERN_LENGTH = 300
+_PATTERN_CACHE: dict[tuple[str, bool], re.Pattern[str]] = {}
 
 
 @dataclass
@@ -70,14 +73,7 @@ class TriageProfile:
     year_to: int | None = None
     require_doi: bool = False
     exclude_article_types: set[str] | None = None
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".")
+    allow_regex: bool = True
 
 
 def normalize_text(value: str) -> str:
@@ -148,10 +144,11 @@ def load_profile(path: Path | None = None,
                  required_specs: list[str] | None = None,
                  optional_specs: list[str] | None = None,
                  negative_specs: list[str] | None = None,
-                 year_from: int | None = None,
-                 year_to: int | None = None,
-                 require_doi: bool = False,
-                 exclude_article_types: list[str] | None = None) -> TriageProfile:
+                  year_from: int | None = None,
+                  year_to: int | None = None,
+                  require_doi: bool = False,
+                  exclude_article_types: list[str] | None = None,
+                  allow_regex: bool = True) -> TriageProfile:
     data: dict[str, Any] = {}
     if path is not None:
         text = path.read_text(encoding="utf-8-sig")
@@ -205,6 +202,7 @@ def load_profile(path: Path | None = None,
         year_to=optional_int(profile_year_to),
         require_doi=profile_require_doi,
         exclude_article_types=article_types,
+        allow_regex=allow_regex,
     )
 
 
@@ -226,24 +224,34 @@ def scoped_text(row: dict[str, str], scope: str) -> str:
     return normalize_text(" ".join(row.get(field, "") or "" for field in fields))
 
 
-def compile_pattern(pattern: str) -> re.Pattern[str]:
+def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
     pattern = normalize_text(pattern)
+    if len(pattern) > MAX_PATTERN_LENGTH:
+        raise ValueError(f"Pattern is too long ({len(pattern)} > {MAX_PATTERN_LENGTH})")
+    cache_key = (pattern, allow_regex)
+    if cache_key in _PATTERN_CACHE:
+        return _PATTERN_CACHE[cache_key]
     if pattern.startswith("re:"):
-        return re.compile(pattern[3:], re.I)
-    escaped = re.escape(pattern)
-    escaped = re.sub(r"\\\s+", r"\\s+", escaped)
-    if re.match(r"^[A-Za-z0-9_\s-]+$", pattern):
-        escaped = rf"\b{escaped}\b"
-    return re.compile(escaped, re.I)
+        if not allow_regex:
+            raise ValueError("Regex concepts are disabled for this triage run")
+        compiled = re.compile(pattern[3:], re.I)
+    else:
+        escaped = re.escape(pattern)
+        escaped = re.sub(r"\\\s+", r"\\s+", escaped)
+        if re.match(r"^[A-Za-z0-9_\s-]+$", pattern):
+            escaped = rf"\b{escaped}\b"
+        compiled = re.compile(escaped, re.I)
+    _PATTERN_CACHE[cache_key] = compiled
+    return compiled
 
 
-def concept_matches(row: dict[str, str], concept: Concept) -> bool:
+def concept_matches(row: dict[str, str], concept: Concept, allow_regex: bool = True) -> bool:
     text = scoped_text(row, concept.scope)
     if not text:
         return False
     for pattern in concept.patterns:
         try:
-            compiled = compile_pattern(pattern)
+            compiled = compile_pattern(pattern, allow_regex=allow_regex)
             for match in compiled.finditer(text):
                 prefix = text[max(0, match.start() - 80):match.start()]
                 if NEGATION_BEFORE_RE.search(prefix):
@@ -369,9 +377,9 @@ def candidate_status(priority: str, metadata_status: str) -> str:
 
 
 def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
-    matched_required = [c.name for c in profile.required if concept_matches(row, c)]
-    matched_optional = [c.name for c in profile.optional if concept_matches(row, c)]
-    matched_negative = [c.name for c in profile.negative if concept_matches(row, c)]
+    matched_required = [c.name for c in profile.required if concept_matches(row, c, profile.allow_regex)]
+    matched_optional = [c.name for c in profile.optional if concept_matches(row, c, profile.allow_regex)]
+    matched_negative = [c.name for c in profile.negative if concept_matches(row, c, profile.allow_regex)]
     missing_required = [c.name for c in profile.required if c.name not in matched_required]
 
     score = 0.0
@@ -446,9 +454,10 @@ def triage_csv(input_path: Path, output_path: Path,
                negative_concepts: list[str] | None = None,
                year_from: int | None = None,
                year_to: int | None = None,
-               require_doi: bool = False,
-               exclude_article_types: list[str] | None = None,
-               sort_rows: bool = True) -> dict[str, int]:
+                require_doi: bool = False,
+                exclude_article_types: list[str] | None = None,
+                allow_regex: bool = True,
+                sort_rows: bool = True) -> dict[str, int]:
     profile = load_profile(
         profile_path,
         required_specs=required_concepts,
@@ -458,14 +467,12 @@ def triage_csv(input_path: Path, output_path: Path,
         year_to=year_to,
         require_doi=require_doi,
         exclude_article_types=exclude_article_types,
+        allow_regex=allow_regex,
     )
 
-    with input_path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames:
-            raise SystemExit("Input CSV has no header")
-        fieldnames = list(reader.fieldnames)
-        rows = list(reader)
+    fieldnames, rows = read_csv_rows(input_path)
+    if not fieldnames:
+        raise SystemExit("Input CSV has no header")
 
     for col in OUTPUT_COLUMNS:
         if col not in fieldnames:
@@ -490,11 +497,7 @@ def triage_csv(input_path: Path, output_path: Path,
         if row.get("metadata_status") == "blocked":
             counts["metadata_blocked"] += 1
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(output_rows)
+    write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
 
     print(
         "Semantic triage: "
@@ -526,6 +529,8 @@ def main() -> None:
                         help="Mark missing/invalid DOI as metadata-blocking")
     parser.add_argument("--exclude-article-type", action="append", default=[],
                         help="Metadata article type to mark as blocked, e.g. review")
+    parser.add_argument("--disable-regex-concepts", action="store_true",
+                        help="Treat re: concepts as invalid instead of compiling caller-supplied regex")
     parser.add_argument("--no-sort", action="store_true")
     args = parser.parse_args()
 
@@ -540,6 +545,7 @@ def main() -> None:
         year_to=args.year_to,
         require_doi=args.require_doi,
         exclude_article_types=args.exclude_article_type,
+        allow_regex=not args.disable_regex_concepts,
         sort_rows=not args.no_sort,
     )
 

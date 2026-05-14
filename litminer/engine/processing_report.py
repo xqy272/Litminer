@@ -9,11 +9,11 @@ Agent does not need to scan large CSVs mechanically.
 from __future__ import annotations
 
 import argparse
-import csv
 import re
 from collections import Counter
 from pathlib import Path
 
+from litminer.engine.common import normalize_doi, read_csv_rows, write_text_atomic
 
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.I)
 
@@ -21,17 +21,8 @@ DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.I)
 def read_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        return list(reader)
-
-
-def normalize_doi(value: str) -> str:
-    value = (value or "").strip().lower()
-    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/", "doi:"):
-        if value.startswith(prefix):
-            value = value[len(prefix):]
-    return value.strip().rstrip(".,;)[]")
+    _fieldnames, rows = read_csv_rows(path)
+    return rows
 
 
 def count_values(rows: list[dict[str, str]], field: str, empty_label: str = "empty") -> Counter[str]:
@@ -196,8 +187,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "",
     ])
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    write_text_atomic(output_path, "\n".join(lines))
     return output_path
 
 

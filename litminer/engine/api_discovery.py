@@ -9,10 +9,10 @@ artifacts so an Agent can see what was queried and what each source returned.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from litminer.sources.api import europe_pmc_search
 from litminer.sources.api import openalex_search
 from litminer.sources.api import registry as provider_registry
 from litminer.sources.api import semantic_scholar_search
+from litminer.engine.common import write_csv_atomic, write_text_atomic
 
 
 DEFAULT_OUTPUT_FIELDS = [
@@ -110,16 +111,7 @@ def parse_sources(value: str | list[str] | None) -> list[str]:
 
 def write_csv(rows: list[dict[str, str]], output: Path,
               fallback_fields: list[str]) -> None:
-    fields = list(fallback_fields)
-    for row in rows:
-        for key in row:
-            if key not in fields:
-                fields.append(key)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
+    write_csv_atomic(rows, output, fallback_fields=fallback_fields)
 
 
 def enrich_row(row: dict[str, str], provider: str, query_id: str, query: str,
@@ -141,7 +133,8 @@ def enrich_row(row: dict[str, str], provider: str, query_id: str, query: str,
 def run_provider(provider: str, query: str, year_from: int | None,
                  year_to: int | None,
                  max_results: int, openalex_api_key: str | None,
-                 openalex_mailto: str | None = None) -> list[dict[str, str]]:
+                 openalex_mailto: str | None = None,
+                 openalex_work_types: str | list[str] | None = "article") -> list[dict[str, str]]:
     if provider == "openalex":
         return openalex_search.search(
             query=query,
@@ -150,6 +143,7 @@ def run_provider(provider: str, query: str, year_from: int | None,
             max_results=max_results,
             api_key=openalex_api_key or os.environ.get("OPENALEX_API_KEY"),
             mailto=openalex_mailto,
+            work_types=openalex_work_types,
         )
     if provider == "semantic_scholar":
         return semantic_scholar_search.search(
@@ -181,13 +175,15 @@ def discover_api(queries: list[str],
                  year_from: int | None = None,
                  year_to: int | None = None,
                  max_results_per_query: int = 100,
-                 semantic_query_limit: int | None = None,
-                 semantic_max_results: int | None = None,
-                 openalex_api_key: str | None = None,
-                 openalex_mailto: str | None = None,
-                 trace_csv: Path | None = None,
-                 report_md: Path | None = None,
-                 run_id: str | None = None) -> dict[str, object]:
+                  semantic_query_limit: int | None = None,
+                  semantic_max_results: int | None = None,
+                  openalex_api_key: str | None = None,
+                  openalex_mailto: str | None = None,
+                  openalex_work_types: str | list[str] | None = "article",
+                  strict_discovery: bool = False,
+                  trace_csv: Path | None = None,
+                  report_md: Path | None = None,
+                  run_id: str | None = None) -> dict[str, object]:
     providers = parse_sources(sources)
     run_id = run_id or make_run_id()
     retrieved_at = utc_now()
@@ -219,6 +215,7 @@ def discover_api(queries: list[str],
                     max_results=provider_max,
                     openalex_api_key=openalex_api_key,
                     openalex_mailto=openalex_mailto,
+                    openalex_work_types=openalex_work_types,
                 )
             except Exception as exc:
                 partial_rows = getattr(exc, "partial_results", []) or []
@@ -263,11 +260,26 @@ def discover_api(queries: list[str],
     if report_md is not None:
         write_report(report_md, output_csv, trace_csv, candidates, traces)
 
+    status_counts = dict(Counter(trace["status"] for trace in traces))
+    non_infra_statuses = {"ok", "empty_result"}
+    discovery_failed = bool(traces) and any(
+        trace["status"] not in non_infra_statuses for trace in traces
+    )
+    all_provider_calls_failed = bool(traces) and all(
+        trace["status"] not in non_infra_statuses for trace in traces
+    )
+    if strict_discovery and discovery_failed and (not candidates or all_provider_calls_failed):
+        raise RuntimeError(
+            "Strict discovery failed: provider errors prevented a reliable candidate set. "
+            f"status_counts={status_counts}; trace_csv={trace_csv or ''}"
+        )
+
     return {
         "run_id": run_id,
         "candidate_count": len(candidates),
         "query_count": len(queries),
         "providers": providers,
+        "provider_statuses": status_counts,
         "output_csv": str(output_csv),
         "trace_csv": str(trace_csv) if trace_csv else "",
         "report_md": str(report_md) if report_md else "",
@@ -342,8 +354,7 @@ def write_report(report_md: Path, output_csv: Path, trace_csv: Path | None,
             f"| {trace['provider']} | {trace['query_id']} | "
             f"{trace['returned_count']} | {trace['status']} | {query} | {error} |"
         )
-    report_md.parent.mkdir(parents=True, exist_ok=True)
-    report_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(report_md, "\n".join(lines) + "\n")
 
 
 def main() -> None:
@@ -360,6 +371,10 @@ def main() -> None:
     parser.add_argument("--openalex-api-key", default=None)
     parser.add_argument("--openalex-mailto", default=None,
                         help="Contact email for OpenAlex polite pool")
+    parser.add_argument("--openalex-work-types", default="article",
+                        help="OpenAlex work type filter. Comma/pipe-separated; use 'all' to disable.")
+    parser.add_argument("--strict-discovery", action="store_true",
+                        help="Fail if provider errors prevent a reliable candidate set")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--report-output", type=Path, default=None)
@@ -380,6 +395,8 @@ def main() -> None:
         semantic_max_results=args.semantic_max_results,
         openalex_api_key=args.openalex_api_key,
         openalex_mailto=args.openalex_mailto,
+        openalex_work_types=args.openalex_work_types,
+        strict_discovery=args.strict_discovery,
         trace_csv=args.trace_output,
         report_md=args.report_output,
     )
