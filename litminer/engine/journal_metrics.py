@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -21,6 +22,17 @@ from litminer.engine.common import write_csv_atomic
 PROJECT_DEFAULT_METRICS = Path(__file__).resolve().parents[2] / "references" / "journal_metrics_seed.csv"
 PACKAGE_DEFAULT_METRICS = Path(__file__).resolve().parents[1] / "references" / "journal_metrics_seed.csv"
 DEFAULT_METRICS = PROJECT_DEFAULT_METRICS if PROJECT_DEFAULT_METRICS.exists() else PACKAGE_DEFAULT_METRICS
+REQUIRED_COLUMNS = [
+    "journal",
+    "aliases",
+    "issn",
+    "impact_factor",
+    "metric_year",
+    "metric_source",
+    "source_url",
+    "last_checked",
+    "confidence",
+]
 
 
 @dataclass
@@ -84,6 +96,67 @@ def load_metrics(path: Path = DEFAULT_METRICS) -> list[Metric]:
                 confidence=(row.get("confidence") or "").strip(),
             ))
     return metrics
+
+
+def validate_metrics(path: Path = DEFAULT_METRICS, *, require_numeric_if: bool = False) -> dict[str, object]:
+    """Validate a journal metrics CSV before an Agent relies on it."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not path.exists():
+        return {
+            "status": "error",
+            "row_count": 0,
+            "errors": [f"journal metrics file not found: {path}"],
+            "warnings": [],
+        }
+
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        missing = [column for column in REQUIRED_COLUMNS if column not in fieldnames]
+        if missing:
+            errors.append(f"missing required columns: {', '.join(missing)}")
+        rows = list(reader)
+
+    by_name: dict[str, str] = {}
+    by_issn: dict[str, str] = {}
+    for index, row in enumerate(rows, start=2):
+        journal = (row.get("journal") or "").strip()
+        if not journal:
+            warnings.append(f"row {index}: journal is blank")
+            continue
+        for column in ("metric_year", "metric_source", "source_url", "last_checked", "confidence"):
+            if not (row.get(column) or "").strip():
+                warnings.append(f"row {index} {journal}: {column} is blank")
+        impact_factor = (row.get("impact_factor") or "").strip()
+        if require_numeric_if or impact_factor:
+            try:
+                float(impact_factor)
+            except ValueError:
+                errors.append(f"row {index} {journal}: impact_factor is not numeric: {impact_factor!r}")
+        for name in [journal, *split_list(row.get("aliases", ""))]:
+            key = normalize_journal(name)
+            if not key:
+                continue
+            owner = by_name.get(key)
+            if owner and owner != journal:
+                errors.append(f"normalized journal name {key!r} maps to both {owner!r} and {journal!r}")
+            by_name[key] = journal
+        for issn in [normalize_issn(value) for value in split_list(row.get("issn", ""))]:
+            if not issn:
+                continue
+            owner = by_issn.get(issn)
+            if owner and owner != journal:
+                errors.append(f"ISSN {issn!r} maps to both {owner!r} and {journal!r}")
+            by_issn[issn] = journal
+
+    status = "error" if errors else "warning" if warnings else "ok"
+    return {
+        "status": status,
+        "row_count": len(rows),
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 def build_indexes(metrics: list[Metric]) -> tuple[dict[str, Metric], dict[str, Metric]]:
@@ -193,6 +266,11 @@ def filter_csv(input_path: Path, output_path: Path,
                min_if: float | None = None,
                pass_output: Path | None = None,
                backup_output: Path | None = None) -> dict[str, int]:
+    validation = validate_metrics(metrics_path, require_numeric_if=min_if is not None)
+    if validation["status"] == "error":
+        errors = validation.get("errors", [])
+        detail = "; ".join(str(error) for error in errors) if isinstance(errors, list) else "validation failed"
+        raise SystemExit(f"Journal metrics validation failed: {detail}")
     metrics = load_metrics(metrics_path)
     metric_indexes = build_indexes(metrics)
 
@@ -251,14 +329,39 @@ def filter_csv(input_path: Path, output_path: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Annotate/filter rows by verified journal metrics.")
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--input", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--min-if", type=float, default=None,
                         help="Minimum impact factor threshold; pass requires IF > threshold")
     parser.add_argument("--pass-output", type=Path, default=None)
     parser.add_argument("--backup-output", type=Path, default=None)
+    parser.add_argument("--validate", action="store_true",
+                        help="Validate the metrics CSV and exit")
+    parser.add_argument("--require-numeric-if", action="store_true",
+                        help="Require every non-header metric row to have a numeric impact_factor")
+    parser.add_argument("--json", action="store_true",
+                        help="Print validation result as JSON when --validate is used")
     args = parser.parse_args()
+
+    if args.validate:
+        result = validate_metrics(args.metrics, require_numeric_if=args.require_numeric_if)
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"Journal metrics validation: {result['status']} ({result['row_count']} rows)")
+            errors = result.get("errors", [])
+            warnings = result.get("warnings", [])
+            for error in errors if isinstance(errors, list) else []:
+                print(f"ERROR: {error}", file=sys.stderr)
+            for warning in warnings if isinstance(warnings, list) else []:
+                print(f"WARNING: {warning}", file=sys.stderr)
+        if result["status"] == "error":
+            raise SystemExit(1)
+        return
+
+    if not args.input or not args.output:
+        parser.error("--input and --output are required unless --validate is used")
 
     filter_csv(
         args.input,

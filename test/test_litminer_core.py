@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 from email.message import Message
@@ -17,18 +18,23 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from litminer.engine import api_discovery
 from litminer.engine import agent_summary
+from litminer.engine import bootstrap
 from litminer.engine import build_publisher_queue
 from litminer.engine import common
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
 from litminer.engine import journal_metrics
 from litminer.engine import offline_smoke
+from litminer.engine import provenance
+from litminer.engine import publisher_adapters
 from litminer.engine import publisher_probe
+from litminer.engine import query_plan
 from litminer.engine import processing_report
 from litminer.engine import run_lit_search
 from litminer.engine import semantic_triage
 from litminer.engine import websearch_import
 from litminer.engine import workspace
+from litminer.engine import workflow_state
 from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import europe_pmc_search
@@ -1205,6 +1211,364 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertGreaterEqual(int(result["publisher_queue_rows"]), 1)
             self.assertTrue((output_dir / "processing_report.md").exists())
             self.assertTrue((output_dir / "publisher_queue.csv").exists())
+
+    def test_semantic_triage_supports_expression_concepts(self) -> None:
+        profile = semantic_triage.load_profile(
+            required_specs=[
+                json.dumps({
+                    "name": "photocatalytic_h2",
+                    "all_of": [
+                        "photocatalytic",
+                        {"name": "h2_production", "near": ["hydrogen", "production"], "window": 8},
+                    ],
+                })
+            ],
+            negative_specs=[
+                json.dumps({"name": "h2o2_only", "any_of": ["hydrogen peroxide", "H2O2"]})
+            ],
+        )
+
+        true_row = {
+            "title": "Photocatalytic hydrogen production with pollutant degradation",
+            "abstract": "The catalyst couples hydrogen production and organic degradation.",
+            "doi": "10.1234/ok",
+            "publication_year": "2026",
+        }
+        peroxide_row = {
+            "title": "Photocatalytic hydrogen peroxide production for degradation",
+            "abstract": "The work focuses on H2O2 formation.",
+            "doi": "10.1234/h2o2",
+            "publication_year": "2026",
+        }
+
+        triaged_true = semantic_triage.triage_row(true_row, profile)
+        triaged_peroxide = semantic_triage.triage_row(peroxide_row, profile)
+
+        self.assertEqual(triaged_true["matched_required"], "photocatalytic_h2")
+        self.assertEqual(triaged_true["matched_negative"], "")
+        self.assertEqual(triaged_peroxide["matched_negative"], "h2o2_only")
+
+    def test_dedupe_records_key_confidence_and_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "dupes.csv"
+            output_csv = tmp_path / "deduped.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "Paper,10.1234/a,2026,Journal A\n"
+                "Paper,https://doi.org/10.1234/a,2026,Journal A\n",
+                encoding="utf-8",
+            )
+
+            dedupe_papers.dedupe(input_csv, output_csv, "doi", "title")
+
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["dedupe_confidence"], "high")
+            self.assertEqual(rows[0]["dedupe_reason"], "exact DOI match")
+            self.assertTrue(rows[0]["dedupe_key"].startswith("doi:10.1234/a"))
+
+    def test_journal_metrics_validator_flags_governance_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "metrics.csv"
+            path.write_text(
+                "journal,aliases,issn,impact_factor,metric_year,metric_source,source_url,last_checked,confidence\n"
+                "Journal A,Shared Alias,1234-5678,12.3,2024,JCR,https://example.org/a,2026-05-01,high\n"
+                "Journal B,Shared Alias,8765-4321,not-a-number,2024,JCR,,2026-05-01,medium\n",
+                encoding="utf-8",
+            )
+
+            result = journal_metrics.validate_metrics(path, require_numeric_if=True)
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(any("impact_factor" in error for error in result["errors"]))
+        self.assertTrue(any("maps to both" in error for error in result["errors"]))
+        self.assertTrue(any("source_url is blank" in warning for warning in result["warnings"]))
+
+    def test_query_plan_provenance_bootstrap_and_adapters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plan = query_plan.build_plan(
+                queries=["photocatalytic hydrogen"],
+                year_from=2026,
+                required_concepts=["main=photocatalytic"],
+                discovery_sources=["openalex"],
+                controls={"time_budget_seconds": 60},
+                mode="fast",
+            )
+            query_plan.write_plan(tmp_path, plan)
+            input_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,journal,publication_year,crossref_title,crossref_doi,crossref_container,crossref_year,journal_metric,journal_metric_verified,journal_metric_source\n"
+                "Candidate,10.1234/a,Journal A,2026,Verified Candidate,10.1234/a,Journal A,2026,12.3,true,JCR\n",
+                encoding="utf-8",
+            )
+            provenance_path = provenance.write_from_csv(input_csv, tmp_path / "field_provenance.json")
+            report = bootstrap.build_report(workspace_root=tmp_path)
+
+            self.assertEqual(plan["run_controls"]["time_budget_seconds"], 60)
+            self.assertTrue((tmp_path / "query_plan.json").exists())
+            self.assertEqual(
+                json.loads(provenance_path.read_text(encoding="utf-8"))["records"][0]["fields"]["doi"]["source"],
+                "crossref",
+            )
+            self.assertEqual(report["workspace_root"], str(tmp_path.resolve()))
+        self.assertTrue(any(row["name"] == "http_heuristic" for row in publisher_adapters.adapter_rows()))
+
+    def test_manifest_does_not_treat_json_as_csv_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "query_plan.json"
+            output.write_text('{"schema_version": 1}\n', encoding="utf-8")
+            manifest = {"stages": []}
+
+            workflow_state.record_stage(manifest, "query_plan", "completed", output_path=output)
+
+            self.assertEqual(manifest["stages"][0]["output_fields"], [])
+
+    def test_run_stop_after_triage_writes_partial_control_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal,abstract\n"
+                "A precise paper,10.1234/a,2026,Journal A,Reports external validation.\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+            args = argparse.Namespace(
+                input_csv=input_csv,
+                query=None,
+                query_file=None,
+                year_from=2026,
+                year_to=None,
+                output_dir=out_dir,
+                config=None,
+                mode="fast",
+                resume=False,
+                resume_allow_mismatch=False,
+                resume_mismatch_reason="",
+                time_budget_seconds=None,
+                stop_after_stage="triage",
+                triage_profile=None,
+                required_concept=["validation=external validation"],
+                optional_concept=[],
+                negative_concept=[],
+                exclude_article_type=[],
+                queue_priorities="high,medium,needs_review",
+                include_metadata_blocked=False,
+                fields_needed=None,
+                page_required_field=None,
+                openalex_api_key=None,
+                openalex_mailto=None,
+                openalex_work_types=None,
+                discovery_sources="openalex",
+                max_results_per_query=100,
+                skip_openalex=False,
+                include_semantic_scholar=False,
+                include_arxiv=False,
+                include_europe_pmc=False,
+                semantic_query_limit=3,
+                semantic_max_results=50,
+                skip_crossref=True,
+                strict_discovery=False,
+                parallel_providers=False,
+                provider_workers=None,
+                provider_failure_threshold=1,
+                enrich_unpaywall=False,
+                skip_unpaywall=True,
+                unpaywall_email=None,
+                unpaywall_sleep=0,
+                crossref_checkpoint_interval=25,
+                unpaywall_checkpoint_interval=25,
+                max_crossref_rows=None,
+                max_unpaywall_rows=None,
+                metrics=None,
+                min_if=None,
+                skip_journal_metrics=True,
+                target_count=None,
+                queue_strict_only=False,
+                allow_missing_doi=True,
+                screenshot_root=tmp_path / "screens",
+                probe_publishers=False,
+                probe_limit=None,
+                max_publisher_probe_rows=None,
+                probe_sleep=0,
+            )
+
+            result = run_lit_search.run(args)
+
+            self.assertEqual(result["status"], "partial")
+            self.assertTrue((out_dir / "query_plan.json").exists())
+            self.assertTrue((out_dir / "triaged_candidates.csv").exists())
+            manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_status"], "partial")
+            self.assertIn("stop_reason", manifest)
+            summary = json.loads((out_dir / "agent_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["run_status"], "partial")
+            self.assertTrue(summary["partial"])
+            self.assertIn("Resume the run", summary["next_actions"][0])
+
+    def test_resume_ignores_run_control_signature_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal,abstract\n"
+                "A precise paper,10.1234/a,2026,Journal A,Reports external validation.\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+
+            base = dict(
+                input_csv=input_csv,
+                query=None,
+                query_file=None,
+                year_from=2026,
+                year_to=None,
+                output_dir=out_dir,
+                config=None,
+                mode="fast",
+                resume=False,
+                resume_allow_mismatch=False,
+                resume_mismatch_reason="",
+                time_budget_seconds=0,
+                stop_after_stage="triage",
+                triage_profile=None,
+                required_concept=["validation=external validation"],
+                optional_concept=[],
+                negative_concept=[],
+                exclude_article_type=[],
+                queue_priorities="high,medium,needs_review",
+                include_metadata_blocked=False,
+                fields_needed=None,
+                page_required_field=None,
+                openalex_api_key=None,
+                openalex_mailto=None,
+                openalex_work_types=None,
+                discovery_sources="openalex",
+                max_results_per_query=100,
+                skip_openalex=False,
+                include_semantic_scholar=False,
+                include_arxiv=False,
+                include_europe_pmc=False,
+                semantic_query_limit=3,
+                semantic_max_results=50,
+                skip_crossref=True,
+                strict_discovery=False,
+                parallel_providers=False,
+                provider_workers=None,
+                provider_failure_threshold=1,
+                enrich_unpaywall=False,
+                skip_unpaywall=True,
+                unpaywall_email=None,
+                unpaywall_sleep=0,
+                crossref_checkpoint_interval=25,
+                unpaywall_checkpoint_interval=25,
+                max_crossref_rows=1,
+                max_unpaywall_rows=1,
+                metrics=None,
+                min_if=None,
+                skip_journal_metrics=True,
+                target_count=None,
+                queue_strict_only=False,
+                allow_missing_doi=True,
+                screenshot_root=tmp_path / "screens",
+                probe_publishers=False,
+                probe_limit=None,
+                max_publisher_probe_rows=1,
+                probe_sleep=0,
+            )
+            first = run_lit_search.run(argparse.Namespace(**base))
+
+            resumed_args = argparse.Namespace(**{
+                **base,
+                "resume": True,
+                "time_budget_seconds": None,
+                "stop_after_stage": "queue",
+                "max_crossref_rows": None,
+                "max_unpaywall_rows": None,
+                "max_publisher_probe_rows": None,
+            })
+            second = run_lit_search.run(resumed_args)
+
+            self.assertEqual(first["status"], "partial")
+            self.assertEqual(second["status"], "partial")
+            self.assertTrue((out_dir / "publisher_queue.csv").exists())
+
+    def test_budgeted_crossref_and_unpaywall_stages_are_not_reused_as_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "A,10.1234/a,2026,Journal A\n"
+                "B,10.1234/b,2026,Journal B\n",
+                encoding="utf-8",
+            )
+            crossref_out = tmp_path / "verified.csv"
+            unpaywall_out = tmp_path / "oa.csv"
+
+            with patch("litminer.sources.api.crossref_verify.verify_doi", return_value={"crossref_doi": "10.1234/a"}):
+                crossref_verify.verify_csv(input_csv, crossref_out, max_rows=1)
+            crossref_cached = crossref_verify._existing_verified_rows(crossref_out)
+
+            unpaywall_lookup.annotate_csv(input_csv, unpaywall_out, email=None, max_rows=1)
+            unpaywall_cached = unpaywall_lookup._existing_annotated_rows(unpaywall_out)
+
+            with crossref_out.open(encoding="utf-8", newline="") as handle:
+                crossref_rows = list(csv.DictReader(handle))
+            with unpaywall_out.open(encoding="utf-8", newline="") as handle:
+                unpaywall_rows = list(csv.DictReader(handle))
+            self.assertEqual(crossref_rows[1]["crossref_status"], "skipped_budget")
+            self.assertFalse(any("10.1234/b" in key for key in crossref_cached))
+            self.assertEqual(unpaywall_rows[1]["unpaywall_status"], "skipped_budget")
+            self.assertFalse(any("10.1234/b" in key for key in unpaywall_cached))
+
+    def test_mcp_lists_async_and_governance_tools(self) -> None:
+        response = mcp_server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {},
+        })
+
+        names = {tool["name"] for tool in response["result"]["tools"]}
+        for name in {
+            "litminer_bootstrap",
+            "litminer_start_run",
+            "litminer_run_status",
+            "litminer_resume_run",
+            "litminer_cancel_run",
+            "litminer_validate_journal_metrics",
+            "litminer_field_provenance",
+            "litminer_publisher_adapters",
+        }:
+            self.assertIn(name, names)
+
+    def test_mcp_background_run_completes_partial_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "input.csv").write_text(
+                "title,doi,publication_year,journal\n"
+                "Paper,10.1234/a,2026,Journal A\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(root)}):
+                start = mcp_server.tool_start_run({
+                    "input_csv": "input.csv",
+                    "output_dir": "run",
+                    "mode": "fast",
+                    "stop_after_stage": "dedupe",
+                })
+                for _ in range(50):
+                    status = mcp_server.tool_run_status({"job_id": start["job_id"]})
+                    if status["status"] in {"completed", "partial", "failed"}:
+                        break
+                    time.sleep(0.05)
+
+                self.assertEqual(status["status"], "partial")
+                self.assertTrue((root / "run" / "query_plan.json").exists())
 
 
 if __name__ == "__main__":

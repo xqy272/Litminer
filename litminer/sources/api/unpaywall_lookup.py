@@ -149,7 +149,8 @@ def _existing_annotated_rows(output_path: Path) -> dict[str, dict[str, str]]:
         return {}
     existing = {}
     for row in rows:
-        if (row.get("unpaywall_status") or "").strip():
+        status = (row.get("unpaywall_status") or "").strip()
+        if status and status != "skipped_budget":
             existing[_row_identity(row)] = row
     return existing
 
@@ -157,7 +158,8 @@ def _existing_annotated_rows(output_path: Path) -> dict[str, dict[str, str]]:
 def annotate_csv(input_path: Path, output_path: Path,
                  email: str | None = None,
                  sleep_s: float = 0.1,
-                 checkpoint_interval: int = 25) -> dict[str, int]:
+                 checkpoint_interval: int = 25,
+                 max_rows: int | None = None) -> dict[str, int]:
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
         raise SystemExit("Input CSV has no header")
@@ -188,12 +190,19 @@ def annotate_csv(input_path: Path, output_path: Path,
             checkpoint(index)
             continue
 
-        annotated = annotate_row(row, email=email, checked_at=checked_at)
+        if max_rows is not None and max_rows >= 0 and index >= max_rows:
+            annotated = dict(row)
+            for col in OUTPUT_COLUMNS:
+                annotated.setdefault(col, "")
+            annotated["unpaywall_status"] = "skipped_budget"
+            annotated["unpaywall_checked_at"] = checked_at
+        else:
+            annotated = annotate_row(row, email=email, checked_at=checked_at)
         status = annotated.get("unpaywall_status", "unknown")
         counts[status] = counts.get(status, 0) + 1
         output_rows.append(annotated)
         checkpoint(index)
-        if sleep_s:
+        if sleep_s and status != "skipped_budget":
             time.sleep(sleep_s)
 
     write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
@@ -213,6 +222,8 @@ def main() -> None:
     parser.add_argument("--sleep", type=float, default=0.1, help="Delay between batch requests")
     parser.add_argument("--checkpoint-interval", type=int, default=25,
                         help="Write batch progress every N rows; 0 disables checkpoints")
+    parser.add_argument("--max-rows", type=int, default=None,
+                        help="Only annotate the first N CSV rows; remaining rows are marked skipped_budget")
     args = parser.parse_args()
 
     if args.doi:
@@ -226,6 +237,7 @@ def main() -> None:
         email=args.email,
         sleep_s=args.sleep,
         checkpoint_interval=args.checkpoint_interval,
+        max_rows=args.max_rows,
     )
 
 

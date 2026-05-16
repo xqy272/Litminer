@@ -51,6 +51,8 @@ def file_sha256(path: Path | None) -> str:
 def csv_fieldnames(path: Path | None) -> list[str]:
     if path is None or not path.exists() or not path.is_file():
         return []
+    if path.suffix.lower() != ".csv":
+        return []
     try:
         fieldnames, _rows = read_csv_rows(path)
     except Exception:
@@ -75,7 +77,7 @@ def new_manifest(
         "mode": mode,
         "resume_enabled": bool(getattr(args, "resume", False)),
         "output_dir": str(getattr(args, "output_dir", "")),
-        "query_count": len(getattr(args, "query", None) or []),
+        "query_count": len((signature_payload or {}).get("queries", []) or getattr(args, "query", None) or []),
         "year_from": getattr(args, "year_from", None),
         "year_to": getattr(args, "year_to", None),
         "run_signature": signature or prior.get("run_signature", ""),

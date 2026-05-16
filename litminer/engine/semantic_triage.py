@@ -14,7 +14,7 @@ import json
 import re
 import sys
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +64,9 @@ class Concept:
     patterns: list[str]
     scope: str = "title_abstract"
     weight: float = 1.0
+    op: str = "any"
+    children: list["Concept"] = dataclass_field(default_factory=list)
+    window: int = 8
 
 
 @dataclass
@@ -117,13 +120,86 @@ def parse_concept_spec(spec: str, default_scope: str = "title_abstract",
                    scope=default_scope, weight=default_weight)
 
 
+def _maybe_json_spec(value: str) -> Any:
+    text = (value or "").strip()
+    if not text or text[0] not in "{[":
+        return value
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _concept_items(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _concept_name(obj: dict[str, Any], default: str = "concept") -> str:
+    return slug_name(str(obj.get("name") or obj.get("label") or default))
+
+
 def concept_from_obj(obj: Any, default_weight: float) -> Concept:
+    obj = _maybe_json_spec(obj) if isinstance(obj, str) else obj
     if isinstance(obj, str):
         return parse_concept_spec(obj, default_weight=default_weight)
     if not isinstance(obj, dict):
         raise ValueError(f"Concept must be string or object, got {type(obj).__name__}")
 
-    name = slug_name(str(obj.get("name") or obj.get("label") or "concept"))
+    name = _concept_name(obj)
+    weight = float(obj.get("weight", default_weight))
+    scope = str(obj.get("scope") or "title_abstract")
+
+    for op in ("all_of", "any_of"):
+        if op in obj:
+            children = [
+                concept_from_obj(item, default_weight=weight)
+                for item in _concept_items(obj.get(op))
+            ]
+            if not children:
+                raise ValueError(f"Concept '{name}' has empty {op}")
+            return Concept(
+                name=name,
+                patterns=[],
+                scope=scope,
+                weight=weight,
+                op="all" if op == "all_of" else "any",
+                children=children,
+                window=int(obj.get("window", 8) or 8),
+            )
+
+    if "not" in obj:
+        children = [
+            concept_from_obj(item, default_weight=weight)
+            for item in _concept_items(obj.get("not"))
+        ]
+        if not children:
+            raise ValueError(f"Concept '{name}' has empty not")
+        return Concept(name=name, patterns=[], scope=scope, weight=weight, op="not", children=children)
+
+    for op in ("near", "not_near"):
+        if op in obj:
+            terms = obj.get(op)
+            if isinstance(terms, str):
+                patterns = split_items(terms.replace(",", "|")) or [terms]
+            elif isinstance(terms, list):
+                patterns = [str(item).strip() for item in terms if str(item).strip()]
+            else:
+                raise ValueError(f"Concept '{name}' {op} must be a string or list")
+            if len(patterns) < 2:
+                raise ValueError(f"Concept '{name}' {op} needs at least two terms")
+            return Concept(
+                name=name,
+                patterns=patterns,
+                scope=scope,
+                weight=weight,
+                op=op,
+                window=max(1, int(obj.get("window", 8) or 8)),
+            )
+
     raw_patterns = obj.get("patterns", obj.get("terms", obj.get("term", [])))
     if isinstance(raw_patterns, str):
         patterns = split_items(raw_patterns) or [raw_patterns]
@@ -137,8 +213,8 @@ def concept_from_obj(obj: Any, default_weight: float) -> Concept:
     return Concept(
         name=name,
         patterns=patterns,
-        scope=str(obj.get("scope") or "title_abstract"),
-        weight=float(obj.get("weight", default_weight)),
+        scope=scope,
+        weight=weight,
     )
 
 
@@ -176,9 +252,9 @@ def load_profile(path: Path | None = None,
         for item in data.get("negative", data.get("negative_concepts", []))
     ]
 
-    required.extend(parse_concept_spec(item, default_weight=3.0) for item in (required_specs or []))
-    optional.extend(parse_concept_spec(item, default_weight=1.0) for item in (optional_specs or []))
-    negative.extend(parse_concept_spec(item, default_weight=-2.0) for item in (negative_specs or []))
+    required.extend(concept_from_obj(item, default_weight=3.0) for item in (required_specs or []))
+    optional.extend(concept_from_obj(item, default_weight=1.0) for item in (optional_specs or []))
+    negative.extend(concept_from_obj(item, default_weight=-2.0) for item in (negative_specs or []))
 
     profile_year_from = year_from if year_from is not None else hard_filters.get("year_from")
     profile_year_to = year_to if year_to is not None else hard_filters.get("year_to")
@@ -251,17 +327,80 @@ def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
     return compiled
 
 
+def _basic_pattern_match(text: str, pattern: str, allow_regex: bool = True) -> bool:
+    compiled = compile_pattern(pattern, allow_regex=allow_regex)
+    for match in compiled.finditer(text):
+        prefix = text[max(0, match.start() - 80):match.start()]
+        if NEGATION_BEFORE_RE.search(prefix):
+            continue
+        return True
+    return False
+
+
+def _word_positions(text: str, term: str, allow_regex: bool = True) -> list[int]:
+    normalized_text = normalize_text(text).lower()
+    if not normalized_text:
+        return []
+    tokens = re.findall(r"[a-z0-9]+", normalized_text)
+    if not tokens:
+        return []
+    if term.startswith("re:"):
+        if not allow_regex:
+            raise ValueError("Regex concepts are disabled for this triage run")
+        regex = re.compile(term[3:], re.I)
+        return [
+            index
+            for index, token in enumerate(tokens)
+            if regex.search(token)
+        ]
+    normalized_term = normalize_text(term).lower()
+    term_tokens = re.findall(r"[a-z0-9]+", normalized_term)
+    if not term_tokens:
+        return []
+    width = len(term_tokens)
+    positions = []
+    for index in range(0, len(tokens) - width + 1):
+        if tokens[index:index + width] == term_tokens:
+            positions.append(index)
+    return positions
+
+
+def _near_matches(text: str, patterns: list[str], window: int, allow_regex: bool = True) -> bool:
+    position_groups = [_word_positions(text, pattern, allow_regex=allow_regex) for pattern in patterns]
+    if any(not positions for positions in position_groups):
+        return False
+    chosen: list[int] = []
+
+    def walk(group_index: int) -> bool:
+        if group_index == len(position_groups):
+            return max(chosen) - min(chosen) <= window
+        for position in position_groups[group_index]:
+            chosen.append(position)
+            if max(chosen) - min(chosen) <= window and walk(group_index + 1):
+                return True
+            chosen.pop()
+        return False
+
+    return walk(0)
+
+
 def concept_matches(row: dict[str, str], concept: Concept, allow_regex: bool = True) -> bool:
     text = scoped_text(row, concept.scope)
+    if concept.op == "all":
+        return bool(concept.children) and all(concept_matches(row, child, allow_regex) for child in concept.children)
+    if concept.op == "any" and concept.children:
+        return any(concept_matches(row, child, allow_regex) for child in concept.children)
+    if concept.op == "not":
+        return bool(concept.children) and not any(concept_matches(row, child, allow_regex) for child in concept.children)
     if not text:
         return False
+    if concept.op == "near":
+        return _near_matches(text, concept.patterns, concept.window, allow_regex=allow_regex)
+    if concept.op == "not_near":
+        return not _near_matches(text, concept.patterns, concept.window, allow_regex=allow_regex)
     for pattern in concept.patterns:
         try:
-            compiled = compile_pattern(pattern, allow_regex=allow_regex)
-            for match in compiled.finditer(text):
-                prefix = text[max(0, match.start() - 80):match.start()]
-                if NEGATION_BEFORE_RE.search(prefix):
-                    continue
+            if _basic_pattern_match(text, pattern, allow_regex=allow_regex):
                 return True
         except re.error as exc:
             raise ValueError(f"Invalid pattern for concept '{concept.name}': {pattern}: {exc}") from exc

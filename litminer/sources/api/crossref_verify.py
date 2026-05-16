@@ -234,7 +234,8 @@ def _existing_verified_rows(output_path: Path) -> dict[str, dict[str, str]]:
         return {}
     existing = {}
     for row in rows:
-        if (row.get("crossref_status") or "").strip():
+        status = (row.get("crossref_status") or "").strip()
+        if status and status != "skipped_budget":
             existing[_row_identity(row)] = row
             existing[_row_title_identity(row)] = row
     return existing
@@ -313,7 +314,8 @@ def _best_title_match(title: str, input_row: dict[str, str] | None = None,
 
 def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                title_lookup: bool = False,
-               checkpoint_interval: int = 25) -> dict[str, int]:
+               checkpoint_interval: int = 25,
+               max_rows: int | None = None) -> dict[str, int]:
     """Verify all DOIs in a CSV file and write augmented output."""
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
@@ -343,6 +345,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "missing_doi": 0,
         "title_lookup_failed": 0,
         "reused": 0,
+        "skipped_budget": 0,
     }
     request_count = 0
     existing_rows = _existing_verified_rows(output_path)
@@ -372,6 +375,14 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                     row[col] = existing[col]
             counts["reused"] += 1
             count_status(row)
+            checkpoint(i)
+            continue
+
+        if max_rows is not None and max_rows >= 0 and i >= max_rows:
+            row["crossref_mismatches"] = "SKIPPED_BY_MAX_ROWS_BUDGET"
+            row["crossref_status"] = "skipped_budget"
+            row["crossref_verified"] = "false"
+            counts["skipped_budget"] += 1
             checkpoint(i)
             continue
 
@@ -441,7 +452,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         f"Verified: {trusted_count} rows "
         f"(doi={counts['verified']}, title_recovered={counts['title_recovered']}), "
         f"mismatch={counts['mismatch']}, failed={counts['lookup_failed']}, "
-        f"missing_doi={counts['missing_doi']}, title_lookup_failed={counts['title_lookup_failed']}.",
+        f"missing_doi={counts['missing_doi']}, title_lookup_failed={counts['title_lookup_failed']}, "
+        f"skipped_budget={counts['skipped_budget']}.",
         file=sys.stderr,
     )
 
@@ -469,6 +481,8 @@ def main() -> None:
                         help="For CSV rows without DOI, search Crossref by title and fill high-confidence matches")
     parser.add_argument("--checkpoint-interval", type=int, default=25,
                         help="Write batch progress every N rows; 0 disables checkpoints")
+    parser.add_argument("--max-rows", type=int, default=None,
+                        help="Only verify the first N CSV rows; remaining rows are marked skipped_budget")
     parser.add_argument("--json", action="store_true",
                         help="Output JSON for single --doi lookups instead of table")
     args = parser.parse_args()
@@ -511,6 +525,7 @@ def main() -> None:
             strict=args.strict,
             title_lookup=args.title_lookup,
             checkpoint_interval=args.checkpoint_interval,
+            max_rows=args.max_rows,
         )
         print(f"Done: verified -> {args.output}", file=sys.stderr)
 

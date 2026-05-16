@@ -6,6 +6,13 @@ Litminer is a local research-information skill for AI agents. It gives Claude Co
 
 Litminer is not a review writer, a domain knowledge base, or a PDF reader. It discovers, verifies, deduplicates, annotates, summarizes, and queues literature information so the Agent can spend its reasoning budget on the scientific judgement.
 
+2026-05 update: the workflow now writes `query_plan.json`,
+`field_provenance.json`, and `publisher_adapters.json`, supports
+`--time-budget-seconds`, `--stop-after-stage`, `--max-crossref-rows`, and
+`--max-unpaywall-rows`, and exposes background MCP jobs through
+`litminer_start_run` / `litminer_run_status`. On a new or Windows-heavy
+environment, start with `python -m litminer.engine.bootstrap`.
+
 ## Connect The Skill First
 
 The repository root contains `SKILL.md`, so the repository directory itself is the skill folder. The minimum installation is cloning this repository into a skills directory that your Agent scans. That clone writes only the repository files into that directory; it does not run `pip install` and does not modify the global Python environment. Python 3.10+ is only needed when the Agent actually runs Litminer scripts or the optional MCP server.
@@ -353,14 +360,15 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 
 `litminer.engine.run_lit_search` performs:
 
-1. API discovery, OpenAlex by default.
-2. DOI/title deduplication with complementary-field merging.
-3. Crossref verification and title-based DOI recovery.
-4. Runtime semantic triage.
-5. Unpaywall OA/access-link annotation.
-6. Optional verified journal metric annotation.
-7. Publisher-page evidence queue generation.
-8. Feasibility and processing reports.
+1. Runtime query/source/concept planning.
+2. API discovery, OpenAlex by default.
+3. DOI/title deduplication with complementary-field merging.
+4. Crossref verification and title-based DOI recovery.
+5. Runtime semantic triage.
+6. Unpaywall OA/access-link annotation.
+7. Optional verified journal metric annotation.
+8. Publisher-page evidence queue generation.
+9. Field-level provenance, feasibility, and processing reports.
 
 ## Main Outputs
 
@@ -379,6 +387,11 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 | `publisher_queue_probed.csv` | Optional access/PDF/SI probe output. |
 | `feasibility_report.md` | Counts and blocking reasons. |
 | `processing_report.md` | Compact source, metadata, triage, access, and queue summary. |
+| `agent_summary.json` | Machine-readable trust tiers, stage status, artifact paths, and next actions. |
+| `query_plan.json` | Agent-derived queries, sources, concepts, and run controls. |
+| `field_provenance.json` | Field-level source and trust map for queued or probed rows. |
+| `publisher_adapters.json` | Built-in/external publisher inspection adapter boundaries. |
+| `run_manifest.json` | Stage status, resume metadata, row counts, fingerprints, and run signature. |
 
 ## Boundaries
 
@@ -395,6 +408,13 @@ Agent-facing rules and operating details live in [CLAUDE.md](CLAUDE.md) and [SKI
 ## Beta Limits, Failures, And Retries
 
 For the first beta, run `python -m litminer.engine.doctor` and `python -m litminer.engine.offline_smoke` before live searches. If either fails, fix local Python, paths, or config before using network-backed sources.
+
+Use explicit run controls for long or uncertain tasks:
+
+- `--time-budget-seconds N`: stop cleanly at a stage boundary once the budget is exhausted.
+- `--stop-after-stage STAGE`: write partial reports after a named stage.
+- `--max-crossref-rows N` / `--max-unpaywall-rows N`: mark overflow rows as `skipped_budget`.
+- `--max-publisher-probe-rows N`: cap publisher probing when `--probe-limit` is not set.
 
 Common cases:
 
@@ -413,8 +433,10 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
+python -m litminer.engine.journal_metrics --validate --metrics references/journal_metrics_seed.csv
 ```
 
 ## License

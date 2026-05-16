@@ -17,6 +17,11 @@ litminer-mcp = "litminer.sources.mcp.server:main"
 litminer-doctor = "litminer.engine.doctor:main"
 litminer-smoke = "litminer.engine.offline_smoke:main"
 litminer-agent-summary = "litminer.engine.agent_summary:main"
+litminer-bootstrap = "litminer.engine.bootstrap:main"
+litminer-query-plan = "litminer.engine.query_plan:main"
+litminer-field-provenance = "litminer.engine.provenance:main"
+litminer-publisher-adapters = "litminer.engine.publisher_adapters:main"
+litminer-journal-metrics = "litminer.engine.journal_metrics:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]

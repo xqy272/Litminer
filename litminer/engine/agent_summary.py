@@ -10,6 +10,7 @@ from typing import Any
 
 from litminer.engine.common import read_csv_rows, write_text_atomic
 from litminer.engine import workflow_state
+from litminer.engine import publisher_adapters
 
 
 SUMMARY_NAME = "agent_summary.json"
@@ -55,6 +56,8 @@ def _next_actions(summary: dict[str, Any]) -> list[str]:
     actions: list[str] = []
     trust = summary["trust_tiers"]
     provider_statuses = summary.get("provider_statuses", {})
+    if summary.get("partial"):
+        actions.append("Resume the run with the same output_dir if the user request has not changed.")
     if any(status not in {"ok", "empty_result"} for status in provider_statuses):
         actions.append("Inspect api_discovery_trace.csv before treating low counts as scientific absence.")
     if trust["discovered_or_deduped"] and not trust["crossref_trusted"]:
@@ -80,12 +83,17 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "metrics_annotated_candidates": output_dir / "metrics_annotated_candidates.csv",
         "publisher_queue": output_dir / "publisher_queue.csv",
         "publisher_queue_probed": output_dir / "publisher_queue_probed.csv",
+        "query_plan": output_dir / "query_plan.json",
+        "field_provenance": output_dir / "field_provenance.json",
+        "publisher_adapters": output_dir / "publisher_adapters.json",
         "processing_report": output_dir / "processing_report.md",
         "feasibility_report": output_dir / "feasibility_report.md",
         "run_manifest": workflow_state.manifest_path(output_dir),
     }
     rows = {name: read_rows(path) for name, path in paths.items() if path.suffix == ".csv"}
     manifest = workflow_state.load_manifest(output_dir)
+    run_status = str(manifest.get("run_status") or ("completed" if manifest.get("completed_at") else "unknown"))
+    stop_reason = str(manifest.get("stop_reason") or "")
 
     verified_rows = rows.get("verified_candidates", []) or rows.get("oa_annotated_candidates", [])
     crossref_trusted = sum(
@@ -109,6 +117,10 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "output_dir": str(output_dir),
         "run_id": manifest.get("run_id", ""),
         "mode": manifest.get("mode", ""),
+        "run_status": run_status,
+        "partial": run_status == "partial",
+        "stop_reason": stop_reason,
+        "status_reason": stop_reason or run_status,
         "completed_at": manifest.get("completed_at", ""),
         "resume_enabled": bool(manifest.get("resume_enabled", False)),
         "stage_statuses": _status_by_stage(manifest),
@@ -127,6 +139,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "metric_statuses": count_values(rows.get("metrics_annotated_candidates", []), "metric_filter_status"),
         "access_statuses": count_values(rows.get("publisher_queue_probed", []), "access_status"),
         "warnings": warnings or [],
+        "publisher_adapters": publisher_adapters.adapter_rows(),
         "artifacts": {name: artifact(path) for name, path in paths.items()},
     }
     summary["next_actions"] = _next_actions(summary)

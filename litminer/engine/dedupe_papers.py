@@ -58,6 +58,25 @@ def row_key(row: dict[str, str], doi_field: str, title_field: str) -> tuple[str,
     return ("title_without_context", title)
 
 
+def key_confidence(key: tuple[str, str], group_size: int) -> tuple[str, str]:
+    kind, value = key
+    if kind == "doi":
+        return "high", "exact DOI match"
+    if kind == "title_context":
+        year = re.search(r"\|year=([^|]*)", value)
+        journal = re.search(r"\|journal=(.*)$", value)
+        has_year = bool(year and year.group(1).strip())
+        has_journal = bool(journal and journal.group(1).strip())
+        if has_year and has_journal:
+            return "high", "normalized title with matching year and journal context"
+        return "medium", "normalized title with partial year/journal context"
+    if kind == "title_without_context":
+        return "low", "normalized title only; kept separate unless caller opts into broader merging"
+    if group_size > 1:
+        return "low", "row-level fallback group"
+    return "unique", "unique row fallback"
+
+
 def row_quality(row: dict[str, str]) -> int:
     score = 0
     for key, value in row.items():
@@ -117,6 +136,9 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
 
     if "duplicate_count" not in fieldnames:
         fieldnames.append("duplicate_count")
+    for col in ("dedupe_key", "dedupe_confidence", "dedupe_reason"):
+        if col not in fieldnames:
+            fieldnames.append(col)
     for col in [*MERGED_LIST_COLUMNS.values(), *ALTERNATE_VALUE_COLUMNS.values()]:
         if col not in fieldnames:
             fieldnames.append(col)
@@ -130,9 +152,13 @@ def dedupe(input_path: Path, output_path: Path, doi_field: str, title_field: str
         grouped.setdefault(key, []).append(row)
 
     output_rows = []
-    for _key, group_rows in grouped.items():
+    for key, group_rows in grouped.items():
         row = merge_group(group_rows)
         row["duplicate_count"] = str(len(group_rows))
+        row["dedupe_key"] = f"{key[0]}:{key[1]}"
+        confidence, reason = key_confidence(key, len(group_rows))
+        row["dedupe_confidence"] = confidence
+        row["dedupe_reason"] = reason
         output_rows.append(row)
 
     write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)

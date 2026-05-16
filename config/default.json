@@ -29,7 +29,11 @@
     "provider_failure_threshold": 2,
     "unpaywall_sleep": 0.1,
     "crossref_checkpoint_interval": 25,
-    "unpaywall_checkpoint_interval": 25
+    "unpaywall_checkpoint_interval": 25,
+    "time_budget_seconds": null,
+    "max_crossref_rows": null,
+    "max_unpaywall_rows": null,
+    "max_publisher_probe_rows": null
   },
   "outputs": {
     "default_output_dir": ".litminer/runs/litminer_run",

@@ -51,6 +51,10 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "unpaywall_sleep": (int, float),
         "crossref_checkpoint_interval": (int,),
         "unpaywall_checkpoint_interval": (int,),
+        "time_budget_seconds": (int, float, type(None)),
+        "max_crossref_rows": (int, type(None)),
+        "max_unpaywall_rows": (int, type(None)),
+        "max_publisher_probe_rows": (int, type(None)),
     },
     "outputs": {
         "default_output_dir": (str,),
@@ -134,6 +138,10 @@ def validate_config(path: Path) -> list[Check]:
             "provider_failure_threshold",
             "crossref_checkpoint_interval",
             "unpaywall_checkpoint_interval",
+            "time_budget_seconds",
+            "max_crossref_rows",
+            "max_unpaywall_rows",
+            "max_publisher_probe_rows",
         ):
             value = limits.get(key)
             if value is not None and isinstance(value, int) and value < 0:

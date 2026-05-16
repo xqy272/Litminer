@@ -73,6 +73,7 @@ def main():
             "litminer_discover_api",
             "litminer_semantic_triage",
             "litminer_filter_journal_metrics",
+            "litminer_validate_journal_metrics",
             "litminer_build_publisher_queue",
             "litminer_probe_publishers",
             "litminer_import_websearch",
@@ -80,6 +81,13 @@ def main():
             "litminer_agent_summary",
             "litminer_read_csv_summary",
             "litminer_workspace_doctor",
+            "litminer_bootstrap",
+            "litminer_start_run",
+            "litminer_run_status",
+            "litminer_resume_run",
+            "litminer_cancel_run",
+            "litminer_field_provenance",
+            "litminer_publisher_adapters",
             "litminer_run_lit_search",
         ]
         for name in expected:

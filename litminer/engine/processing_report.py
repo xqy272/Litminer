@@ -147,6 +147,9 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "metrics": output_dir / "metrics_annotated_candidates.csv",
         "queue": output_dir / "publisher_queue.csv",
         "probed": output_dir / "publisher_queue_probed.csv",
+        "query_plan": output_dir / "query_plan.json",
+        "field_provenance": output_dir / "field_provenance.json",
+        "publisher_adapters": output_dir / "publisher_adapters.json",
         "agent_summary": output_dir / "agent_summary.json",
     }
     rows = {name: read_rows(path) if path.suffix == ".csv" else [] for name, path in paths.items()}
@@ -167,7 +170,8 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
     ]
     for name in [
         "api", "api_trace", "deduped", "triaged", "selected", "verified",
-        "oa", "metrics", "queue", "probed", "agent_summary",
+        "oa", "metrics", "queue", "probed", "query_plan", "field_provenance",
+        "publisher_adapters", "agent_summary",
     ]:
         path = paths[name]
         if path.exists():
@@ -234,6 +238,16 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
     if rows["queue"]:
         lines.extend(["## Queue Next Actions", ""])
         lines.extend(table(count_values(rows["queue"], "next_action"), limit=8))
+        lines.append("")
+
+    if paths["query_plan"].exists() or paths["field_provenance"].exists() or paths["publisher_adapters"].exists():
+        lines.extend(["## Agent Control Artifacts", ""])
+        if paths["query_plan"].exists():
+            lines.append("- `query_plan.json`: runtime query/source/concept plan derived by the Agent.")
+        if paths["field_provenance"].exists():
+            lines.append("- `field_provenance.json`: field-level source/trust map for queued or probed rows.")
+        if paths["publisher_adapters"].exists():
+            lines.append("- `publisher_adapters.json`: built-in and external publisher-inspection adapter boundary.")
         lines.append("")
 
     lines.extend([

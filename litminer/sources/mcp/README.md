@@ -53,6 +53,14 @@ python -m litminer.sources.mcp.test_server
 | `litminer_agent_summary` | Generate machine-readable run status, trust tiers, artifacts, and next actions. |
 | `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
 | `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
+| `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
+| `litminer_start_run` | Start a long workflow in the background and return a job ID. |
+| `litminer_run_status` | Poll background workflow status and read `agent_summary.json` when present. |
+| `litminer_resume_run` | Start a background workflow with resume enabled. |
+| `litminer_cancel_run` | Request cooperative cancellation for a background workflow. |
+| `litminer_validate_journal_metrics` | Validate metric CSV columns, source fields, numeric IF values, aliases, and ISSNs. |
+| `litminer_field_provenance` | Generate field-level source/trust provenance JSON for a CSV. |
+| `litminer_publisher_adapters` | List publisher inspection adapter capabilities and boundaries. |
 | `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
 
 ## Example: Run Workflow
@@ -89,6 +97,13 @@ to reuse completed stage CSVs. Resume is signature-checked against the prior
 query, concepts, year range, sources, and key workflow options. Use
 `provider_failure_threshold` to stop retrying a provider after repeated failures
 in one discovery run.
+
+For long runs, prefer `litminer_start_run` and poll with
+`litminer_run_status`. The workflow writes `query_plan.json`,
+`run_manifest.json`, `processing_report.md`, and `agent_summary.json` as it
+progresses. Use `time_budget_seconds`, `stop_after_stage`,
+`max_crossref_rows`, `max_unpaywall_rows`, and `max_publisher_probe_rows` to
+bound cost and latency.
 
 ## Workspace Diagnostics
 

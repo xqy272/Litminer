@@ -83,7 +83,7 @@ facts.
    required concepts, optional concepts, negative concepts, article types,
    metric thresholds, and publisher-page fields.
 3. Check the environment if this is a new workspace, a new machine, or a prior
-   tool call failed. Prefer `doctor`, `offline_smoke`, or
+   tool call failed. Prefer `bootstrap`, `doctor`, `offline_smoke`, or
    `litminer_workspace_doctor`.
 4. Choose the lightest useful run:
    - `fast`: first pass, query validation, environment validation, low latency.
@@ -102,10 +102,11 @@ facts.
 Recommended default sequence:
 
 ```bash
+python -m litminer.engine.bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
 python -m litminer.engine.run_lit_search --mode fast ...
-python -m litminer.engine.run_lit_search --mode balanced --resume ...
+python -m litminer.engine.run_lit_search --mode balanced ...
 ```
 
 Use direct CLI when MCP is unavailable. Use MCP when the Agent has a configured
@@ -132,6 +133,7 @@ from the current conversation and pass them as runtime arguments.
 For setup checks, run:
 
 ```bash
+python -m litminer.engine.bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
 ```
@@ -186,6 +188,23 @@ Pass concepts at runtime, for example:
 
 These examples are not defaults.
 
+For fragile semantics, use JSON concept expressions in a triage profile or as a
+single CLI value:
+
+```json
+{
+  "required": [
+    {"name": "photocatalytic_h2", "all_of": ["photocatalytic", {"near": ["hydrogen", "production"], "window": 8}]}
+  ],
+  "negative": [
+    {"name": "h2o2_only", "any_of": ["hydrogen peroxide", "H2O2"]}
+  ]
+}
+```
+
+Supported expression operators are `all_of`, `any_of`, `not`, `near`, and
+`not_near`. They are triage signals; the Agent still owns final judgement.
+
 ### 2. Run The Workflow
 
 ```bash
@@ -207,16 +226,35 @@ when semantic recall is worth the extra time and Semantic Scholar rate-limit
 risk. `full` does not automatically enable arXiv or Europe PMC; add those
 sources only when the user's domain warrants them.
 After a timeout or interrupted run, pass `--resume` with the same `--output-dir`
-to reuse existing stage CSVs. Litminer refuses automatic resume when the run
+to reuse existing stage CSVs. Do this only when the user request and candidate
+universe have not changed. Litminer refuses automatic resume when the run
 signature does not match. Inspect `run_manifest.json` for completed, skipped,
 and reused stages. Batch Crossref and Unpaywall stages write periodic
 checkpoints, so resuming should reuse already annotated rows instead of starting
-from the first DOI again.
+from the first DOI again. To move from a tiny `fast` trial to a broader
+`balanced` or `expanded` run, prefer a new output directory unless you
+intentionally want to enrich the already-discovered candidate set.
 
 Use multiple `--query` values when recall matters. Add
 `--include-semantic-scholar` or set it in config when semantic recall or
 citation expansion is useful. Add `--include-arxiv` for preprint-heavy fields
 or `--include-europe-pmc` for biomedical/life-science searches.
+
+For long or uncertain runs, set explicit controls:
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --query "USER_QUERY_HERE" \
+  --time-budget-seconds 600 \
+  --max-crossref-rows 200 \
+  --max-unpaywall-rows 200 \
+  --stop-after-stage triage
+```
+
+Time budgets stop cleanly at stage boundaries and write partial reports. Row
+budgets mark unprocessed Crossref/Unpaywall rows as `skipped_budget` instead of
+silently dropping them.
 
 ### 3. Use Discovery Only When Needed
 
@@ -338,17 +376,27 @@ Preferred tools:
 - `litminer_agent_summary`
 - `litminer_read_csv_summary`
 - `litminer_workspace_doctor`
+- `litminer_bootstrap`
+- `litminer_start_run`
+- `litminer_run_status`
+- `litminer_resume_run`
+- `litminer_cancel_run`
 - `litminer_run_lit_search`
+- `litminer_publisher_adapters`
+- `litminer_validate_journal_metrics`
+- `litminer_field_provenance`
 
 MCP call preference:
 
 1. `litminer_workspace_doctor` when paths, workspaces, or file visibility are
    uncertain.
-2. `litminer_run_lit_search` for end-to-end work.
-3. `litminer_agent_summary` when the Agent needs machine-readable run state.
-4. `litminer_read_csv_summary` for large CSV review instead of loading whole
+2. `litminer_bootstrap` on a new Windows-heavy or unknown environment.
+3. `litminer_start_run` + `litminer_run_status` for long end-to-end work;
+   use `litminer_run_lit_search` only when synchronous execution is acceptable.
+4. `litminer_agent_summary` when the Agent needs machine-readable run state.
+5. `litminer_read_csv_summary` for large CSV review instead of loading whole
    files into context.
-5. Single-purpose tools only when continuing from an intermediate artifact or
+6. Single-purpose tools only when continuing from an intermediate artifact or
    debugging one stage.
 
 ## Artifact Contract
@@ -359,6 +407,8 @@ The Agent should treat these files as the skill's main outputs:
   health, Trust Tiers, metadata health, and queue summaries.
 - `agent_summary.json`: first machine-readable status surface; includes trust
   tiers, provider health, artifact paths, warnings, and recommended next actions.
+- `query_plan.json`: Agent-derived queries, concepts, sources, and run controls.
+- `field_provenance.json`: field-level source/trust map for queued or probed rows.
 - `feasibility_report.md`: explains whether user constraints are currently
   feasible and why counts may be too low.
 - `run_manifest.json`: machine-readable stage status, run signature, resume

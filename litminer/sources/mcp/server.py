@@ -41,6 +41,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,8 @@ SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION, "2024-11-05"}
 MAX_STDIN_LINE_BYTES = int(os.environ.get("LITMINER_MCP_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
 
 _import_lock = threading.Lock()
+_jobs_lock = threading.Lock()
+JOBS: dict[str, dict[str, Any]] = {}
 
 
 def _lazy_import(module_path: str):
@@ -94,6 +97,9 @@ _get_engine_processing_report = _lazy_import("litminer.engine.processing_report"
 _get_engine_agent_summary = _lazy_import("litminer.engine.agent_summary")
 _get_engine_run_lit_search = _lazy_import("litminer.engine.run_lit_search")
 _get_engine_doctor = _lazy_import("litminer.engine.doctor")
+_get_engine_bootstrap = _lazy_import("litminer.engine.bootstrap")
+_get_engine_publisher_adapters = _lazy_import("litminer.engine.publisher_adapters")
+_get_engine_provenance = _lazy_import("litminer.engine.provenance")
 
 
 def _workspace_root() -> Path:
@@ -486,6 +492,14 @@ def tool_filter_journal_metrics(args: dict) -> dict:
     return {"status": "ok", "output": args["output_csv"], "counts": counts}
 
 
+def tool_validate_journal_metrics(args: dict) -> dict:
+    """Validate journal metrics CSV governance fields and duplicate mappings."""
+    mod = _get_engine_journal_metrics()
+    metrics_path = _optional_workspace_path(args.get("metrics_csv"), "metrics_csv", must_exist=True) or mod.DEFAULT_METRICS
+    result = mod.validate_metrics(metrics_path, require_numeric_if=bool(args.get("require_numeric_if", False)))
+    return {"status": result["status"], "metrics_csv": str(metrics_path), **result}
+
+
 def tool_build_publisher_queue(args: dict) -> dict:
     """Build a publisher extraction queue."""
     mod = _get_engine_build_queue()
@@ -680,11 +694,9 @@ def tool_workspace_doctor(args: dict) -> dict:
     return {"status": "ok" if healthy else "warning", **report}
 
 
-def tool_run_lit_search(args: dict) -> dict:
-    """Run the Agent-facing Litminer workflow."""
-    mod = _get_engine_run_lit_search()
+def _run_namespace(args: dict):
     import argparse as _argparse
-    ns = _argparse.Namespace(
+    return _argparse.Namespace(
         input_csv=_optional_workspace_path(args.get("input_csv"), "input_csv", must_exist=True),
         query=args.get("queries"),
         query_file=_optional_workspace_path(args.get("query_file"), "query_file", must_exist=True),
@@ -693,6 +705,10 @@ def tool_run_lit_search(args: dict) -> dict:
         output_dir=_optional_workspace_path(args.get("output_dir"), "output_dir"),
         mode=args.get("mode"),
         resume=args.get("resume", False),
+        resume_allow_mismatch=args.get("resume_allow_mismatch", False),
+        resume_mismatch_reason=args.get("resume_mismatch_reason", ""),
+        time_budget_seconds=args.get("time_budget_seconds"),
+        stop_after_stage=args.get("stop_after_stage"),
         discovery_sources=args.get("discovery_sources"),
         include_arxiv=args.get("include_arxiv"),
         include_europe_pmc=args.get("include_europe_pmc"),
@@ -725,6 +741,8 @@ def tool_run_lit_search(args: dict) -> dict:
         provider_failure_threshold=args.get("provider_failure_threshold"),
         crossref_checkpoint_interval=args.get("crossref_checkpoint_interval"),
         unpaywall_checkpoint_interval=args.get("unpaywall_checkpoint_interval"),
+        max_crossref_rows=args.get("max_crossref_rows"),
+        max_unpaywall_rows=args.get("max_unpaywall_rows"),
         metrics=_optional_workspace_path(args.get("metrics_csv"), "metrics_csv", must_exist=True),
         min_if=args.get("min_if"),
         skip_journal_metrics=args.get("skip_journal_metrics"),
@@ -734,9 +752,130 @@ def tool_run_lit_search(args: dict) -> dict:
         screenshot_root=_optional_workspace_path(args.get("screenshot_root"), "screenshot_root"),
         probe_publishers=args.get("probe_publishers"),
         probe_limit=args.get("probe_limit"),
+        max_publisher_probe_rows=args.get("max_publisher_probe_rows"),
         probe_sleep=args.get("probe_sleep"),
     )
-    return {"status": "ok", **mod.run(ns)}
+
+
+def tool_run_lit_search(args: dict) -> dict:
+    """Run the Agent-facing Litminer workflow."""
+    mod = _get_engine_run_lit_search()
+    ns = _run_namespace(args)
+    result = mod.run(ns)
+    run_status = result.pop("status", "completed")
+    return {"status": "ok", "run_status": run_status, **result}
+
+
+def _job_snapshot(job_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = dict(JOBS.get(job_id) or {})
+    if not job:
+        raise ValueError(f"unknown Litminer job_id: {job_id}")
+    output_dir = job.get("output_dir")
+    if output_dir:
+        summary_path = Path(output_dir) / "agent_summary.json"
+        if job.get("status") in {"completed", "partial", "failed"} and summary_path.exists():
+            try:
+                job["agent_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                job["agent_summary_path"] = str(summary_path)
+        else:
+            job["agent_summary_path"] = str(summary_path)
+    return job
+
+
+def _run_job(job_id: str, ns: Any) -> None:
+    mod = _get_engine_run_lit_search()
+    with _jobs_lock:
+        JOBS[job_id]["status"] = "running"
+        JOBS[job_id]["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        result = mod.run(ns)
+        with _jobs_lock:
+            JOBS[job_id]["status"] = result.get("status", "completed")
+            JOBS[job_id]["result"] = result
+            JOBS[job_id]["output_dir"] = result.get("output_dir", JOBS[job_id].get("output_dir", ""))
+            JOBS[job_id]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    except Exception as exc:
+        with _jobs_lock:
+            JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["error"] = str(exc)
+            JOBS[job_id]["traceback"] = traceback.format_exc() if os.environ.get("LITMINER_MCP_DEBUG_ERRORS") else ""
+            JOBS[job_id]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def tool_start_run(args: dict) -> dict:
+    """Start a Litminer workflow in a background thread."""
+    ns = _run_namespace(args)
+    if getattr(ns, "output_dir", None) is None:
+        ns = _get_engine_run_lit_search().normalize_args(ns)
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "output_dir": str(getattr(ns, "output_dir", "") or ""),
+            "cancel_requested": False,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    thread = threading.Thread(target=_run_job, args=(job_id, ns), daemon=True)
+    thread.start()
+    return {
+        "status": "queued",
+        "job_id": job_id,
+        "output_dir": str(getattr(ns, "output_dir", "") or ""),
+        "status_tool": "litminer_run_status",
+    }
+
+
+def tool_run_status(args: dict) -> dict:
+    """Return background Litminer job status."""
+    return _job_snapshot(str(args.get("job_id") or ""))
+
+
+def tool_resume_run(args: dict) -> dict:
+    """Start a background run with resume enabled."""
+    resumed_args = dict(args)
+    resumed_args["resume"] = True
+    return tool_start_run(resumed_args)
+
+
+def tool_cancel_run(args: dict) -> dict:
+    """Request cancellation for a background run.
+
+    Cancellation is cooperative at the job registry layer. Current engine
+    stages finish their active provider call/stage before the run can stop.
+    """
+    job_id = str(args.get("job_id") or "")
+    with _jobs_lock:
+        if job_id not in JOBS:
+            raise ValueError(f"unknown Litminer job_id: {job_id}")
+        JOBS[job_id]["cancel_requested"] = True
+    return {"status": "cancel_requested", "job_id": job_id, "note": "Engine stages are not interrupted mid-call."}
+
+
+def tool_bootstrap(args: dict) -> dict:
+    """Generate first-run bootstrap reports."""
+    mod = _get_engine_bootstrap()
+    workspace_root = _optional_workspace_path(args.get("workspace_root"), "workspace_root")
+    output_dir = _workspace_path(args.get("output_dir", ".litminer/bootstrap"), "output_dir")
+    outputs = mod.write_reports(output_dir, workspace_root=workspace_root)
+    return {"status": "ok", **outputs, "report": mod.build_report(workspace_root)}
+
+
+def tool_publisher_adapters(args: dict) -> dict:
+    """List publisher inspection adapter capabilities and boundaries."""
+    mod = _get_engine_publisher_adapters()
+    return {"status": "ok", "adapters": mod.adapter_rows()}
+
+
+def tool_field_provenance(args: dict) -> dict:
+    """Generate field-level provenance for a CSV."""
+    mod = _get_engine_provenance()
+    input_csv = _workspace_path(args["input_csv"], "input_csv", must_exist=True)
+    output = _workspace_path(args.get("output", "field_provenance.json"), "output")
+    path = mod.write_from_csv(input_csv, output)
+    return {"status": "ok", "output": str(path)}
 
 
 # Tool registry
@@ -890,6 +1029,14 @@ TOOLS: dict[str, dict] = {
             "backup_output_csv": {"type": "string", "required": False, "description": "Metric-fail/unverified output CSV"},
         },
     },
+    "litminer_validate_journal_metrics": {
+        "handler": tool_validate_journal_metrics,
+        "description": "Validate journal metrics CSV required columns, source fields, numeric IF values, and duplicate aliases/ISSNs",
+        "parameters": {
+            "metrics_csv": {"type": "string", "required": False, "description": "Verified metrics CSV"},
+            "require_numeric_if": {"type": "boolean", "required": False, "description": "Require every metric row to have numeric impact_factor"},
+        },
+    },
     "litminer_build_publisher_queue": {
         "handler": tool_build_publisher_queue,
         "description": "Build DOI-based publisher-page evidence queue",
@@ -966,6 +1113,51 @@ TOOLS: dict[str, dict] = {
             "create_workspace": {"type": "boolean", "required": False, "description": "Create the workspace root if missing"},
         },
     },
+    "litminer_bootstrap": {
+        "handler": tool_bootstrap,
+        "description": "Generate first-run Python/workspace/contact-email bootstrap reports for Agent environments",
+        "parameters": {
+            "workspace_root": {"type": "string", "required": False, "description": "Workspace root to inspect"},
+            "output_dir": {"type": "string", "required": False, "description": "Bootstrap report output directory"},
+        },
+    },
+    "litminer_publisher_adapters": {
+        "handler": tool_publisher_adapters,
+        "description": "List publisher inspection adapter capabilities and boundaries",
+        "parameters": {},
+    },
+    "litminer_field_provenance": {
+        "handler": tool_field_provenance,
+        "description": "Generate field-level source/trust provenance JSON for a Litminer CSV",
+        "parameters": {
+            "input_csv": {"type": "string", "required": True, "description": "Input CSV path"},
+            "output": {"type": "string", "required": False, "description": "Provenance JSON output path"},
+        },
+    },
+    "litminer_start_run": {
+        "handler": tool_start_run,
+        "description": "Start the full Litminer workflow in a background job and return a job_id",
+        "parameters": {},
+    },
+    "litminer_run_status": {
+        "handler": tool_run_status,
+        "description": "Inspect a background Litminer workflow job by job_id",
+        "parameters": {
+            "job_id": {"type": "string", "required": True, "description": "Job ID returned by litminer_start_run"},
+        },
+    },
+    "litminer_resume_run": {
+        "handler": tool_resume_run,
+        "description": "Start a background Litminer workflow with resume enabled",
+        "parameters": {},
+    },
+    "litminer_cancel_run": {
+        "handler": tool_cancel_run,
+        "description": "Request cooperative cancellation for a background Litminer job",
+        "parameters": {
+            "job_id": {"type": "string", "required": True, "description": "Job ID returned by litminer_start_run"},
+        },
+    },
     "litminer_run_lit_search": {
         "handler": tool_run_lit_search,
         "description": "Run API-first discovery, semantic triage, metadata verification, IF annotation, queueing, and reporting",
@@ -979,6 +1171,10 @@ TOOLS: dict[str, dict] = {
             "config": {"type": "string", "required": False, "description": "Runtime infrastructure config JSON"},
             "mode": {"type": "string", "required": False, "description": "Runtime preset: fast, balanced, expanded, or full"},
             "resume": {"type": "boolean", "required": False, "description": "Reuse existing stage CSVs in output_dir"},
+            "resume_allow_mismatch": {"type": "boolean", "required": False, "description": "Allow resume despite a manifest signature mismatch"},
+            "resume_mismatch_reason": {"type": "string", "required": False, "description": "Audit note required with resume_allow_mismatch"},
+            "time_budget_seconds": {"type": "number", "required": False, "description": "Stop cleanly after a stage once this budget is exhausted"},
+            "stop_after_stage": {"type": "string", "required": False, "description": "Stop after query_plan, discovery, merge, dedupe, crossref, triage, selection, unpaywall, metrics, queue, or probe"},
             "discovery_sources": {"type": "string", "required": False, "description": "Comma-separated API providers"},
             "include_arxiv": {"type": "boolean", "required": False, "description": "Run arXiv discovery too"},
             "include_europe_pmc": {"type": "boolean", "required": False, "description": "Run Europe PMC discovery too"},
@@ -1006,6 +1202,8 @@ TOOLS: dict[str, dict] = {
             "provider_failure_threshold": {"type": "integer", "required": False, "description": "Skip remaining provider calls after this many failures"},
             "crossref_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Crossref progress every N rows"},
             "unpaywall_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Unpaywall progress every N rows"},
+            "max_crossref_rows": {"type": "integer", "required": False, "description": "Crossref row budget; remaining rows are marked skipped_budget"},
+            "max_unpaywall_rows": {"type": "integer", "required": False, "description": "Unpaywall row budget; remaining rows are marked skipped_budget"},
             "enrich_unpaywall": {"type": "boolean", "required": False, "description": "Annotate verified rows with Unpaywall OA links"},
             "skip_unpaywall": {"type": "boolean", "required": False, "description": "Disable Unpaywall annotation"},
             "unpaywall_email": {"type": "string", "required": False, "description": "Unpaywall email"},
@@ -1019,10 +1217,14 @@ TOOLS: dict[str, dict] = {
             "screenshot_root": {"type": "string", "required": False, "description": "Screenshot root directory"},
             "probe_publishers": {"type": "boolean", "required": False, "description": "Probe DOI/publisher pages"},
             "probe_limit": {"type": "integer", "required": False, "description": "Max publisher rows to probe"},
+            "max_publisher_probe_rows": {"type": "integer", "required": False, "description": "Publisher probing row budget used when probe_limit is not set"},
             "probe_sleep": {"type": "number", "required": False, "description": "Delay between publisher probe requests"},
         },
     },
 }
+
+for _async_tool_name in ("litminer_start_run", "litminer_resume_run"):
+    TOOLS[_async_tool_name]["parameters"] = dict(TOOLS["litminer_run_lit_search"]["parameters"])
 
 
 # JSON-RPC handler (MCP protocol subset)

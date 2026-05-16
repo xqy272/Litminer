@@ -56,6 +56,10 @@ serve the Agent workflow described in `SKILL.md`.
 - `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
 - `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
 - `litminer/engine/agent_summary.py`: machine-readable trust tiers, stage status, artifact paths, and next actions.
+- `litminer/engine/query_plan.py`: runtime query/source/concept/run-control plan.
+- `litminer/engine/provenance.py`: field-level source/trust provenance for queued or probed rows.
+- `litminer/engine/publisher_adapters.py`: publisher inspection adapter registry and boundaries.
+- `litminer/engine/bootstrap.py`: first-run Python/workspace/contact-email bootstrap report.
 - `litminer/engine/doctor.py`: installation, environment, MCP workspace, and config sanity checks.
 - `litminer/engine/offline_smoke.py`: no-network end-to-end smoke test using an embedded fixture.
 - `litminer/engine/websearch_import.py`: import WebSearch leads as unverified candidates.
@@ -80,6 +84,7 @@ Installation and environment policy:
 - In MCP mode, file arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Path escapes must remain rejected.
 - Do not document hand-copying a subset of files as an install method unless the project ships a dedicated release package or plugin.
 - Before beta release or user handoff, run `python -m litminer.engine.doctor` and `python -m litminer.engine.offline_smoke`.
+- On a new Windows-heavy or unknown machine, run `python -m litminer.engine.bootstrap` before long retrieval.
 - For first use in a new Agent/workspace, prefer `--mode fast` before broad discovery or publisher probing.
 - If MCP file access fails, call `litminer_workspace_doctor` or run `doctor --workspace PATH --explain-path PATH` before retrying.
 - If a run times out or is interrupted, retry with `--resume` and the same `--output-dir` before restarting discovery, but only when the user request has not changed.
@@ -126,6 +131,21 @@ Concept argument examples:
 
 These are examples, not defaults.
 
+Use JSON concept expressions for fragile semantics:
+
+```json
+{
+  "required": [
+    {"name": "photocatalytic_h2", "all_of": ["photocatalytic", {"near": ["hydrogen", "production"], "window": 8}]}
+  ],
+  "negative": [
+    {"name": "h2o2_only", "any_of": ["hydrogen peroxide", "H2O2"]}
+  ]
+}
+```
+
+Supported operators: `all_of`, `any_of`, `not`, `near`, `not_near`.
+
 ### 2. Prefer The Full Runner
 
 ```bash
@@ -158,15 +178,24 @@ Use repeated `--query` when recall matters. Add source flags only when useful:
 - `--include-europe-pmc` for biomedical/life-science tasks.
 - `--probe-publishers` only when lightweight access/PDF/SI hints are needed.
 
+For long runs, prefer explicit controls:
+
+- `--time-budget-seconds N`: stop cleanly at a stage boundary once budget is exhausted.
+- `--stop-after-stage STAGE`: produce partial artifacts after a named stage.
+- `--max-crossref-rows N` and `--max-unpaywall-rows N`: mark overflow rows as `skipped_budget`.
+- `--max-publisher-probe-rows N`: cap publisher probing when `--probe-limit` is not set.
+
 ### 3. Read Outputs In This Order
 
 1. `agent_summary.json` for machine-readable trust tiers, status, artifacts, and next actions.
 2. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, and queue summary.
-3. `run_manifest.json` for stage status, resume decisions, row counts, and file fingerprints.
-4. `feasibility_report.md` for feasibility and blocking reasons.
-5. `triaged_candidates.csv` for semantic review.
-6. `publisher_queue.csv` for article-page evidence work.
-7. `publisher_queue_probed.csv` only if probing was enabled.
+3. `query_plan.json` for Agent-derived queries, sources, concepts, and budgets.
+4. `run_manifest.json` for stage status, resume decisions, row counts, and file fingerprints.
+5. `feasibility_report.md` for feasibility and blocking reasons.
+6. `field_provenance.json` for field-level source/trust checks.
+7. `triaged_candidates.csv` for semantic review.
+8. `publisher_queue.csv` for article-page evidence work.
+9. `publisher_queue_probed.csv` only if probing was enabled.
 
 Do not mechanically scan large CSVs before checking `processing_report.md`.
 Use the report's Trust Tiers to keep discovered candidates separate from
@@ -266,6 +295,14 @@ Core MCP tools:
 - `litminer_agent_summary`
 - `litminer_read_csv_summary`
 - `litminer_workspace_doctor`
+- `litminer_bootstrap`
+- `litminer_start_run`
+- `litminer_run_status`
+- `litminer_resume_run`
+- `litminer_cancel_run`
+- `litminer_validate_journal_metrics`
+- `litminer_field_provenance`
+- `litminer_publisher_adapters`
 
 ## Source Policy
 
@@ -300,8 +337,10 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
+python -m litminer.engine.journal_metrics --validate --metrics references/journal_metrics_seed.csv
 ```
 
 Optional network smoke tests when source wrappers changed:
