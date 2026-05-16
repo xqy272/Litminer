@@ -56,8 +56,11 @@ def _next_actions(summary: dict[str, Any]) -> list[str]:
     actions: list[str] = []
     trust = summary["trust_tiers"]
     provider_statuses = summary.get("provider_statuses", {})
+    provider_status_classes = summary.get("provider_status_classes", {})
     if summary.get("partial"):
         actions.append("Resume the run with the same output_dir if the user request has not changed.")
+    if provider_status_classes.get("rate_limited") or provider_statuses.get("skipped_rate_limit_cooldown"):
+        actions.append("Review provider retry_after_seconds in api_discovery_trace.csv before retrying rate-limited sources.")
     if any(status not in {"ok", "empty_result"} for status in provider_statuses):
         actions.append("Inspect api_discovery_trace.csv before treating low counts as scientific absence.")
     if trust["discovered_or_deduped"] and not trust["crossref_trusted"]:
@@ -132,6 +135,8 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
             "publisher_probe_checked": publisher_probe_checked,
         },
         "provider_statuses": count_values(rows.get("api_trace", []), "status"),
+        "provider_status_classes": count_values(rows.get("api_trace", []), "status_class"),
+        "provider_next_actions": count_values(rows.get("api_trace", []), "next_action"),
         "provider_counts": count_values(rows.get("api_trace", []), "provider"),
         "triage_priorities": count_values(rows.get("triaged_candidates", []), "triage_priority"),
         "candidate_statuses": count_values(rows.get("triaged_candidates", []), "candidate_status"),

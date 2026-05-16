@@ -425,6 +425,7 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
     "parallel_providers": false,
     "provider_workers": null,
     "provider_failure_threshold": 2,
+    "provider_rate_limit_cooldown_seconds": 60.0,
     "unpaywall_sleep": 0.1
   },
   "outputs": {

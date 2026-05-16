@@ -66,6 +66,8 @@ class LitminerCoreTests(unittest.TestCase):
             with trace.open(encoding="utf-8", newline="") as handle:
                 trace_rows = list(csv.DictReader(handle))
             self.assertEqual(trace_rows[0]["status"], "error")
+            self.assertEqual(trace_rows[0]["status_class"], "error")
+            self.assertIn("inspect_error", trace_rows[0]["next_action"])
             self.assertIn("boom", trace_rows[0]["error"])
             self.assertIn("Provider Statuses", report.read_text(encoding="utf-8"))
 
@@ -163,6 +165,41 @@ class LitminerCoreTests(unittest.TestCase):
                 [row["status"] for row in trace_rows],
                 ["error", "skipped_circuit_breaker", "skipped_circuit_breaker"],
             )
+            self.assertEqual(trace_rows[1]["status_class"], "skipped")
+
+    def test_api_discovery_cools_down_rate_limited_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+
+            error = ProviderSearchError(
+                "limited",
+                status="rate_limited",
+                retry_after_seconds=120,
+                http_status=429,
+                transient=True,
+            )
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=error) as run_provider:
+                result = api_discovery.discover_api(
+                    ["query one", "query two"],
+                    output,
+                    sources=["semantic_scholar"],
+                    provider_rate_limit_cooldown_seconds=30,
+                    trace_csv=trace,
+                )
+
+            self.assertEqual(run_provider.call_count, 1)
+            self.assertEqual(result["provider_status_classes"]["rate_limited"], 1)
+            self.assertEqual(result["provider_status_classes"]["skipped"], 1)
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [row["status"] for row in trace_rows],
+                ["rate_limited", "skipped_rate_limit_cooldown"],
+            )
+            self.assertEqual(trace_rows[0]["retry_after_seconds"], "120")
+            self.assertIn("retry_provider", trace_rows[0]["next_action"])
 
     def test_openalex_work_type_filter_is_configurable(self) -> None:
         article_url = api_discovery.openalex_search._build_url(
@@ -229,6 +266,8 @@ class LitminerCoreTests(unittest.TestCase):
                 semantic_scholar_search.search("clinical rag", year_from=2024, max_results=1)
 
         self.assertEqual(caught.exception.status, "rate_limited")
+        self.assertEqual(caught.exception.retry_after_seconds, 0.0)
+        self.assertEqual(caught.exception.http_status, 429)
         self.assertEqual(sleep.call_count, semantic_scholar_search.RATE_LIMIT_RETRIES - 1)
 
     def test_preflight_warnings_surface_configuration_gaps(self) -> None:
@@ -928,6 +967,44 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(flat["best_oa_pdf_url"], "https://repo.example/paper.pdf")
         self.assertEqual(flat["best_oa_host_type"], "repository")
 
+    def test_unpaywall_429_returns_rate_limited_status(self) -> None:
+        headers = Message()
+        headers["Retry-After"] = "0"
+        error = urllib.error.HTTPError(
+            url="https://api.unpaywall.org/v2/10.1234/example",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=headers,
+            fp=None,
+        )
+
+        with (
+            patch("litminer.sources.api.unpaywall_lookup.urllib.request.urlopen", side_effect=error),
+            patch("litminer.sources.api.unpaywall_lookup.time.sleep") as sleep,
+        ):
+            result = unpaywall_lookup.lookup_doi("10.1234/example", email="agent@example.org")
+
+        flat = unpaywall_lookup.flatten_response(result, checked_at="2026-05-08T00:00:00Z")
+        self.assertEqual(result["status"], "rate_limited")
+        self.assertEqual(flat["unpaywall_retry_after_seconds"], "0.0")
+        self.assertIn("rate limit", result["error"])
+        self.assertEqual(sleep.call_count, unpaywall_lookup.MAX_RETRIES - 1)
+
+    def test_unpaywall_rate_limited_rows_are_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oa.csv"
+            path.write_text(
+                "title,doi,unpaywall_status\n"
+                "Paper A,10.1234/a,ok\n"
+                "Paper B,10.1234/b,rate_limited\n",
+                encoding="utf-8",
+            )
+
+            cached = unpaywall_lookup._existing_annotated_rows(path)
+
+            self.assertTrue(any("10.1234/a" in key for key in cached))
+            self.assertFalse(any("10.1234/b" in key for key in cached))
+
     def test_processing_report_summarizes_workflow_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1163,6 +1240,26 @@ class LitminerCoreTests(unittest.TestCase):
 
         self.assertEqual(data["message"]["DOI"], "10.1234/example")
         sleep.assert_called_once_with(0.0)
+
+    def test_crossref_rate_limited_rows_are_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "output.csv"
+            input_csv.write_text("title,doi\nPaper,10.1234/a\n", encoding="utf-8")
+
+            with patch(
+                "litminer.sources.api.crossref_verify.verify_doi",
+                side_effect=crossref_verify.CrossrefRateLimitError("limited", retry_after_seconds=0.0),
+            ):
+                counts = crossref_verify.verify_csv(input_csv, output_csv)
+
+            self.assertEqual(counts["rate_limited"], 1)
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["crossref_status"], "rate_limited")
+            self.assertEqual(rows[0]["crossref_retry_after_seconds"], "0.0")
+            self.assertEqual(crossref_verify._existing_verified_rows(output_csv), {})
 
     def test_publisher_probe_marks_heuristic_status(self) -> None:
         row = publisher_probe.probe_row({})
@@ -1408,6 +1505,91 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(summary["run_status"], "partial")
             self.assertTrue(summary["partial"])
             self.assertIn("Resume the run", summary["next_actions"][0])
+
+    def test_run_marks_rate_limited_discovery_as_partial_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "run"
+
+            def fake_discover(_queries, output, **_kwargs):
+                output.write_text(
+                    "title,doi,publication_year,journal,abstract\n"
+                    "A precise paper,10.1234/a,2026,Journal A,Reports external validation.\n",
+                    encoding="utf-8",
+                )
+                return {
+                    "provider_status_classes": {"rate_limited": 1},
+                    "provider_statuses": {"rate_limited": 1},
+                }
+
+            args = argparse.Namespace(
+                input_csv=None,
+                query=["external validation"],
+                query_file=None,
+                year_from=2026,
+                year_to=None,
+                output_dir=out_dir,
+                config=None,
+                mode="fast",
+                resume=False,
+                resume_allow_mismatch=False,
+                resume_mismatch_reason="",
+                time_budget_seconds=None,
+                stop_after_stage="dedupe",
+                triage_profile=None,
+                required_concept=[],
+                optional_concept=[],
+                negative_concept=[],
+                exclude_article_type=[],
+                queue_priorities="high,medium,needs_review",
+                include_metadata_blocked=False,
+                fields_needed=None,
+                page_required_field=None,
+                openalex_api_key=None,
+                openalex_mailto=None,
+                openalex_work_types=None,
+                discovery_sources="openalex",
+                max_results_per_query=100,
+                skip_openalex=False,
+                include_semantic_scholar=False,
+                include_arxiv=False,
+                include_europe_pmc=False,
+                semantic_query_limit=3,
+                semantic_max_results=50,
+                skip_crossref=True,
+                strict_discovery=False,
+                parallel_providers=False,
+                provider_workers=None,
+                provider_failure_threshold=1,
+                provider_rate_limit_cooldown_seconds=60,
+                enrich_unpaywall=False,
+                skip_unpaywall=True,
+                unpaywall_email=None,
+                unpaywall_sleep=0,
+                crossref_checkpoint_interval=25,
+                unpaywall_checkpoint_interval=25,
+                max_crossref_rows=None,
+                max_unpaywall_rows=None,
+                metrics=None,
+                min_if=None,
+                skip_journal_metrics=True,
+                target_count=None,
+                queue_strict_only=False,
+                allow_missing_doi=True,
+                screenshot_root=tmp_path / "screens",
+                probe_publishers=False,
+                probe_limit=None,
+                max_publisher_probe_rows=None,
+                probe_sleep=0,
+            )
+
+            with patch("litminer.engine.api_discovery.discover_api", side_effect=fake_discover):
+                run_lit_search.run(args)
+
+            manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            discovery = [stage for stage in manifest["stages"] if stage["name"] == "discovery"][-1]
+            self.assertEqual(discovery["status"], "partial_rate_limited")
+            self.assertIn("rate limited", discovery["message"])
 
     def test_resume_ignores_run_control_signature_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -73,6 +73,7 @@ RUNTIME_DEFAULTS = {
         "parallel_providers": False,
         "provider_workers": None,
         "provider_failure_threshold": 2,
+        "provider_rate_limit_cooldown_seconds": 60.0,
         "unpaywall_sleep": 0.1,
         "crossref_checkpoint_interval": 25,
         "unpaywall_checkpoint_interval": 25,
@@ -311,6 +312,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.provider_workers = limits.get("provider_workers")
     if getattr(args, "provider_failure_threshold", None) is None:
         args.provider_failure_threshold = limits.get("provider_failure_threshold")
+    if getattr(args, "provider_rate_limit_cooldown_seconds", None) is None:
+        args.provider_rate_limit_cooldown_seconds = float(limits.get("provider_rate_limit_cooldown_seconds", 60.0))
 
     if getattr(args, "queue_priorities", None) is None:
         args.queue_priorities = evidence.get("queue_priorities") or "high,medium,needs_review"
@@ -392,6 +395,7 @@ def run_signature_payload(args: argparse.Namespace, queries: list[str]) -> dict[
         "parallel_providers": args.parallel_providers,
         "provider_workers": args.provider_workers,
         "provider_failure_threshold": args.provider_failure_threshold,
+        "provider_rate_limit_cooldown_seconds": args.provider_rate_limit_cooldown_seconds,
         "openalex_work_types": args.openalex_work_types,
         "skip_crossref": args.skip_crossref,
         "enrich_unpaywall": args.enrich_unpaywall,
@@ -501,7 +505,7 @@ def discover(args: argparse.Namespace, out_dir: Path,
         )
         return [output]
 
-    api_discovery.discover_api(
+    discovery_result = api_discovery.discover_api(
         queries,
         output,
         sources=sources,
@@ -517,17 +521,31 @@ def discover(args: argparse.Namespace, out_dir: Path,
         parallel_providers=args.parallel_providers,
         provider_workers=args.provider_workers,
         provider_failure_threshold=args.provider_failure_threshold,
+        provider_rate_limit_cooldown_seconds=args.provider_rate_limit_cooldown_seconds,
         trace_csv=out_dir / "api_discovery_trace.csv",
         report_md=out_dir / "api_discovery_report.md",
         run_id=manifest.get("run_id") if manifest else None,
     )
+    status_classes = discovery_result.get("provider_status_classes", {})
+    if isinstance(status_classes, dict) and status_classes.get("rate_limited"):
+        discovery_status = "partial_rate_limited"
+        discovery_message = "One or more discovery providers were rate limited; resume later with the same output_dir."
+    elif isinstance(status_classes, dict) and (
+        status_classes.get("error") or status_classes.get("partial") or status_classes.get("skipped")
+    ):
+        discovery_status = "partial_source_failure"
+        discovery_message = "One or more discovery providers failed or were skipped; inspect api_discovery_trace.csv."
+    else:
+        discovery_status = "completed"
+        discovery_message = ""
     record_manifest_stage(
         out_dir,
         manifest,
         "discovery",
-        "completed",
+        discovery_status,
         output_path=output,
         row_count_value=workflow_state.row_count(output),
+        message=discovery_message,
     )
     return [output]
 
@@ -840,6 +858,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "crossref_lookup_failed",
         "crossref_missing_doi",
         "crossref_title_lookup_failed",
+        "crossref_rate_limited",
         "crossref_skipped_budget",
         "triaged",
         "triage_high",
@@ -854,6 +873,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "unpaywall_skipped_missing_email",
         "unpaywall_missing_doi",
         "unpaywall_not_found",
+        "unpaywall_rate_limited",
         "unpaywall_error",
         "unpaywall_skipped_budget",
         "metric_pass",
@@ -932,6 +952,7 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
         counts["crossref_lookup_failed"] = status_counts.get("lookup_failed", 0)
         counts["crossref_missing_doi"] = status_counts.get("missing_doi", 0)
         counts["crossref_title_lookup_failed"] = status_counts.get("title_lookup_failed", 0)
+        counts["crossref_rate_limited"] = status_counts.get("rate_limited", 0)
         counts["crossref_skipped_budget"] = status_counts.get("skipped_budget", 0)
         record_manifest_stage(
             out_dir,
@@ -958,18 +979,26 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
     counts["crossref_lookup_failed"] = crossref_counts.get("lookup_failed", 0)
     counts["crossref_missing_doi"] = crossref_counts.get("missing_doi", 0)
     counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
+    counts["crossref_rate_limited"] = crossref_counts.get("rate_limited", 0)
     counts["crossref_skipped_budget"] = crossref_counts.get("skipped_budget", 0)
+    if counts["crossref_skipped_budget"]:
+        crossref_stage_status = "partial_budget"
+        crossref_message = "Rows beyond --max-crossref-rows were marked skipped_budget"
+    elif counts["crossref_rate_limited"]:
+        crossref_stage_status = "partial_rate_limited"
+        crossref_message = "One or more Crossref rows were rate limited; rerun with --resume later."
+    else:
+        crossref_stage_status = "completed"
+        crossref_message = ""
     record_manifest_stage(
         out_dir,
         manifest,
         "crossref",
-        "partial_budget" if counts["crossref_skipped_budget"] else "completed",
+        crossref_stage_status,
         input_path=input_path,
         output_path=output_path,
         row_count_value=workflow_state.row_count(output_path),
-        message="Rows beyond --max-crossref-rows were marked skipped_budget"
-        if counts["crossref_skipped_budget"]
-        else "",
+        message=crossref_message,
     )
     return output_path
 
@@ -1066,6 +1095,7 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
         counts["unpaywall_skipped_missing_email"] = status_counts.get("skipped_missing_email", 0)
         counts["unpaywall_missing_doi"] = status_counts.get("missing_doi", 0)
         counts["unpaywall_not_found"] = status_counts.get("not_found", 0)
+        counts["unpaywall_rate_limited"] = status_counts.get("rate_limited", 0)
         counts["unpaywall_error"] = status_counts.get("error", 0)
         counts["unpaywall_skipped_budget"] = status_counts.get("skipped_budget", 0)
         record_manifest_stage(
@@ -1091,19 +1121,27 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
     counts["unpaywall_skipped_missing_email"] = unpaywall_counts.get("skipped_missing_email", 0)
     counts["unpaywall_missing_doi"] = unpaywall_counts.get("missing_doi", 0)
     counts["unpaywall_not_found"] = unpaywall_counts.get("not_found", 0)
+    counts["unpaywall_rate_limited"] = unpaywall_counts.get("rate_limited", 0)
     counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
     counts["unpaywall_skipped_budget"] = unpaywall_counts.get("skipped_budget", 0)
+    if counts["unpaywall_skipped_budget"]:
+        unpaywall_stage_status = "partial_budget"
+        unpaywall_message = "Rows beyond --max-unpaywall-rows were marked skipped_budget"
+    elif counts["unpaywall_rate_limited"]:
+        unpaywall_stage_status = "partial_rate_limited"
+        unpaywall_message = "One or more Unpaywall rows were rate limited; rerun with --resume later."
+    else:
+        unpaywall_stage_status = "completed"
+        unpaywall_message = ""
     record_manifest_stage(
         out_dir,
         manifest,
         "unpaywall",
-        "partial_budget" if counts["unpaywall_skipped_budget"] else "completed",
+        unpaywall_stage_status,
         input_path=input_path,
         output_path=output_path,
         row_count_value=workflow_state.row_count(output_path),
-        message="Rows beyond --max-unpaywall-rows were marked skipped_budget"
-        if counts["unpaywall_skipped_budget"]
-        else "",
+        message=unpaywall_message,
     )
     return output_path
 
@@ -1710,6 +1748,8 @@ def main() -> None:
                         help="Max provider worker threads when --parallel-providers is set")
     parser.add_argument("--provider-failure-threshold", type=int, default=None,
                         help="Skip remaining calls for a provider after this many failed calls in one discovery run")
+    parser.add_argument("--provider-rate-limit-cooldown-seconds", type=float, default=None,
+                        help="Default cooldown for repeated calls to a rate-limited discovery provider")
     parser.add_argument("--enrich-unpaywall", action="store_true", default=None,
                         help="Annotate verified DOI rows with Unpaywall OA links")
     parser.add_argument("--skip-unpaywall", action="store_true", default=None,

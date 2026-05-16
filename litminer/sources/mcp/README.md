@@ -96,7 +96,10 @@ The full workflow writes `run_manifest.json` beside the CSV outputs. Use the
 to reuse completed stage CSVs. Resume is signature-checked against the prior
 query, concepts, year range, sources, and key workflow options. Use
 `provider_failure_threshold` to stop retrying a provider after repeated failures
-in one discovery run.
+in one discovery run. Discovery trace rows include `status_class`,
+`retry_after_seconds`, and `next_action`; use
+`provider_rate_limit_cooldown_seconds` to avoid repeating calls to a
+rate-limited provider during the same run.
 
 For long runs, prefer `litminer_start_run` and poll with
 `litminer_run_status`. The workflow writes `query_plan.json`,

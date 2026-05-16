@@ -184,6 +184,16 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, page: int
     return f"{OPENALEX_BASE}?{urllib.parse.urlencode(params)}"
 
 
+def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 120.0))
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
 def _fetch_json(url: str) -> dict:
     """Fetch URL with retries and backoff.
     Distinguishes transient errors (429 rate-limit) from permanent ones (403 auth, 409 credit exhaustion).
@@ -196,12 +206,17 @@ def _fetch_json(url: str) -> dict:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (403, 409):
-                raise RuntimeError(f"HTTP {e.code}: API key required, invalid, or credits exhausted. "
-                                   f"Configure --api-key if your OpenAlex access policy requires it.")
+                raise ProviderSearchError(
+                    f"HTTP {e.code}: API key required, invalid, or credits exhausted. "
+                    f"Configure --api-key if your OpenAlex access policy requires it.",
+                    status="auth_error",
+                    http_status=e.code,
+                    transient=False,
+                ) from e
             if e.code == 429:
                 last_error = e
+                wait = _retry_after_seconds(e, attempt)
                 if attempt < MAX_RETRIES - 1:
-                    wait = 2 ** attempt
                     print(f"  Rate limited (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait}s", file=sys.stderr)
                     time.sleep(wait)
                 continue
@@ -213,6 +228,14 @@ def _fetch_json(url: str) -> dict:
                 wait = 2 ** attempt
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
                 time.sleep(wait)
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+        raise ProviderSearchError(
+            f"OpenAlex rate limit persisted after {MAX_RETRIES} attempts",
+            status="rate_limited",
+            retry_after_seconds=_retry_after_seconds(last_error, MAX_RETRIES - 1),
+            http_status=429,
+            transient=True,
+        ) from last_error
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
 
 
@@ -287,6 +310,28 @@ def search(query: str, year_from: int | None = None, year_to: int | None = None,
             if page > 50:
                 print(f"  Stopping at page {page} (limit 50 pages).", file=sys.stderr)
                 break
+    except ProviderSearchError as e:
+        if e.status == "rate_limited":
+            status = "partial_rate_limited" if results else "rate_limited"
+        elif results and e.status == "error":
+            status = "partial_error"
+        elif results and not str(e.status).startswith("partial"):
+            status = f"partial_{e.status}"
+        else:
+            status = e.status
+        message = f"OpenAlex search failed at page {page}: {e}"
+        print(
+            f"  ERROR: {message}. Partial rows={len(results)}.",
+            file=sys.stderr,
+        )
+        raise ProviderSearchError(
+            message,
+            partial_results=results or e.partial_results,
+            status=status,
+            retry_after_seconds=e.retry_after_seconds,
+            http_status=e.http_status,
+            transient=e.transient,
+        ) from e
     except Exception as e:
         status = "partial_error" if results else "error"
         message = f"OpenAlex search failed at page {page}: {e}"

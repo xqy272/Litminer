@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -70,6 +71,9 @@ TRACE_FIELDS = [
     "max_results",
     "returned_count",
     "status",
+    "status_class",
+    "retry_after_seconds",
+    "next_action",
     "error",
     "started_at",
     "ended_at",
@@ -185,6 +189,7 @@ def _run_provider_call(
     started_at = utc_now()
     status = "ok"
     error = ""
+    retry_after_seconds = ""
     rows: list[dict[str, str]] = []
     try:
         rows = run_provider(
@@ -202,16 +207,23 @@ def _run_provider_call(
         status = str(getattr(exc, "status", "error") or "error")
         if rows and status == "error":
             status = "partial_error"
+        retry_after = getattr(exc, "retry_after_seconds", None)
+        if retry_after is not None:
+            retry_after_seconds = f"{float(retry_after):.3f}".rstrip("0").rstrip(".")
         error = f"{type(exc).__name__}: {exc}"
         print(f"WARNING: {provider} query {query_id} failed: {error}", file=sys.stderr)
     if status == "ok" and not rows:
         status = "empty_result"
 
+    status_class = classify_status(status)
     return {
         "provider": provider,
         "provider_max": provider_max,
         "rows": rows,
         "status": status,
+        "status_class": status_class,
+        "retry_after_seconds": retry_after_seconds,
+        "next_action": next_action_for_status(status, retry_after_seconds),
         "error": error,
         "started_at": started_at,
         "ended_at": utc_now(),
@@ -225,14 +237,78 @@ def _skipped_provider_call(provider: str, provider_max: int, failure_count: int)
         "provider_max": provider_max,
         "rows": [],
         "status": "skipped_circuit_breaker",
+        "status_class": "skipped",
+        "retry_after_seconds": "",
+        "next_action": "continue_with_other_sources_or_lower_provider_failure_threshold",
         "error": f"Skipped after {failure_count} failed provider call(s) in this discovery run.",
         "started_at": now,
         "ended_at": now,
     }
 
 
+def _cooldown_provider_call(provider: str, provider_max: int, remaining_seconds: float) -> dict[str, Any]:
+    now = utc_now()
+    retry_after = f"{max(0.0, remaining_seconds):.3f}".rstrip("0").rstrip(".")
+    return {
+        "provider": provider,
+        "provider_max": provider_max,
+        "rows": [],
+        "status": "skipped_rate_limit_cooldown",
+        "status_class": "skipped",
+        "retry_after_seconds": retry_after,
+        "next_action": "retry_this_provider_after_cooldown_or_continue_with_other_sources",
+        "error": f"Skipped because this provider is cooling down for about {retry_after or '0'}s after a rate limit.",
+        "started_at": now,
+        "ended_at": now,
+    }
+
+
+def classify_status(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    if normalized == "ok":
+        return "ok"
+    if normalized == "empty_result":
+        return "empty"
+    if "rate_limited" in normalized or "rate_limit" in normalized:
+        return "rate_limited"
+    if normalized.startswith("partial"):
+        return "partial"
+    if normalized.startswith("skipped"):
+        return "skipped"
+    return "error"
+
+
+def next_action_for_status(status: str, retry_after_seconds: str = "") -> str:
+    status_class = classify_status(status)
+    if status_class == "ok":
+        return "use_returned_candidates"
+    if status_class == "empty":
+        return "treat_as_no_candidates_for_this_query_source_only"
+    if status_class == "rate_limited":
+        if retry_after_seconds:
+            return "retry_provider_after_retry_after_or_resume_later"
+        return "retry_provider_later_or_reduce_query_volume"
+    if status_class == "partial":
+        return "keep_partial_rows_and_resume_or_retry_provider_later"
+    if status == "skipped_circuit_breaker":
+        return "continue_with_other_sources_or_lower_provider_failure_threshold"
+    if status == "skipped_rate_limit_cooldown":
+        return "retry_this_provider_after_cooldown_or_continue_with_other_sources"
+    return "inspect_error_and_continue_with_other_sources_when_possible"
+
+
 def _is_provider_failure(status: str) -> bool:
-    return status not in {"ok", "empty_result", "skipped_circuit_breaker"}
+    return classify_status(status) in {"error", "partial", "rate_limited"}
+
+
+def _cooldown_seconds(provider_result: dict[str, Any], default_seconds: float) -> float:
+    raw = str(provider_result.get("retry_after_seconds") or "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return max(0.0, default_seconds)
 
 
 def discover_api(queries: list[str],
@@ -250,16 +326,23 @@ def discover_api(queries: list[str],
                   parallel_providers: bool = False,
                   provider_workers: int | None = None,
                   provider_failure_threshold: int | None = None,
+                  provider_rate_limit_cooldown_seconds: float = 60.0,
                   trace_csv: Path | None = None,
                   report_md: Path | None = None,
                   run_id: str | None = None) -> dict[str, object]:
     providers = parse_sources(sources)
     run_id = run_id or make_run_id()
     retrieved_at = utc_now()
+    rate_limit_cooldown_default = (
+        60.0
+        if provider_rate_limit_cooldown_seconds is None
+        else float(provider_rate_limit_cooldown_seconds)
+    )
 
     candidates: list[dict[str, str]] = []
     traces: list[dict[str, str]] = []
     provider_failures: dict[str, int] = {}
+    provider_cooldowns: dict[str, float] = {}
 
     for q_index, query in enumerate(queries, start=1):
         query_id = f"q{q_index:03d}"
@@ -279,7 +362,11 @@ def discover_api(queries: list[str],
         runnable_plan: list[tuple[int, str, int]] = []
         for idx, (provider, provider_max) in enumerate(plan):
             failure_count = provider_failures.get(provider, 0)
-            if provider_failure_threshold is not None and failure_count >= provider_failure_threshold:
+            cooldown_until = provider_cooldowns.get(provider, 0.0)
+            cooldown_remaining = cooldown_until - time.monotonic()
+            if cooldown_remaining > 0:
+                provider_results[idx] = _cooldown_provider_call(provider, provider_max, cooldown_remaining)
+            elif provider_failure_threshold is not None and failure_count >= provider_failure_threshold:
                 provider_results[idx] = _skipped_provider_call(provider, provider_max, failure_count)
             else:
                 runnable_plan.append((idx, provider, provider_max))
@@ -325,6 +412,11 @@ def discover_api(queries: list[str],
             rows = provider_result["rows"]
             if _is_provider_failure(str(provider_result["status"])):
                 provider_failures[provider] = provider_failures.get(provider, 0) + 1
+            if classify_status(str(provider_result["status"])) == "rate_limited":
+                provider_cooldowns[provider] = time.monotonic() + _cooldown_seconds(
+                    provider_result,
+                    rate_limit_cooldown_default,
+                )
 
             for rank, row in enumerate(rows, start=1):
                 candidates.append(enrich_row(
@@ -347,6 +439,9 @@ def discover_api(queries: list[str],
                 "max_results": str(provider_result["provider_max"]),
                 "returned_count": str(len(rows)),
                 "status": str(provider_result["status"]),
+                "status_class": str(provider_result["status_class"]),
+                "retry_after_seconds": str(provider_result["retry_after_seconds"]),
+                "next_action": str(provider_result["next_action"]),
                 "error": str(provider_result["error"]),
                 "started_at": str(provider_result["started_at"]),
                 "ended_at": str(provider_result["ended_at"]),
@@ -378,6 +473,7 @@ def discover_api(queries: list[str],
         "query_count": len(queries),
         "providers": providers,
         "provider_statuses": status_counts,
+        "provider_status_classes": dict(Counter(trace["status_class"] for trace in traces)),
         "provider_failures": provider_failures,
         "output_csv": str(output_csv),
         "trace_csv": str(trace_csv) if trace_csv else "",
@@ -423,6 +519,17 @@ def write_report(report_md: Path, output_csv: Path, trace_csv: Path | None,
             lines.append(f"- {status}: {count}")
     else:
         lines.append("- none: 0")
+    by_status_class = Counter(trace.get("status_class", "unknown") for trace in traces)
+    lines.extend([
+        "",
+        "## Provider Status Classes",
+        "",
+    ])
+    if by_status_class:
+        for status_class, count in sorted(by_status_class.items()):
+            lines.append(f"- {status_class}: {count}")
+    else:
+        lines.append("- none: 0")
     lines.extend([
         "",
         "## Provider Capabilities",
@@ -443,15 +550,17 @@ def write_report(report_md: Path, output_csv: Path, trace_csv: Path | None,
         "",
         "## Query Trace",
         "",
-        "| Provider | Query ID | Returned | Status | Query | Error |",
-        "|----------|----------|----------|--------|-------|-------|",
+        "| Provider | Query ID | Returned | Status | Class | Retry After | Next Action | Query | Error |",
+        "|----------|----------|----------|--------|-------|-------------|-------------|-------|-------|",
     ])
     for trace in traces:
         query = trace["query"].replace("|", "\\|")
         error = trace.get("error", "").replace("|", "\\|")
+        next_action = trace.get("next_action", "").replace("|", "\\|")
         lines.append(
             f"| {trace['provider']} | {trace['query_id']} | "
-            f"{trace['returned_count']} | {trace['status']} | {query} | {error} |"
+            f"{trace['returned_count']} | {trace['status']} | {trace.get('status_class', '')} | "
+            f"{trace.get('retry_after_seconds', '')} | {next_action} | {query} | {error} |"
         )
     write_text_atomic(report_md, "\n".join(lines) + "\n")
 
@@ -480,6 +589,8 @@ def main() -> None:
                         help="Max provider worker threads when --parallel-providers is set")
     parser.add_argument("--provider-failure-threshold", type=int, default=None,
                         help="Skip remaining calls for a provider after this many failed calls")
+    parser.add_argument("--provider-rate-limit-cooldown-seconds", type=float, default=60.0,
+                        help="Default cooldown for repeated calls to a rate-limited provider when Retry-After is unavailable")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--report-output", type=Path, default=None)
@@ -505,6 +616,7 @@ def main() -> None:
         parallel_providers=args.parallel_providers,
         provider_workers=args.provider_workers,
         provider_failure_threshold=args.provider_failure_threshold,
+        provider_rate_limit_cooldown_seconds=args.provider_rate_limit_cooldown_seconds,
         trace_csv=args.trace_output,
         report_md=args.report_output,
     )

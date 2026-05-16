@@ -279,6 +279,8 @@ The default runtime config is [config/default.json](config/default.json). Do not
     "strict_discovery": false,
     "parallel_providers": false,
     "provider_workers": null,
+    "provider_failure_threshold": 2,
+    "provider_rate_limit_cooldown_seconds": 60.0,
     "unpaywall_sleep": 0.1
   },
   "outputs": {
@@ -375,7 +377,7 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 | File | Purpose |
 |------|---------|
 | `api_candidates.csv` | Unified API discovery output. |
-| `api_discovery_trace.csv` | Query/source trace. |
+| `api_discovery_trace.csv` | Query/source trace with status class, retry-after hints, and next-action guidance. |
 | `api_discovery_report.md` | Provider status report. |
 | `deduped_candidates.csv` | Deduplicated and merged candidates. |
 | `verified_candidates.csv` | Crossref verification output with explicit status fields. |

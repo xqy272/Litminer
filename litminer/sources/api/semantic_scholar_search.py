@@ -64,6 +64,10 @@ OUTPUT_FIELDS = [
 class RateLimitError(RuntimeError):
     """Raised when Semantic Scholar continues to rate-limit after retries."""
 
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
 
 def _semantic_scholar_api_key() -> str:
     for name in API_KEY_ENV_NAMES:
@@ -103,8 +107,8 @@ def _fetch_json(url: str) -> dict:
         except urllib.error.HTTPError as e:
             last_error = e
             if e.code == 429:
+                wait = _retry_after_seconds(e, attempt)
                 if attempt < RATE_LIMIT_RETRIES - 1:
-                    wait = _retry_after_seconds(e, attempt)
                     print(
                         f"  Rate limited by Semantic Scholar (429). "
                         f"Retry {attempt + 1}/{RATE_LIMIT_RETRIES} after {wait:g}s",
@@ -114,7 +118,8 @@ def _fetch_json(url: str) -> dict:
                     continue
                 raise RateLimitError(
                     "Semantic Scholar rate limit persisted after "
-                    f"{RATE_LIMIT_RETRIES} attempts"
+                    f"{RATE_LIMIT_RETRIES} attempts",
+                    retry_after_seconds=wait,
                 ) from e
             if attempt < MAX_RETRIES - 1:
                 wait = 2 ** attempt
@@ -253,7 +258,14 @@ def search(
             f"  ERROR: {message}. Partial rows={len(results)}.",
             file=sys.stderr,
         )
-        raise ProviderSearchError(message, partial_results=results, status=status) from e
+        raise ProviderSearchError(
+            message,
+            partial_results=results,
+            status=status,
+            retry_after_seconds=getattr(e, "retry_after_seconds", None),
+            http_status=429 if isinstance(e, RateLimitError) else None,
+            transient=True if isinstance(e, RateLimitError) else None,
+        ) from e
 
     print(f"  Collected: {len(results)} candidates.", file=sys.stderr)
     return results

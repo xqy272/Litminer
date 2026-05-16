@@ -48,6 +48,7 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "parallel_providers": (bool,),
         "provider_workers": (int, type(None)),
         "provider_failure_threshold": (int, type(None)),
+        "provider_rate_limit_cooldown_seconds": (int, float),
         "unpaywall_sleep": (int, float),
         "crossref_checkpoint_interval": (int,),
         "unpaywall_checkpoint_interval": (int,),
@@ -136,6 +137,7 @@ def validate_config(path: Path) -> list[Check]:
             "publisher_probe_limit",
             "provider_workers",
             "provider_failure_threshold",
+            "provider_rate_limit_cooldown_seconds",
             "crossref_checkpoint_interval",
             "unpaywall_checkpoint_interval",
             "time_budget_seconds",
@@ -146,7 +148,7 @@ def validate_config(path: Path) -> list[Check]:
             value = limits.get(key)
             if value is not None and isinstance(value, int) and value < 0:
                 checks.append(Check("config", "error", f"{key} must not be negative"))
-        for key in ("publisher_probe_sleep", "unpaywall_sleep"):
+        for key in ("publisher_probe_sleep", "unpaywall_sleep", "provider_rate_limit_cooldown_seconds"):
             value = limits.get(key)
             if value is not None and isinstance(value, (int, float)) and value < 0:
                 checks.append(Check("config", "error", f"{key} must not be negative"))

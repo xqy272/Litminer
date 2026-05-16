@@ -24,11 +24,13 @@ from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomi
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
 REQUEST_TIMEOUT = 30
+MAX_RETRIES = 3
 USER_AGENT = "litminer/1.0"
 
 OUTPUT_COLUMNS = [
     "unpaywall_status",
     "unpaywall_error",
+    "unpaywall_retry_after_seconds",
     "unpaywall_checked_at",
     "is_oa",
     "oa_status",
@@ -57,10 +59,60 @@ def resolve_email(email: str | None = None) -> str:
     )
 
 
+class UnpaywallRateLimitError(RuntimeError):
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 120.0))
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
 def _request_json(url: str) -> dict[str, Any]:
+    last_error: Exception | None = None
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    for attempt in range(MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise
+            last_error = exc
+            if exc.code == 429:
+                wait = _retry_after_seconds(exc, attempt)
+                if attempt < MAX_RETRIES - 1:
+                    print(
+                        f"  Rate limited by Unpaywall (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise UnpaywallRateLimitError(
+                    f"Unpaywall rate limit persisted after {MAX_RETRIES} attempts",
+                    retry_after_seconds=wait,
+                ) from exc
+            if 500 <= exc.code < 600 and attempt < MAX_RETRIES - 1:
+                wait = _retry_after_seconds(exc, attempt)
+                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            raise
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
+            last_error = exc
+            if attempt < MAX_RETRIES - 1:
+                wait = float(2 ** attempt)
+                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
+                time.sleep(wait)
+                continue
+    raise RuntimeError(f"Unpaywall request failed after {MAX_RETRIES} attempts: {last_error}")
 
 
 def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:
@@ -82,6 +134,13 @@ def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:
     )
     try:
         return {"status": "ok", "error": "", "data": _request_json(url)}
+    except UnpaywallRateLimitError as exc:
+        return {
+            "status": "rate_limited",
+            "error": str(exc),
+            "retry_after_seconds": exc.retry_after_seconds,
+            "data": None,
+        }
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return {"status": "not_found", "error": "DOI not found in Unpaywall", "data": None}
@@ -104,9 +163,11 @@ def flatten_response(result: dict[str, Any], checked_at: str | None = None) -> d
     if not isinstance(oa_locations, list):
         oa_locations = []
 
+    retry_after = result.get("retry_after_seconds")
     return {
         "unpaywall_status": str(result.get("status") or ""),
         "unpaywall_error": str(result.get("error") or ""),
+        "unpaywall_retry_after_seconds": "" if retry_after is None else str(retry_after),
         "unpaywall_checked_at": checked_at or utc_now(),
         "is_oa": str(bool(data.get("is_oa"))).lower() if isinstance(data, dict) else "",
         "oa_status": str(data.get("oa_status") or "") if isinstance(data, dict) else "",
@@ -150,7 +211,7 @@ def _existing_annotated_rows(output_path: Path) -> dict[str, dict[str, str]]:
     existing = {}
     for row in rows:
         status = (row.get("unpaywall_status") or "").strip()
-        if status and status != "skipped_budget":
+        if status in {"ok", "not_found", "skipped_missing_email", "missing_doi"}:
             existing[_row_identity(row)] = row
     return existing
 

@@ -44,6 +44,12 @@ MAX_RETRIES = 3
 USER_AGENT = "litminer/1.0"
 
 
+class CrossrefRateLimitError(RuntimeError):
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 def _user_agent() -> str:
     contact = os.environ.get("CROSSREF_MAILTO") or os.environ.get("LITMINER_CONTACT_EMAIL") or ""
     if contact:
@@ -85,6 +91,11 @@ def _fetch_json(url: str) -> dict:
                 wait = 2 ** attempt
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
                 time.sleep(wait)
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+        raise CrossrefRateLimitError(
+            f"Crossref rate limit persisted after {MAX_RETRIES} attempts",
+            retry_after_seconds=_retry_wait_seconds(last_error, MAX_RETRIES - 1),
+        ) from last_error
     raise RuntimeError(f"Crossref request failed: {last_error}")
 
 
@@ -170,7 +181,7 @@ def _extract_date_part(date_dict: dict) -> str:
 
 # Core verification
 
-def verify_doi(doi: str) -> dict[str, str] | None:
+def verify_doi(doi: str, *, raise_transient: bool = False) -> dict[str, str] | None:
     """Verify a single DOI against Crossref. Returns metadata dict or None."""
     doi_clean = normalize_doi(doi)
     if not doi_clean:
@@ -179,6 +190,11 @@ def verify_doi(doi: str) -> dict[str, str] | None:
     url = f"{CROSSREF_BASE}/works/{urllib.parse.quote(doi_clean)}"
     try:
         data = _fetch_json(url)
+    except CrossrefRateLimitError:
+        if raise_transient:
+            raise
+        print(f"  Crossref lookup rate limited for {doi_clean}", file=sys.stderr)
+        return None
     except RuntimeError as e:
         print(f"  Crossref lookup failed for {doi_clean}: {e}", file=sys.stderr)
         return None
@@ -191,7 +207,7 @@ def verify_doi(doi: str) -> dict[str, str] | None:
     return _extract_crossref_metadata(message)
 
 
-def search_by_title(title: str, max_results: int = 5) -> list[dict[str, str]]:
+def search_by_title(title: str, max_results: int = 5, *, raise_transient: bool = False) -> list[dict[str, str]]:
     """Search Crossref by title and return candidate metadata."""
     if not title or len(title.strip()) < 5:
         return []
@@ -203,6 +219,11 @@ def search_by_title(title: str, max_results: int = 5) -> list[dict[str, str]]:
     )
     try:
         data = _fetch_json(url)
+    except CrossrefRateLimitError:
+        if raise_transient:
+            raise
+        print("  Crossref title search rate limited", file=sys.stderr)
+        return []
     except RuntimeError as e:
         print(f"  Crossref title search failed: {e}", file=sys.stderr)
         return []
@@ -235,7 +256,7 @@ def _existing_verified_rows(output_path: Path) -> dict[str, dict[str, str]]:
     existing = {}
     for row in rows:
         status = (row.get("crossref_status") or "").strip()
-        if status and status != "skipped_budget":
+        if status in {"verified", "title_recovered", "mismatch", "missing_doi"}:
             existing[_row_identity(row)] = row
             existing[_row_title_identity(row)] = row
     return existing
@@ -279,9 +300,10 @@ def detect_mismatches(input_row: dict[str, str], crossref_meta: dict[str, str],
 
 def _best_title_match(title: str, input_row: dict[str, str] | None = None,
                       max_results: int = 5,
-                      min_similarity: float = 0.90) -> dict[str, str] | None:
+                      min_similarity: float = 0.90,
+                      raise_transient: bool = False) -> dict[str, str] | None:
     """Return the best Crossref title-search match above a similarity threshold."""
-    candidates = search_by_title(title, max_results=max_results)
+    candidates = search_by_title(title, max_results=max_results, raise_transient=raise_transient)
     best: dict[str, str] | None = None
     best_score = 0.0
     input_row = input_row or {}
@@ -331,6 +353,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "crossref_created", "crossref_published", "crossref_mismatches",
         "crossref_lookup_method", "crossref_title_similarity",
         "crossref_recovered_doi_confidence", "crossref_status", "crossref_verified",
+        "crossref_retry_after_seconds",
     ]
     for col in xref_cols:
         if col not in fieldnames:
@@ -344,6 +367,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "lookup_failed": 0,
         "missing_doi": 0,
         "title_lookup_failed": 0,
+        "rate_limited": 0,
         "reused": 0,
         "skipped_budget": 0,
     }
@@ -390,7 +414,19 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         if not doi:
             if title_lookup:
                 title = row.get("title", "").strip()
-                meta = _best_title_match(title, input_row=row)
+                try:
+                    meta = _best_title_match(title, input_row=row, raise_transient=True)
+                except CrossrefRateLimitError as exc:
+                    polite_pause()
+                    row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+                    row["crossref_status"] = "rate_limited"
+                    row["crossref_verified"] = "false"
+                    row["crossref_retry_after_seconds"] = (
+                        "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+                    )
+                    counts["rate_limited"] += 1
+                    checkpoint(i)
+                    continue
                 polite_pause()
                 if meta is None:
                     row["crossref_mismatches"] = "NO_DOI_TITLE_LOOKUP_FAILED"
@@ -416,7 +452,19 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             checkpoint(i)
             continue
 
-        meta = verify_doi(doi)
+        try:
+            meta = verify_doi(doi, raise_transient=True)
+        except CrossrefRateLimitError as exc:
+            polite_pause()
+            row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+            row["crossref_status"] = "rate_limited"
+            row["crossref_verified"] = "false"
+            row["crossref_retry_after_seconds"] = (
+                "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+            )
+            counts["rate_limited"] += 1
+            checkpoint(i)
+            continue
         polite_pause()
         if meta is None:
             row["crossref_mismatches"] = "CROSSREF_LOOKUP_FAILED"
@@ -453,7 +501,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         f"(doi={counts['verified']}, title_recovered={counts['title_recovered']}), "
         f"mismatch={counts['mismatch']}, failed={counts['lookup_failed']}, "
         f"missing_doi={counts['missing_doi']}, title_lookup_failed={counts['title_lookup_failed']}, "
-        f"skipped_budget={counts['skipped_budget']}.",
+        f"rate_limited={counts['rate_limited']}, skipped_budget={counts['skipped_budget']}.",
         file=sys.stderr,
     )
 

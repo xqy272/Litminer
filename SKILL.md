@@ -269,8 +269,11 @@ python -m litminer.engine.api_discovery \
 ```
 
 Prefer this over raw provider wrappers because it records provider, query ID,
-rank, source trace, and per-source status. Use `--provider-failure-threshold`
-when a rate-limited provider should be skipped after repeated failures.
+rank, source trace, per-source status, status class, retry-after hints, and
+the next action an Agent should take. Use `--provider-failure-threshold` when a
+broken provider should be skipped after repeated failures. Use
+`--provider-rate-limit-cooldown-seconds` to avoid hammering a provider again in
+the same run after a 429/rate-limit response.
 
 ### 4. Triage Without Deleting
 

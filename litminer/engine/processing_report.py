@@ -195,7 +195,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
 
     if rows["api_trace"]:
         lines.extend(["## Discovery Trace Health", ""])
-        for field in ["provider", "status"]:
+        for field in ["provider", "status", "status_class", "next_action"]:
             lines.extend([f"### `{field}`", "", *table(count_values(rows["api_trace"], field)), ""])
         problem_rows = [
             row for row in rows["api_trace"]
