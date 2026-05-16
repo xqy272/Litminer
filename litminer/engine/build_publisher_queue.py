@@ -149,6 +149,14 @@ def build_queue(input_path: Path, output_path: Path,
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
         raise SystemExit("Input CSV has no header")
+    if priorities and "triage_priority" not in fieldnames:
+        raise SystemExit(
+            "Input CSV has no triage_priority column; run semantic_triage first or omit priority filtering."
+        )
+    if statuses and "candidate_status" not in fieldnames:
+        raise SystemExit(
+            "Input CSV has no candidate_status column; run semantic_triage first or omit status filtering."
+        )
 
     requested_fields = _parse_fields(fields_needed, DEFAULT_FIELDS_NEEDED)
     required_page_fields = _parse_fields(page_required_fields, DEFAULT_PAGE_REQUIRED_FIELDS)

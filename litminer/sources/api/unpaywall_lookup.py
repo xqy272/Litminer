@@ -131,9 +131,33 @@ def annotate_row(row: dict[str, str], email: str | None = None,
     return out
 
 
+def _row_identity(row: dict[str, str]) -> str:
+    doi = normalize_doi(row.get("crossref_doi") or row.get("doi") or "")
+    if doi:
+        return f"doi:{doi}"
+    title = " ".join((row.get("crossref_title") or row.get("title") or "").strip().lower().split())
+    year = (row.get("crossref_year") or row.get("publication_year") or row.get("year") or "").strip()
+    return f"title:{title}|year:{year}"
+
+
+def _existing_annotated_rows(output_path: Path) -> dict[str, dict[str, str]]:
+    if not output_path.exists() or not output_path.is_file():
+        return {}
+    try:
+        _fieldnames, rows = read_csv_rows(output_path)
+    except Exception:
+        return {}
+    existing = {}
+    for row in rows:
+        if (row.get("unpaywall_status") or "").strip():
+            existing[_row_identity(row)] = row
+    return existing
+
+
 def annotate_csv(input_path: Path, output_path: Path,
                  email: str | None = None,
-                 sleep_s: float = 0.1) -> dict[str, int]:
+                 sleep_s: float = 0.1,
+                 checkpoint_interval: int = 25) -> dict[str, int]:
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
         raise SystemExit("Input CSV has no header")
@@ -144,12 +168,31 @@ def annotate_csv(input_path: Path, output_path: Path,
 
     counts: dict[str, int] = {}
     checked_at = utc_now()
-    output_rows = []
-    for row in rows:
+    output_rows: list[dict[str, str]] = []
+    existing_rows = _existing_annotated_rows(output_path)
+
+    def checkpoint(index: int) -> None:
+        if checkpoint_interval and checkpoint_interval > 0 and (index + 1) % checkpoint_interval == 0:
+            write_csv_atomic(output_rows + rows[index + 1:], output_path, fieldnames=fieldnames)
+
+    for index, row in enumerate(rows):
+        existing = existing_rows.get(_row_identity(row))
+        if existing is not None:
+            annotated = dict(row)
+            for col in OUTPUT_COLUMNS:
+                annotated[col] = existing.get(col, "")
+            status = annotated.get("unpaywall_status", "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            counts["reused"] = counts.get("reused", 0) + 1
+            output_rows.append(annotated)
+            checkpoint(index)
+            continue
+
         annotated = annotate_row(row, email=email, checked_at=checked_at)
         status = annotated.get("unpaywall_status", "unknown")
         counts[status] = counts.get(status, 0) + 1
         output_rows.append(annotated)
+        checkpoint(index)
         if sleep_s:
             time.sleep(sleep_s)
 
@@ -168,6 +211,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=None, help="Output CSV for batch annotation")
     parser.add_argument("--email", default=None, help="Unpaywall email; falls back to UNPAYWALL_EMAIL or LITMINER_CONTACT_EMAIL")
     parser.add_argument("--sleep", type=float, default=0.1, help="Delay between batch requests")
+    parser.add_argument("--checkpoint-interval", type=int, default=25,
+                        help="Write batch progress every N rows; 0 disables checkpoints")
     args = parser.parse_args()
 
     if args.doi:
@@ -175,7 +220,13 @@ def main() -> None:
         return
     if not args.input or not args.output:
         parser.error("Provide either --doi or both --input and --output")
-    annotate_csv(args.input, args.output, email=args.email, sleep_s=args.sleep)
+    annotate_csv(
+        args.input,
+        args.output,
+        email=args.email,
+        sleep_s=args.sleep,
+        checkpoint_interval=args.checkpoint_interval,
+    )
 
 
 if __name__ == "__main__":

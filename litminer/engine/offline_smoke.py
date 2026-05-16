@@ -122,6 +122,7 @@ def run(output_dir: Path) -> dict[str, str | int]:
         output_dir / "publisher_queue.csv",
         output_dir / "feasibility_report.md",
         output_dir / "processing_report.md",
+        output_dir / "agent_summary.json",
     ]
     missing = [str(path) for path in required_files if not path.exists()]
     if missing:
@@ -157,6 +158,7 @@ def main() -> None:
         print(f"Litminer offline smoke passed: {result['output_dir']}")
         print(f"Publisher queue rows: {result['publisher_queue_rows']}")
         print(f"Processing report: {result['processing_report']}")
+        print(f"Agent summary: {result['agent_summary']}")
 
 
 if __name__ == "__main__":

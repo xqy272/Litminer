@@ -211,6 +211,35 @@ def search_by_title(title: str, max_results: int = 5) -> list[dict[str, str]]:
     return [_extract_crossref_metadata(item) for item in items]
 
 
+def _row_identity(row: dict[str, str]) -> str:
+    doi = normalize_doi(row.get("crossref_doi") or row.get("doi") or "")
+    if doi:
+        return f"doi:{doi}"
+    return _row_title_identity(row)
+
+
+def _row_title_identity(row: dict[str, str]) -> str:
+    title = re.sub(r"\s+", " ", (row.get("crossref_title") or row.get("title") or "").strip().lower())
+    year = (row.get("crossref_year") or row.get("publication_year") or row.get("year") or "").strip()
+    journal = re.sub(r"\s+", " ", (row.get("crossref_container") or row.get("journal") or "").strip().lower())
+    return f"title:{title}|year:{year}|journal:{journal}"
+
+
+def _existing_verified_rows(output_path: Path) -> dict[str, dict[str, str]]:
+    if not output_path.exists() or not output_path.is_file():
+        return {}
+    try:
+        _fieldnames, rows = read_csv_rows(output_path)
+    except Exception:
+        return {}
+    existing = {}
+    for row in rows:
+        if (row.get("crossref_status") or "").strip():
+            existing[_row_identity(row)] = row
+            existing[_row_title_identity(row)] = row
+    return existing
+
+
 # Mismatch detection
 
 def detect_mismatches(input_row: dict[str, str], crossref_meta: dict[str, str],
@@ -283,7 +312,8 @@ def _best_title_match(title: str, input_row: dict[str, str] | None = None,
 
 
 def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
-               title_lookup: bool = False) -> dict[str, int]:
+               title_lookup: bool = False,
+               checkpoint_interval: int = 25) -> dict[str, int]:
     """Verify all DOIs in a CSV file and write augmented output."""
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
@@ -312,8 +342,10 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "lookup_failed": 0,
         "missing_doi": 0,
         "title_lookup_failed": 0,
+        "reused": 0,
     }
     request_count = 0
+    existing_rows = _existing_verified_rows(output_path)
 
     def polite_pause() -> None:
         nonlocal request_count
@@ -321,7 +353,28 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         if request_count % 10 == 0:
             time.sleep(0.5)
 
+    def checkpoint(index: int) -> None:
+        if checkpoint_interval and checkpoint_interval > 0 and (index + 1) % checkpoint_interval == 0:
+            write_csv_atomic(rows, output_path, fieldnames=fieldnames)
+
+    def count_status(row: dict[str, str]) -> None:
+        status = (row.get("crossref_status") or "").strip()
+        if status in counts:
+            counts[status] += 1
+        elif status == "title_recovered":
+            counts["title_recovered"] += 1
+
     for i, row in enumerate(rows):
+        existing = existing_rows.get(_row_identity(row))
+        if existing is not None:
+            for col in ["doi", *xref_cols]:
+                if existing.get(col):
+                    row[col] = existing[col]
+            counts["reused"] += 1
+            count_status(row)
+            checkpoint(i)
+            continue
+
         doi = row.get("doi", "").strip()
         if not doi:
             if title_lookup:
@@ -333,6 +386,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                     row["crossref_status"] = "title_lookup_failed"
                     row["crossref_verified"] = "false"
                     counts["title_lookup_failed"] += 1
+                    checkpoint(i)
                     continue
                 row["doi"] = meta.get("crossref_doi", "")
                 row["crossref_lookup_method"] = "title_search"
@@ -342,11 +396,13 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 row["crossref_status"] = "title_recovered"
                 row["crossref_verified"] = "true"
                 counts["title_recovered"] += 1
+                checkpoint(i)
                 continue
             row["crossref_mismatches"] = "NO_DOI"
             row["crossref_status"] = "missing_doi"
             row["crossref_verified"] = "false"
             counts["missing_doi"] += 1
+            checkpoint(i)
             continue
 
         meta = verify_doi(doi)
@@ -356,6 +412,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             row["crossref_status"] = "lookup_failed"
             row["crossref_verified"] = "false"
             counts["lookup_failed"] += 1
+            checkpoint(i)
             continue
 
         row["crossref_lookup_method"] = "doi"
@@ -378,6 +435,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             row["crossref_status"] = "verified"
             row["crossref_verified"] = "true"
             counts["verified"] += 1
+        checkpoint(i)
     trusted_count = counts["verified"] + counts["title_recovered"]
     print(
         f"Verified: {trusted_count} rows "
@@ -409,6 +467,8 @@ def main() -> None:
                         help="Flag minor title differences as mismatches")
     parser.add_argument("--title-lookup", action="store_true",
                         help="For CSV rows without DOI, search Crossref by title and fill high-confidence matches")
+    parser.add_argument("--checkpoint-interval", type=int, default=25,
+                        help="Write batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--json", action="store_true",
                         help="Output JSON for single --doi lookups instead of table")
     args = parser.parse_args()
@@ -445,8 +505,13 @@ def main() -> None:
     if args.input:
         if not args.output:
             parser.error("--output is required with --input")
-        verify_csv(args.input, args.output, strict=args.strict,
-                   title_lookup=args.title_lookup)
+        verify_csv(
+            args.input,
+            args.output,
+            strict=args.strict,
+            title_lookup=args.title_lookup,
+            checkpoint_interval=args.checkpoint_interval,
+        )
         print(f"Done: verified -> {args.output}", file=sys.stderr)
 
 

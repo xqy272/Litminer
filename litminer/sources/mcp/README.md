@@ -6,6 +6,11 @@ literature workspace plus basic processing tools for triage, verification, OA
 link annotation, metrics annotation, processing summaries, and publisher-page
 queueing.
 
+MCP is an execution surface for the Litminer skill, not a replacement for
+`SKILL.md`. The Agent should still derive queries and semantic concepts from
+the active user request, use the lightest adequate workflow mode, and report
+Trust Tiers rather than treating every discovered row as verified evidence.
+
 File path arguments are resolved relative to `LITMINER_WORKSPACE_ROOT`. If that
 environment variable is unset, they resolve relative to the MCP process `cwd`.
 Paths are rejected if they escape the workspace root. Default workflow outputs
@@ -45,7 +50,9 @@ python -m litminer.sources.mcp.test_server
 | `litminer_probe_publishers` | Resolve DOI landing pages and detect access/PDF/SI link status. |
 | `litminer_import_websearch` | Normalize WebSearch leads as unverified candidates. |
 | `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
+| `litminer_agent_summary` | Generate machine-readable run status, trust tiers, artifacts, and next actions. |
 | `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
+| `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
 | `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
 
 ## Example: Run Workflow
@@ -59,6 +66,8 @@ python -m litminer.sources.mcp.test_server
     "name": "litminer_run_lit_search",
     "arguments": {
       "queries": ["machine learning enzyme stability external validation"],
+      "mode": "fast",
+      "resume": true,
       "year_from": 2026,
       "required_concepts": ["validation=external validation|prospective validation"],
       "optional_concepts": ["benchmark=benchmark|dataset"],
@@ -73,6 +82,36 @@ python -m litminer.sources.mcp.test_server
 
 The query and semantic concepts come from the active user request. Litminer does
 not provide domain defaults.
+
+The full workflow writes `run_manifest.json` beside the CSV outputs. Use the
+`resume` argument with the same `output_dir` after a timeout or interrupted run
+to reuse completed stage CSVs. Resume is signature-checked against the prior
+query, concepts, year range, sources, and key workflow options. Use
+`provider_failure_threshold` to stop retrying a provider after repeated failures
+in one discovery run.
+
+## Workspace Diagnostics
+
+If a file path is rejected or an Agent reports that the workspace is not working,
+call `litminer_workspace_doctor` before running a long workflow:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "litminer_workspace_doctor",
+    "arguments": {
+      "paths": ["input.csv", "../outside.csv"]
+    }
+  }
+}
+```
+
+The response includes `workspace_root`, default output paths, write status, and
+per-path `inside_workspace` flags. On Windows, prefer native Windows paths or
+workspace-relative paths visible to the MCP process.
 
 ## Source Policy
 

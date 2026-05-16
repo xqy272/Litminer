@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from litminer.engine import api_discovery
+from litminer.engine import agent_summary
 from litminer.engine import build_publisher_queue
 from litminer.engine import dedupe_papers
 from litminer.engine import journal_metrics
@@ -38,6 +39,7 @@ from litminer.engine import processing_report
 from litminer.engine import semantic_triage
 from litminer.engine import validate_stage
 from litminer.engine import workspace
+from litminer.engine import workflow_state
 from litminer.engine.common import read_csv_rows, write_csv_atomic, write_text_atomic
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import unpaywall_lookup
@@ -66,7 +68,10 @@ RUNTIME_DEFAULTS = {
         "strict_discovery": False,
         "parallel_providers": False,
         "provider_workers": None,
+        "provider_failure_threshold": 2,
         "unpaywall_sleep": 0.1,
+        "crossref_checkpoint_interval": 25,
+        "unpaywall_checkpoint_interval": 25,
     },
     "outputs": {
         "default_output_dir": workspace.DEFAULT_RUN_DIR,
@@ -88,6 +93,79 @@ RUNTIME_DEFAULTS = {
     },
 }
 
+RUN_MODE_PRESETS = {
+    "fast": {
+        "channels": {
+            "openalex": True,
+            "semantic_scholar": False,
+            "arxiv": False,
+            "europe_pmc": False,
+            "crossref": False,
+            "unpaywall": False,
+            "publisher_probe": False,
+        },
+        "limits": {
+            "max_results_per_query": 30,
+            "parallel_providers": False,
+            "provider_failure_threshold": 1,
+        },
+    },
+    "balanced": {
+        "channels": {
+            "openalex": True,
+            "semantic_scholar": False,
+            "arxiv": False,
+            "europe_pmc": False,
+            "crossref": True,
+            "unpaywall": True,
+            "publisher_probe": False,
+        },
+        "limits": {
+            "max_results_per_query": 100,
+            "semantic_query_limit": 3,
+            "semantic_max_results": 50,
+            "parallel_providers": False,
+            "provider_failure_threshold": 2,
+        },
+    },
+    "full": {
+        "channels": {
+            "openalex": True,
+            "semantic_scholar": True,
+            "arxiv": False,
+            "europe_pmc": False,
+            "crossref": True,
+            "unpaywall": True,
+            "publisher_probe": False,
+        },
+        "limits": {
+            "max_results_per_query": 100,
+            "semantic_query_limit": 3,
+            "semantic_max_results": 50,
+            "parallel_providers": True,
+            "provider_failure_threshold": 2,
+        },
+    },
+    "expanded": {
+        "channels": {
+            "openalex": True,
+            "semantic_scholar": True,
+            "arxiv": False,
+            "europe_pmc": False,
+            "crossref": True,
+            "unpaywall": True,
+            "publisher_probe": False,
+        },
+        "limits": {
+            "max_results_per_query": 100,
+            "semantic_query_limit": 3,
+            "semantic_max_results": 50,
+            "parallel_providers": True,
+            "provider_failure_threshold": 2,
+        },
+    },
+}
+
 
 @dataclass
 class RuntimeConfig:
@@ -101,8 +179,12 @@ class RuntimeConfig:
     api: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_path(cls, path: Path | None = None) -> "RuntimeConfig":
+    def from_path(cls, path: Path | None = None, mode: str | None = None) -> "RuntimeConfig":
         raw = load_runtime_config(path)
+        if mode:
+            if mode not in RUN_MODE_PRESETS:
+                raise ValueError(f"unknown run mode: {mode}")
+            raw = deep_merge(raw, RUN_MODE_PRESETS[mode])
         return cls(
             raw=raw,
             channels=dict(raw.get("channels", {})),
@@ -146,7 +228,7 @@ def load_runtime_config(path: Path | None = None) -> dict:
 
 
 def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
-    config = RuntimeConfig.from_path(getattr(args, "config", None))
+    config = RuntimeConfig.from_path(getattr(args, "config", None), mode=getattr(args, "mode", None))
     channels = config.channels
     limits = config.limits
     evidence = config.evidence
@@ -199,12 +281,18 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.probe_sleep = float(limits.get("publisher_probe_sleep", 0.5))
     if getattr(args, "unpaywall_sleep", None) is None:
         args.unpaywall_sleep = float(limits.get("unpaywall_sleep", 0.1))
+    if getattr(args, "crossref_checkpoint_interval", None) is None:
+        args.crossref_checkpoint_interval = int(limits.get("crossref_checkpoint_interval", 25) or 0)
+    if getattr(args, "unpaywall_checkpoint_interval", None) is None:
+        args.unpaywall_checkpoint_interval = int(limits.get("unpaywall_checkpoint_interval", 25) or 0)
     if getattr(args, "strict_discovery", None) is None:
         args.strict_discovery = bool(limits.get("strict_discovery", False))
     if getattr(args, "parallel_providers", None) is None:
         args.parallel_providers = bool(limits.get("parallel_providers", False))
     if getattr(args, "provider_workers", None) is None:
         args.provider_workers = limits.get("provider_workers")
+    if getattr(args, "provider_failure_threshold", None) is None:
+        args.provider_failure_threshold = limits.get("provider_failure_threshold")
 
     if getattr(args, "queue_priorities", None) is None:
         args.queue_priorities = evidence.get("queue_priorities") or "high,medium,needs_review"
@@ -267,7 +355,100 @@ def load_queries(args: argparse.Namespace) -> list[str]:
     return api_discovery.load_queries(args.query or [], args.query_file)
 
 
-def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
+def run_signature_payload(args: argparse.Namespace, queries: list[str]) -> dict[str, Any]:
+    return {
+        "input_csv": str(args.input_csv.resolve(strict=False)) if args.input_csv else "",
+        "queries": queries,
+        "year_from": args.year_from,
+        "year_to": args.year_to,
+        "mode": getattr(args, "mode", None) or "custom/default",
+        "discovery_sources": args.discovery_sources,
+        "max_results_per_query": args.max_results_per_query,
+        "skip_openalex": args.skip_openalex,
+        "include_semantic_scholar": args.include_semantic_scholar,
+        "include_arxiv": args.include_arxiv,
+        "include_europe_pmc": args.include_europe_pmc,
+        "semantic_query_limit": args.semantic_query_limit,
+        "semantic_max_results": args.semantic_max_results,
+        "strict_discovery": args.strict_discovery,
+        "parallel_providers": args.parallel_providers,
+        "provider_workers": args.provider_workers,
+        "provider_failure_threshold": args.provider_failure_threshold,
+        "crossref_checkpoint_interval": getattr(args, "crossref_checkpoint_interval", 25),
+        "unpaywall_checkpoint_interval": getattr(args, "unpaywall_checkpoint_interval", 25),
+        "openalex_work_types": args.openalex_work_types,
+        "skip_crossref": args.skip_crossref,
+        "enrich_unpaywall": args.enrich_unpaywall,
+        "skip_unpaywall": args.skip_unpaywall,
+        "skip_journal_metrics": args.skip_journal_metrics,
+        "metrics": str(args.metrics.resolve(strict=False)) if args.metrics else "",
+        "min_if": args.min_if,
+        "queue_strict_only": args.queue_strict_only,
+        "allow_missing_doi": args.allow_missing_doi,
+        "queue_priorities": args.queue_priorities,
+        "include_metadata_blocked": args.include_metadata_blocked,
+        "fields_needed": args.fields_needed or [],
+        "page_required_field": args.page_required_field or [],
+        "probe_publishers": args.probe_publishers,
+        "probe_limit": args.probe_limit,
+        "required_concept": args.required_concept or [],
+        "optional_concept": args.optional_concept or [],
+        "negative_concept": args.negative_concept or [],
+        "exclude_article_type": args.exclude_article_type or [],
+        "triage_profile": str(args.triage_profile.resolve(strict=False)) if args.triage_profile else "",
+    }
+
+
+def stage_files_exist(out_dir: Path) -> bool:
+    stage_names = [
+        "api_candidates.csv",
+        "merged_candidates.csv",
+        "deduped_candidates.csv",
+        "verified_candidates.csv",
+        "triaged_candidates.csv",
+        "selected_candidates.csv",
+        "oa_annotated_candidates.csv",
+        "metrics_annotated_candidates.csv",
+        "strict_candidates.csv",
+        "backup_candidates.csv",
+        "publisher_queue.csv",
+        "publisher_queue_probed.csv",
+    ]
+    return any((out_dir / name).exists() for name in stage_names)
+
+
+def validate_resume_manifest(
+    out_dir: Path,
+    args: argparse.Namespace,
+    existing_manifest: dict[str, Any],
+    signature: str,
+) -> None:
+    if not getattr(args, "resume", False):
+        return
+    if getattr(args, "resume_allow_mismatch", False):
+        reason = str(getattr(args, "resume_mismatch_reason", "") or "").strip()
+        if not reason:
+            raise SystemExit(
+                "--resume-allow-mismatch requires --resume-mismatch-reason so the unsafe reuse is auditable."
+            )
+        return
+    existing_signature = str(existing_manifest.get("run_signature") or "")
+    if existing_signature:
+        if existing_signature != signature:
+            raise SystemExit(
+                "Cannot resume because current request parameters differ from run_manifest.json. "
+                "Use a new --output-dir, remove --resume, or pass --resume-allow-mismatch only after manual review."
+            )
+        return
+    if existing_manifest or stage_files_exist(out_dir):
+        raise SystemExit(
+            "Cannot safely resume: existing outputs have no run signature. "
+            "Use a new --output-dir, remove --resume, or pass --resume-allow-mismatch only after manual review."
+        )
+
+
+def discover(args: argparse.Namespace, out_dir: Path,
+             manifest: dict[str, Any] | None = None) -> list[Path]:
     queries = load_queries(args)
     if not queries:
         return []
@@ -288,6 +469,18 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         raise SystemExit("No API discovery sources selected.")
 
     output = out_dir / "api_candidates.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(manifest, "discovery", output):
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "discovery",
+            "skipped_existing",
+            output_path=output,
+            row_count_value=workflow_state.row_count(output),
+            message="Reused existing api_candidates.csv",
+        )
+        return [output]
+
     api_discovery.discover_api(
         queries,
         output,
@@ -303,8 +496,18 @@ def discover(args: argparse.Namespace, out_dir: Path) -> list[Path]:
         strict_discovery=args.strict_discovery,
         parallel_providers=args.parallel_providers,
         provider_workers=args.provider_workers,
+        provider_failure_threshold=args.provider_failure_threshold,
         trace_csv=out_dir / "api_discovery_trace.csv",
         report_md=out_dir / "api_discovery_report.md",
+        run_id=manifest.get("run_id") if manifest else None,
+    )
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "discovery",
+        "completed",
+        output_path=output,
+        row_count_value=workflow_state.row_count(output),
     )
     return [output]
 
@@ -335,8 +538,16 @@ def count_trusted_crossref_rows(path: Path) -> int:
     if not rows:
         return 0
     if "crossref_status" not in rows[0]:
-        return len(rows)
+        return 0
     return sum(1 for row in rows if (row.get("crossref_status") or "").strip() in trusted)
+
+
+def count_field_values(path: Path, field: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in read_rows(path):
+        value = (row.get(field) or "").strip() or "<blank>"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def profile_path(args: argparse.Namespace) -> Path | None:
@@ -345,6 +556,11 @@ def profile_path(args: argparse.Namespace) -> Path | None:
 
 def preflight_warnings(args: argparse.Namespace) -> list[str]:
     warnings: list[str] = []
+    if getattr(args, "mode", None) == "fast":
+        warnings.append(
+            "Fast mode is enabled: Crossref verification, Unpaywall annotation, "
+            "Semantic Scholar, and publisher probing are disabled unless explicitly re-enabled."
+        )
     if args.enrich_unpaywall and not args.unpaywall_email:
         warnings.append(
             "Unpaywall is enabled but no email was resolved from --unpaywall-email, "
@@ -380,6 +596,41 @@ def preflight_warnings(args: argparse.Namespace) -> list[str]:
     return warnings
 
 
+def refresh_processing_report(out_dir: Path, warnings: list[str] | None = None) -> None:
+    """Write best-effort Agent-facing reports after resumable stages."""
+    try:
+        processing_report.write_report(out_dir, out_dir / "processing_report.md")
+    except Exception as exc:
+        print(f"WARNING: failed to refresh processing_report.md: {exc}", file=sys.stderr)
+    try:
+        agent_summary.write_summary(out_dir, warnings=warnings)
+    except Exception as exc:
+        print(f"WARNING: failed to refresh agent_summary.json: {exc}", file=sys.stderr)
+
+
+def record_manifest_stage(out_dir: Path,
+                          manifest: dict[str, Any] | None,
+                          name: str,
+                          status: str,
+                          *,
+                          input_path: Path | None = None,
+                          output_path: Path | None = None,
+                          row_count_value: int | None = None,
+                          message: str = "") -> None:
+    if manifest is None:
+        return
+    workflow_state.record_stage(
+        manifest,
+        name,
+        status,
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=row_count_value,
+        message=message,
+    )
+    workflow_state.write_manifest(out_dir, manifest)
+
+
 def make_report(out_dir: Path, counts: dict[str, int],
                 args: argparse.Namespace,
                 strict_path: Path | None,
@@ -410,6 +661,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "# Litminer Feasibility Report",
         "",
         f"Output directory: `{out_dir}`",
+        f"Run mode: `{getattr(args, 'mode', None) or 'custom/default'}`",
         f"Year from: `{args.year_from or 'none'}`",
         f"Target count: `{target if target is not None else 'not specified'}`",
         f"Minimum IF: `{args.min_if if args.min_if is not None else 'not specified'}`",
@@ -437,6 +689,7 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "metadata_blocked",
         "selected_for_verification",
         "verified",
+        "selected_unverified",
         "unpaywall_ok",
         "unpaywall_skipped_missing_email",
         "unpaywall_missing_doi",
@@ -491,15 +744,50 @@ def make_report(out_dir: Path, counts: dict[str, int],
 
 def run_crossref_stage(input_path: Path, out_dir: Path,
                        args: argparse.Namespace,
-                       counts: dict[str, int]) -> Path:
+                       counts: dict[str, int],
+                       manifest: dict[str, Any] | None = None) -> Path:
     if args.skip_crossref:
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "crossref",
+            "skipped_disabled",
+            input_path=input_path,
+            output_path=input_path,
+            row_count_value=workflow_state.row_count(input_path),
+        )
         return input_path
     output_path = out_dir / "verified_candidates.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "crossref",
+        output_path,
+        input_path=input_path,
+    ):
+        status_counts = count_field_values(output_path, "crossref_status")
+        counts["crossref_verified"] = status_counts.get("verified", 0)
+        counts["crossref_title_recovered"] = status_counts.get("title_recovered", 0)
+        counts["crossref_mismatch"] = status_counts.get("mismatch", 0)
+        counts["crossref_lookup_failed"] = status_counts.get("lookup_failed", 0)
+        counts["crossref_missing_doi"] = status_counts.get("missing_doi", 0)
+        counts["crossref_title_lookup_failed"] = status_counts.get("title_lookup_failed", 0)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "crossref",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=workflow_state.row_count(output_path),
+            message="Reused existing verified_candidates.csv",
+        )
+        return output_path
     crossref_counts = crossref_verify.verify_csv(
         input_path,
         output_path,
         strict=False,
         title_lookup=True,
+        checkpoint_interval=args.crossref_checkpoint_interval,
     )
     counts["crossref_verified"] = crossref_counts.get("verified", 0)
     counts["crossref_title_recovered"] = crossref_counts.get("title_recovered", 0)
@@ -507,13 +795,48 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
     counts["crossref_lookup_failed"] = crossref_counts.get("lookup_failed", 0)
     counts["crossref_missing_doi"] = crossref_counts.get("missing_doi", 0)
     counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "crossref",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=workflow_state.row_count(output_path),
+    )
     return output_path
 
 
 def run_triage_stage(input_path: Path, out_dir: Path,
                      args: argparse.Namespace,
-                     counts: dict[str, int]) -> Path:
+                     counts: dict[str, int],
+                     manifest: dict[str, Any] | None = None) -> Path:
     output_path = out_dir / "triaged_candidates.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "triage",
+        output_path,
+        input_path=input_path,
+    ):
+        priority_counts = count_field_values(output_path, "triage_priority")
+        metadata_counts = count_field_values(output_path, "metadata_status")
+        counts["triaged"] = workflow_state.row_count(output_path)
+        counts["triage_high"] = priority_counts.get("high", 0)
+        counts["triage_medium"] = priority_counts.get("medium", 0)
+        counts["triage_needs_review"] = priority_counts.get("needs_review", 0)
+        counts["triage_low"] = priority_counts.get("low", 0)
+        counts["metadata_blocked"] = metadata_counts.get("blocked", 0)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "triage",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=counts["triaged"],
+            message="Reused existing triaged_candidates.csv",
+        )
+        return output_path
     triage_counts = semantic_triage.triage_csv(
         input_path,
         output_path,
@@ -537,41 +860,124 @@ def run_triage_stage(input_path: Path, out_dir: Path,
         out_dir / "triage_validation.md",
         "triage",
     )
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "triage",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=counts["triaged"],
+    )
     return output_path
 
 
 def run_unpaywall_stage(input_path: Path, out_dir: Path,
                         args: argparse.Namespace,
-                        counts: dict[str, int]) -> Path:
+                        counts: dict[str, int],
+                        manifest: dict[str, Any] | None = None) -> Path:
     if not args.enrich_unpaywall:
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "unpaywall",
+            "skipped_disabled",
+            input_path=input_path,
+            output_path=input_path,
+            row_count_value=workflow_state.row_count(input_path),
+        )
         return input_path
     output_path = out_dir / "oa_annotated_candidates.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "unpaywall",
+        output_path,
+        input_path=input_path,
+    ):
+        status_counts = count_field_values(output_path, "unpaywall_status")
+        counts["unpaywall_ok"] = status_counts.get("ok", 0)
+        counts["unpaywall_skipped_missing_email"] = status_counts.get("skipped_missing_email", 0)
+        counts["unpaywall_missing_doi"] = status_counts.get("missing_doi", 0)
+        counts["unpaywall_not_found"] = status_counts.get("not_found", 0)
+        counts["unpaywall_error"] = status_counts.get("error", 0)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "unpaywall",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=workflow_state.row_count(output_path),
+            message="Reused existing oa_annotated_candidates.csv",
+        )
+        return output_path
     unpaywall_counts = unpaywall_lookup.annotate_csv(
         input_path,
         output_path,
         email=args.unpaywall_email,
         sleep_s=args.unpaywall_sleep,
+        checkpoint_interval=args.unpaywall_checkpoint_interval,
     )
     counts["unpaywall_ok"] = unpaywall_counts.get("ok", 0)
     counts["unpaywall_skipped_missing_email"] = unpaywall_counts.get("skipped_missing_email", 0)
     counts["unpaywall_missing_doi"] = unpaywall_counts.get("missing_doi", 0)
     counts["unpaywall_not_found"] = unpaywall_counts.get("not_found", 0)
     counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "unpaywall",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=workflow_state.row_count(output_path),
+    )
     return output_path
 
 
 def run_metrics_stage(input_path: Path, out_dir: Path,
                       args: argparse.Namespace,
-                      counts: dict[str, int]) -> tuple[Path, Path | None, Path | None]:
+                      counts: dict[str, int],
+                      manifest: dict[str, Any] | None = None) -> tuple[Path, Path | None, Path | None]:
     strict_path: Path | None = None
     backup_path: Path | None = None
     metrics_requested = args.min_if is not None or args.metrics
     if not metrics_requested or args.skip_journal_metrics:
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "metrics",
+            "skipped_disabled",
+            input_path=input_path,
+            output_path=input_path,
+            row_count_value=workflow_state.row_count(input_path),
+        )
         return input_path, strict_path, backup_path
 
     annotated = out_dir / "metrics_annotated_candidates.csv"
     strict_path = out_dir / "strict_candidates.csv"
     backup_path = out_dir / "backup_candidates.csv"
+    expected_metric_output = strict_path if args.queue_strict_only else annotated
+    if (
+        getattr(args, "resume", False)
+        and workflow_state.reusable_stage(manifest, "metrics", expected_metric_output, input_path=input_path)
+        and workflow_state.reusable_csv(strict_path)
+        and workflow_state.reusable_csv(backup_path)
+    ):
+        counts["metric_pass"] = workflow_state.row_count(strict_path)
+        counts["metric_backup"] = workflow_state.row_count(backup_path)
+        output_path = expected_metric_output
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "metrics",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=workflow_state.row_count(output_path),
+            message="Reused existing metric CSV outputs",
+        )
+        return output_path, strict_path, backup_path
     journal_metrics.filter_csv(
         input_path,
         annotated,
@@ -582,14 +988,43 @@ def run_metrics_stage(input_path: Path, out_dir: Path,
     )
     counts["metric_pass"] = len(read_rows(strict_path))
     counts["metric_backup"] = len(read_rows(backup_path))
-    return (strict_path if args.queue_strict_only else annotated), strict_path, backup_path
+    output_path = strict_path if args.queue_strict_only else annotated
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "metrics",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=workflow_state.row_count(output_path),
+    )
+    return output_path, strict_path, backup_path
 
 
 def run_queue_stage(input_path: Path, out_dir: Path,
                     args: argparse.Namespace,
                     counts: dict[str, int],
-                    queue_priorities: set[str]) -> Path:
+                    queue_priorities: set[str],
+                    manifest: dict[str, Any] | None = None) -> Path:
     output_path = out_dir / "publisher_queue.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "publisher_queue",
+        output_path,
+        input_path=input_path,
+    ):
+        counts["publisher_queue"] = workflow_state.row_count(output_path)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "publisher_queue",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=counts["publisher_queue"],
+            message="Reused existing publisher_queue.csv",
+        )
+        return output_path
     queue_counts = build_publisher_queue.build_queue(
         input_path,
         output_path,
@@ -607,15 +1042,51 @@ def run_queue_stage(input_path: Path, out_dir: Path,
         out_dir / "publisher_queue_validation.md",
         "queue",
     )
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "publisher_queue",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=counts["publisher_queue"],
+    )
     return output_path
 
 
 def run_publisher_probe_stage(input_path: Path, out_dir: Path,
                               args: argparse.Namespace,
-                              counts: dict[str, int]) -> None:
+                              counts: dict[str, int],
+                              manifest: dict[str, Any] | None = None) -> None:
     if not args.probe_publishers:
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "publisher_probe",
+            "skipped_disabled",
+            input_path=input_path,
+            row_count_value=workflow_state.row_count(input_path),
+        )
         return
     probed = out_dir / "publisher_queue_probed.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "publisher_probe",
+        probed,
+        input_path=input_path,
+    ):
+        counts["publisher_probed"] = workflow_state.row_count(probed)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "publisher_probe",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=probed,
+            row_count_value=counts["publisher_probed"],
+            message="Reused existing publisher_queue_probed.csv",
+        )
+        return
     publisher_counts = publisher_probe.probe_csv(
         input_path,
         probed,
@@ -623,6 +1094,15 @@ def run_publisher_probe_stage(input_path: Path, out_dir: Path,
         sleep_s=args.probe_sleep,
     )
     counts["publisher_probed"] = sum(publisher_counts.values())
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "publisher_probe",
+        "completed",
+        input_path=input_path,
+        output_path=probed,
+        row_count_value=workflow_state.row_count(probed),
+    )
 
 
 def run(args: argparse.Namespace) -> dict[str, str]:
@@ -632,12 +1112,37 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         print(f"WARNING: {warning}", file=sys.stderr)
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    queries = load_queries(args)
+    signature_payload = run_signature_payload(args, queries)
+    signature = workflow_state.stable_fingerprint(signature_payload)
+    existing_manifest = workflow_state.load_manifest(out_dir) if getattr(args, "resume", False) else {}
+    validate_resume_manifest(out_dir, args, existing_manifest, signature)
+    manifest = workflow_state.new_manifest(
+        args,
+        existing=existing_manifest,
+        signature=signature,
+        signature_payload=signature_payload,
+    )
+    if getattr(args, "resume_allow_mismatch", False):
+        manifest["resume_mismatch_allowed"] = True
+        manifest["resume_mismatch_reason"] = str(getattr(args, "resume_mismatch_reason", "") or "").strip()
+    workflow_state.write_manifest(out_dir, manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
     counts: dict[str, int] = {}
 
     if args.input_csv:
         discovery_inputs = [args.input_csv]
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "discovery",
+            "skipped_input_csv",
+            output_path=args.input_csv,
+            row_count_value=workflow_state.row_count(args.input_csv),
+            message="Started from --input-csv",
+        )
     else:
-        discovery_inputs = discover(args, out_dir)
+        discovery_inputs = discover(args, out_dir, manifest=manifest)
     counts["discovery_files"] = len(discovery_inputs)
     if not discovery_inputs:
         raise SystemExit("No discovery inputs produced. Provide --input-csv or at least one --query.")
@@ -645,44 +1150,136 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     merged = out_dir / "merged_candidates.csv"
     if len(discovery_inputs) == 1:
         merged = discovery_inputs[0]
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "merge",
+            "skipped_single_input",
+            input_path=merged,
+            output_path=merged,
+            row_count_value=workflow_state.row_count(merged),
+        )
     else:
-        merge_csv.merge_csv(discovery_inputs, merged, allow_missing=True)
+        if getattr(args, "resume", False) and workflow_state.reusable_stage(manifest, "merge", merged):
+            record_manifest_stage(
+                out_dir,
+                manifest,
+                "merge",
+                "skipped_existing",
+                output_path=merged,
+                row_count_value=workflow_state.row_count(merged),
+                message="Reused existing merged_candidates.csv",
+            )
+        else:
+            merge_csv.merge_csv(discovery_inputs, merged, allow_missing=True)
+            record_manifest_stage(
+                out_dir,
+                manifest,
+                "merge",
+                "completed",
+                output_path=merged,
+                row_count_value=workflow_state.row_count(merged),
+            )
 
     deduped = out_dir / "deduped_candidates.csv"
-    dedupe_papers.dedupe(merged, deduped, "doi", "title")
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "dedupe",
+        deduped,
+        input_path=merged,
+    ):
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "dedupe",
+            "skipped_existing",
+            input_path=merged,
+            output_path=deduped,
+            row_count_value=workflow_state.row_count(deduped),
+            message="Reused existing deduped_candidates.csv",
+        )
+    else:
+        dedupe_papers.dedupe(merged, deduped, "doi", "title")
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "dedupe",
+            "completed",
+            input_path=merged,
+            output_path=deduped,
+            row_count_value=workflow_state.row_count(deduped),
+        )
     counts["deduped"] = len(read_rows(deduped))
+    refresh_processing_report(out_dir, warnings=warnings)
 
-    triage_input = run_crossref_stage(deduped, out_dir, args, counts)
-    triaged = run_triage_stage(triage_input, out_dir, args, counts)
+    triage_input = run_crossref_stage(deduped, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+    triaged = run_triage_stage(triage_input, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
 
     queue_priorities = parse_set(args.queue_priorities, DEFAULT_QUEUE_PRIORITIES)
     selected = out_dir / "selected_candidates.csv"
-    counts["selected_for_verification"] = select_by_priority(
-        triaged,
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "priority_selection",
         selected,
-        queue_priorities,
-        include_metadata_blocked=args.include_metadata_blocked,
-    )
+        input_path=triaged,
+    ):
+        counts["selected_for_verification"] = workflow_state.row_count(selected)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "priority_selection",
+            "skipped_existing",
+            input_path=triaged,
+            output_path=selected,
+            row_count_value=counts["selected_for_verification"],
+            message="Reused existing selected_candidates.csv",
+        )
+    else:
+        counts["selected_for_verification"] = select_by_priority(
+            triaged,
+            selected,
+            queue_priorities,
+            include_metadata_blocked=args.include_metadata_blocked,
+        )
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "priority_selection",
+            "completed",
+            input_path=triaged,
+            output_path=selected,
+            row_count_value=counts["selected_for_verification"],
+        )
+    refresh_processing_report(out_dir, warnings=warnings)
 
     verified = selected
-    counts["verified"] = (
-        count_trusted_crossref_rows(selected)
-        if not args.skip_crossref else len(read_rows(selected))
-    )
+    counts["verified"] = count_trusted_crossref_rows(selected)
+    if args.skip_crossref:
+        counts["selected_unverified"] = len(read_rows(selected))
 
-    verified = run_unpaywall_stage(verified, out_dir, args, counts)
-    metric_input, strict_path, backup_path = run_metrics_stage(verified, out_dir, args, counts)
-    publisher_queue = run_queue_stage(metric_input, out_dir, args, counts, queue_priorities)
-    run_publisher_probe_stage(publisher_queue, out_dir, args, counts)
+    verified = run_unpaywall_stage(verified, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+    metric_input, strict_path, backup_path = run_metrics_stage(verified, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+    publisher_queue = run_queue_stage(metric_input, out_dir, args, counts, queue_priorities, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+    run_publisher_probe_stage(publisher_queue, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
 
     make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities, warnings=warnings)
-    processing_report.write_report(out_dir, out_dir / "processing_report.md")
+    manifest["completed_at"] = workflow_state.utc_now()
+    workflow_state.write_manifest(out_dir, manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
     return {
         "output_dir": str(out_dir),
         "triaged_candidates": str(triaged),
         "feasibility_report": str(out_dir / "feasibility_report.md"),
         "processing_report": str(out_dir / "processing_report.md"),
+        "agent_summary": str(out_dir / agent_summary.SUMMARY_NAME),
         "publisher_queue": str(publisher_queue),
+        "run_manifest": str(workflow_state.manifest_path(out_dir)),
     }
 
 
@@ -698,6 +1295,15 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=None,
                         help="Runtime infrastructure config JSON: channels, API env names, limits, and outputs.")
+    parser.add_argument("--mode", choices=sorted(RUN_MODE_PRESETS),
+                        default=None,
+                        help="Runtime preset: fast for first pass, balanced for default verification, expanded/full for semantic recall.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse existing stage CSVs in the output directory when they are present")
+    parser.add_argument("--resume-allow-mismatch", action="store_true",
+                        help="Allow --resume when run_manifest.json has a different or missing run signature")
+    parser.add_argument("--resume-mismatch-reason", default="",
+                        help="Required audit note when --resume-allow-mismatch is used")
     parser.add_argument("--triage-profile", type=Path, default=None,
                         help="JSON semantic triage profile")
     parser.add_argument("--required-concept", action="append", default=[],
@@ -740,6 +1346,8 @@ def main() -> None:
                         help="Disable provider concurrency even if config enables it")
     parser.add_argument("--provider-workers", type=int, default=None,
                         help="Max provider worker threads when --parallel-providers is set")
+    parser.add_argument("--provider-failure-threshold", type=int, default=None,
+                        help="Skip remaining calls for a provider after this many failed calls in one discovery run")
     parser.add_argument("--enrich-unpaywall", action="store_true", default=None,
                         help="Annotate verified DOI rows with Unpaywall OA links")
     parser.add_argument("--skip-unpaywall", action="store_true", default=None,
@@ -747,6 +1355,10 @@ def main() -> None:
     parser.add_argument("--unpaywall-email", default=None,
                         help="Unpaywall email; also reads UNPAYWALL_EMAIL or LITMINER_CONTACT_EMAIL")
     parser.add_argument("--unpaywall-sleep", type=float, default=None)
+    parser.add_argument("--crossref-checkpoint-interval", type=int, default=None,
+                        help="Write Crossref batch progress every N rows; 0 disables checkpoints")
+    parser.add_argument("--unpaywall-checkpoint-interval", type=int, default=None,
+                        help="Write Unpaywall batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--metrics", type=Path, default=None)
     parser.add_argument("--min-if", type=float, default=None)
     parser.add_argument("--skip-journal-metrics", dest="skip_journal_metrics",
@@ -774,6 +1386,8 @@ def main() -> None:
     print(f"Triaged candidates: {result['triaged_candidates']}", file=sys.stderr)
     print(f"Feasibility report: {result['feasibility_report']}", file=sys.stderr)
     print(f"Processing report: {result['processing_report']}", file=sys.stderr)
+    print(f"Agent summary: {result['agent_summary']}", file=sys.stderr)
+    print(f"Run manifest: {result['run_manifest']}", file=sys.stderr)
 
 
 if __name__ == "__main__":

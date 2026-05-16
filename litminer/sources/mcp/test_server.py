@@ -77,7 +77,9 @@ def main():
             "litminer_probe_publishers",
             "litminer_import_websearch",
             "litminer_processing_report",
+            "litminer_agent_summary",
             "litminer_read_csv_summary",
+            "litminer_workspace_doctor",
             "litminer_run_lit_search",
         ]
         for name in expected:

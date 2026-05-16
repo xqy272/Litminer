@@ -8,6 +8,27 @@ Litminer is an Agent-facing research information acquisition substrate. Use it w
 
 Litminer is domain-neutral. The Agent derives queries, year ranges, required concepts, optional concepts, negative concepts, article-type exclusions, metric thresholds, and requested publisher-page fields from the active user request.
 
+## Skill-First Operating Model
+
+Treat Litminer as an executable skill contract, not as a normal library whose
+functions should be called ad hoc. The primary user value is that the Agent can
+make literature retrieval reproducible, inspectable, resumable, and honest about
+failure.
+
+When using the skill, the Agent should:
+
+- decide whether structured literature retrieval is warranted before answering
+  current literature claims
+- choose the lightest adequate mode rather than automatically maximizing recall
+- keep runtime semantic choices in arguments, not config files
+- prefer generated reports and summaries over raw CSV scanning
+- report Trust Tiers and constraints, not just a flat paper count
+- resume interrupted runs before repeating API discovery
+- distinguish skill/code directory from user workspace in every file operation
+
+CLI scripts and MCP tools are implementation surfaces for the skill. They should
+serve the Agent workflow described in `SKILL.md`.
+
 ## Hard Boundaries
 
 - Do not answer current literature, DOI, journal metric, or publisher-page evidence questions from memory.
@@ -34,6 +55,7 @@ Litminer is domain-neutral. The Agent derives queries, year ranges, required con
 - `litminer/engine/build_publisher_queue.py`: publisher-page evidence queue generation.
 - `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
 - `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
+- `litminer/engine/agent_summary.py`: machine-readable trust tiers, stage status, artifact paths, and next actions.
 - `litminer/engine/doctor.py`: installation, environment, MCP workspace, and config sanity checks.
 - `litminer/engine/offline_smoke.py`: no-network end-to-end smoke test using an embedded fixture.
 - `litminer/engine/websearch_import.py`: import WebSearch leads as unverified candidates.
@@ -58,6 +80,9 @@ Installation and environment policy:
 - In MCP mode, file arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Path escapes must remain rejected.
 - Do not document hand-copying a subset of files as an install method unless the project ships a dedicated release package or plugin.
 - Before beta release or user handoff, run `python -m litminer.engine.doctor` and `python -m litminer.engine.offline_smoke`.
+- For first use in a new Agent/workspace, prefer `--mode fast` before broad discovery or publisher probing.
+- If MCP file access fails, call `litminer_workspace_doctor` or run `doctor --workspace PATH --explain-path PATH` before retrying.
+- If a run times out or is interrupted, retry with `--resume` and the same `--output-dir` before restarting discovery, but only when the user request has not changed.
 
 Allowed in config:
 
@@ -105,6 +130,7 @@ These are examples, not defaults.
 
 ```bash
 python -m litminer.engine.run_lit_search \
+  --mode fast \
   --query "USER_QUERY_HERE" \
   --year-from 2026 \
   --required-concept "main=term1|term2" \
@@ -113,6 +139,17 @@ python -m litminer.engine.run_lit_search \
   --config config/default.json \
   --output-dir .litminer/runs/litminer_run
 ```
+
+Start with `--mode fast` unless the user explicitly needs exhaustive recall on
+the first run. Move to `--mode balanced` for Crossref/Unpaywall verification
+after the candidate direction looks right, and use `--mode expanded`/`full` only
+when the extra Semantic Scholar recall and 429 risk are justified. `expanded`
+and `full` keep arXiv and Europe PMC opt-in because they are domain-specific sources.
+For interrupted work, keep the same output directory and add `--resume`; inspect
+`run_manifest.json` to see which stages were reused or completed. If Litminer
+rejects resume because the run signature changed, use a new output directory
+instead of forcing reuse. Crossref and Unpaywall batch stages checkpoint
+periodically, so retrying should reuse already annotated rows.
 
 Use repeated `--query` when recall matters. Add source flags only when useful:
 
@@ -123,13 +160,17 @@ Use repeated `--query` when recall matters. Add source flags only when useful:
 
 ### 3. Read Outputs In This Order
 
-1. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, and queue summary.
-2. `feasibility_report.md` for feasibility and blocking reasons.
-3. `triaged_candidates.csv` for semantic review.
-4. `publisher_queue.csv` for article-page evidence work.
-5. `publisher_queue_probed.csv` only if probing was enabled.
+1. `agent_summary.json` for machine-readable trust tiers, status, artifacts, and next actions.
+2. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, and queue summary.
+3. `run_manifest.json` for stage status, resume decisions, row counts, and file fingerprints.
+4. `feasibility_report.md` for feasibility and blocking reasons.
+5. `triaged_candidates.csv` for semantic review.
+6. `publisher_queue.csv` for article-page evidence work.
+7. `publisher_queue_probed.csv` only if probing was enabled.
 
 Do not mechanically scan large CSVs before checking `processing_report.md`.
+Use the report's Trust Tiers to keep discovered candidates separate from
+Crossref-trusted, metric-pass, and publisher-queued rows.
 
 ## Stage Semantics
 
@@ -146,6 +187,10 @@ python -m litminer.engine.api_discovery \
   --trace-output .litminer/runs/litminer_run/api_discovery_trace.csv \
   --report-output .litminer/runs/litminer_run/api_discovery_report.md
 ```
+
+Use `--provider-failure-threshold N` to skip the remaining calls for a provider
+after repeated failures in one discovery run. This is especially useful for
+Semantic Scholar 429s or network outages.
 
 ### Crossref Verification
 
@@ -218,6 +263,9 @@ Core MCP tools:
 - `litminer_probe_publishers`
 - `litminer_import_websearch`
 - `litminer_processing_report`
+- `litminer_agent_summary`
+- `litminer_read_csv_summary`
+- `litminer_workspace_doctor`
 
 ## Source Policy
 

@@ -19,7 +19,9 @@ Tools exposed:
     litminer_dedupe             - Deduplicate paper CSV
     litminer_semantic_triage    - Annotate/rank candidates with caller-supplied concepts
     litminer_processing_report  - Summarize workflow outputs for Agent review
+    litminer_agent_summary      - Generate machine-readable run status
     litminer_read_csv_summary   - Read compact, paginated CSV summaries
+    litminer_workspace_doctor   - Diagnose workspace root/path visibility
     litminer_build_publisher_queue - Build DOI/publisher-page queues
     litminer_run_lit_search     - Run the full Agent-facing workflow
 
@@ -89,12 +91,31 @@ _get_engine_build_queue = _lazy_import("litminer.engine.build_publisher_queue")
 _get_engine_publisher_probe = _lazy_import("litminer.engine.publisher_probe")
 _get_engine_websearch_import = _lazy_import("litminer.engine.websearch_import")
 _get_engine_processing_report = _lazy_import("litminer.engine.processing_report")
+_get_engine_agent_summary = _lazy_import("litminer.engine.agent_summary")
 _get_engine_run_lit_search = _lazy_import("litminer.engine.run_lit_search")
+_get_engine_doctor = _lazy_import("litminer.engine.doctor")
 
 
 def _workspace_root() -> Path:
     """Return the user workspace root for MCP file operations."""
     return workspace.workspace_root()
+
+
+def _workspace_escape_message(label: str, value: str, root: Path, resolved: Path) -> str:
+    return (
+        f"{label} escapes Litminer workspace: requested={value!r}; "
+        f"workspace_root={root}; resolved_path={resolved}. "
+        f"Use a path under {workspace.WORKSPACE_ENV}, move the file into the workspace, "
+        f"or set {workspace.WORKSPACE_ENV} to the project directory that contains the file."
+    )
+
+
+def _workspace_missing_message(label: str, value: str, root: Path, resolved: Path) -> str:
+    return (
+        f"{label} not found: requested={value!r}; "
+        f"workspace_root={root}; resolved_path={resolved}. "
+        "Use a workspace-relative path or place the file under the configured workspace root."
+    )
 
 
 def _workspace_path(value: str, label: str = "path", must_exist: bool = False) -> Path:
@@ -111,9 +132,9 @@ def _workspace_path(value: str, label: str = "path", must_exist: bool = False) -
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"{label} escapes Litminer workspace: {value}") from exc
+        raise ValueError(_workspace_escape_message(label, str(value), root, resolved)) from exc
     if must_exist and not resolved.exists():
-        raise FileNotFoundError(f"{label} not found: {value}")
+        raise FileNotFoundError(_workspace_missing_message(label, str(value), root, resolved))
     return resolved
 
 
@@ -425,6 +446,7 @@ def tool_discover_api(args: dict) -> dict:
         strict_discovery=args.get("strict_discovery", False),
         parallel_providers=args.get("parallel_providers", False),
         provider_workers=args.get("provider_workers"),
+        provider_failure_threshold=args.get("provider_failure_threshold"),
         trace_csv=trace_csv,
         report_md=report_md,
     )
@@ -532,6 +554,15 @@ def tool_processing_report(args: dict) -> dict:
     return {"status": "ok", "output": str(path)}
 
 
+def tool_agent_summary(args: dict) -> dict:
+    """Generate or read a machine-readable Agent summary for a run directory."""
+    mod = _get_engine_agent_summary()
+    output_dir = _workspace_path(args["output_dir"], "output_dir", must_exist=True)
+    output = _optional_workspace_path(args.get("output"), "output")
+    path = mod.write_summary(output_dir, output_path=output)
+    return {"status": "ok", "output": str(path), "summary": mod.build_summary(output_dir)}
+
+
 def tool_read_csv_summary(args: dict) -> dict:
     """Read a compact, paginated summary from a CSV inside the workspace."""
     common = _get_common()
@@ -628,6 +659,27 @@ def tool_read_csv_summary(args: dict) -> dict:
     }
 
 
+def tool_workspace_doctor(args: dict) -> dict:
+    """Diagnose MCP workspace root, writability, and path mapping."""
+    mod = _get_engine_doctor()
+    raw_paths = args.get("paths") or []
+    if isinstance(raw_paths, str):
+        paths = [item.strip() for item in raw_paths.replace(";", ",").split(",") if item.strip()]
+    else:
+        paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    report = mod.workspace_report(
+        workspace=Path(args["workspace_root"]) if args.get("workspace_root") else None,
+        explain_paths=paths,
+        create=bool(args.get("create_workspace", False)),
+    )
+    healthy = (
+        report.get("workspace_exists")
+        and report.get("workspace_is_dir")
+        and report.get("workspace_writable")
+    )
+    return {"status": "ok" if healthy else "warning", **report}
+
+
 def tool_run_lit_search(args: dict) -> dict:
     """Run the Agent-facing Litminer workflow."""
     mod = _get_engine_run_lit_search()
@@ -639,6 +691,8 @@ def tool_run_lit_search(args: dict) -> dict:
         year_from=args.get("year_from"),
         year_to=args.get("year_to"),
         output_dir=_optional_workspace_path(args.get("output_dir"), "output_dir"),
+        mode=args.get("mode"),
+        resume=args.get("resume", False),
         discovery_sources=args.get("discovery_sources"),
         include_arxiv=args.get("include_arxiv"),
         include_europe_pmc=args.get("include_europe_pmc"),
@@ -668,6 +722,9 @@ def tool_run_lit_search(args: dict) -> dict:
         strict_discovery=args.get("strict_discovery"),
         parallel_providers=args.get("parallel_providers"),
         provider_workers=args.get("provider_workers"),
+        provider_failure_threshold=args.get("provider_failure_threshold"),
+        crossref_checkpoint_interval=args.get("crossref_checkpoint_interval"),
+        unpaywall_checkpoint_interval=args.get("unpaywall_checkpoint_interval"),
         metrics=_optional_workspace_path(args.get("metrics_csv"), "metrics_csv", must_exist=True),
         min_if=args.get("min_if"),
         skip_journal_metrics=args.get("skip_journal_metrics"),
@@ -798,6 +855,7 @@ TOOLS: dict[str, dict] = {
             "strict_discovery": {"type": "boolean", "required": False, "description": "Fail when provider errors prevent a reliable candidate set"},
             "parallel_providers": {"type": "boolean", "required": False, "description": "Run different providers for the same query concurrently"},
             "provider_workers": {"type": "integer", "required": False, "description": "Max provider worker threads"},
+            "provider_failure_threshold": {"type": "integer", "required": False, "description": "Skip remaining provider calls after this many failures"},
             "output_csv": {"type": "string", "required": False, "description": "Unified candidate output CSV"},
             "trace_csv": {"type": "string", "required": False, "description": "Discovery trace CSV"},
             "report_md": {"type": "string", "required": False, "description": "Discovery report markdown"},
@@ -875,6 +933,14 @@ TOOLS: dict[str, dict] = {
             "output": {"type": "string", "required": False, "description": "Report markdown path"},
         },
     },
+    "litminer_agent_summary": {
+        "handler": tool_agent_summary,
+        "description": "Generate a compact machine-readable Agent summary JSON for a Litminer output directory",
+        "parameters": {
+            "output_dir": {"type": "string", "required": True, "description": "Litminer output directory"},
+            "output": {"type": "string", "required": False, "description": "Summary JSON path"},
+        },
+    },
     "litminer_read_csv_summary": {
         "handler": tool_read_csv_summary,
         "description": "Read a compact, paginated CSV summary for Agent review",
@@ -891,6 +957,15 @@ TOOLS: dict[str, dict] = {
             "max_cell_chars": {"type": "integer", "required": False, "description": "Maximum characters per returned cell"},
         },
     },
+    "litminer_workspace_doctor": {
+        "handler": tool_workspace_doctor,
+        "description": "Diagnose Litminer MCP workspace root, write access, and path mapping",
+        "parameters": {
+            "workspace_root": {"type": "string", "required": False, "description": "Optional workspace root to inspect"},
+            "paths": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Paths to explain relative to the workspace root"},
+            "create_workspace": {"type": "boolean", "required": False, "description": "Create the workspace root if missing"},
+        },
+    },
     "litminer_run_lit_search": {
         "handler": tool_run_lit_search,
         "description": "Run API-first discovery, semantic triage, metadata verification, IF annotation, queueing, and reporting",
@@ -902,6 +977,8 @@ TOOLS: dict[str, dict] = {
             "year_to": {"type": "integer", "required": False, "description": "Maximum year"},
             "output_dir": {"type": "string", "required": False, "description": "Output directory"},
             "config": {"type": "string", "required": False, "description": "Runtime infrastructure config JSON"},
+            "mode": {"type": "string", "required": False, "description": "Runtime preset: fast, balanced, expanded, or full"},
+            "resume": {"type": "boolean", "required": False, "description": "Reuse existing stage CSVs in output_dir"},
             "discovery_sources": {"type": "string", "required": False, "description": "Comma-separated API providers"},
             "include_arxiv": {"type": "boolean", "required": False, "description": "Run arXiv discovery too"},
             "include_europe_pmc": {"type": "boolean", "required": False, "description": "Run Europe PMC discovery too"},
@@ -926,6 +1003,9 @@ TOOLS: dict[str, dict] = {
             "strict_discovery": {"type": "boolean", "required": False, "description": "Fail when provider errors prevent a reliable candidate set"},
             "parallel_providers": {"type": "boolean", "required": False, "description": "Run different providers for the same query concurrently"},
             "provider_workers": {"type": "integer", "required": False, "description": "Max provider worker threads"},
+            "provider_failure_threshold": {"type": "integer", "required": False, "description": "Skip remaining provider calls after this many failures"},
+            "crossref_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Crossref progress every N rows"},
+            "unpaywall_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Unpaywall progress every N rows"},
             "enrich_unpaywall": {"type": "boolean", "required": False, "description": "Annotate verified rows with Unpaywall OA links"},
             "skip_unpaywall": {"type": "boolean", "required": False, "description": "Disable Unpaywall annotation"},
             "unpaywall_email": {"type": "string", "required": False, "description": "Unpaywall email"},

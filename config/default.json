@@ -26,7 +26,10 @@
     "strict_discovery": false,
     "parallel_providers": false,
     "provider_workers": null,
-    "unpaywall_sleep": 0.1
+    "provider_failure_threshold": 2,
+    "unpaywall_sleep": 0.1,
+    "crossref_checkpoint_interval": 25,
+    "unpaywall_checkpoint_interval": 25
   },
   "outputs": {
     "default_output_dir": ".litminer/runs/litminer_run",

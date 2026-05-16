@@ -39,6 +39,17 @@ MAX_RETRIES = 3
 PER_PAGE = 200  # max allowed by OpenAlex
 USER_AGENT = "litminer/1.0"
 DEFAULT_MAILTO = os.environ.get("OPENALEX_MAILTO") or os.environ.get("LITMINER_CONTACT_EMAIL") or ""
+OPENALEX_SELECT_FIELDS = ",".join([
+    "id",
+    "doi",
+    "title",
+    "publication_year",
+    "primary_location",
+    "abstract_inverted_index",
+    "type",
+    "cited_by_count",
+    "authorships",
+])
 
 
 # Field mapping: OpenAlex JSON path to uniform CSV column
@@ -154,6 +165,7 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, page: int
         "search": query,
         "per-page": str(per_page),
         "page": str(page),
+        "select": OPENALEX_SELECT_FIELDS,
     }
     filters = []
     types = _normalize_work_types(work_types)
@@ -231,7 +243,7 @@ def search(query: str, year_from: int | None = None, year_to: int | None = None,
                 year_from,
                 year_to,
                 page,
-                PER_PAGE,
+                min(PER_PAGE, max_results - len(results)),
                 api_key=api_key,
                 mailto=mailto,
                 work_types=work_types,

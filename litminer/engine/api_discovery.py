@@ -218,6 +218,23 @@ def _run_provider_call(
     }
 
 
+def _skipped_provider_call(provider: str, provider_max: int, failure_count: int) -> dict[str, Any]:
+    now = utc_now()
+    return {
+        "provider": provider,
+        "provider_max": provider_max,
+        "rows": [],
+        "status": "skipped_circuit_breaker",
+        "error": f"Skipped after {failure_count} failed provider call(s) in this discovery run.",
+        "started_at": now,
+        "ended_at": now,
+    }
+
+
+def _is_provider_failure(status: str) -> bool:
+    return status not in {"ok", "empty_result", "skipped_circuit_breaker"}
+
+
 def discover_api(queries: list[str],
                  output_csv: Path,
                  sources: list[str] | None = None,
@@ -232,6 +249,7 @@ def discover_api(queries: list[str],
                   strict_discovery: bool = False,
                   parallel_providers: bool = False,
                   provider_workers: int | None = None,
+                  provider_failure_threshold: int | None = None,
                   trace_csv: Path | None = None,
                   report_md: Path | None = None,
                   run_id: str | None = None) -> dict[str, object]:
@@ -241,6 +259,7 @@ def discover_api(queries: list[str],
 
     candidates: list[dict[str, str]] = []
     traces: list[dict[str, str]] = []
+    provider_failures: dict[str, int] = {}
 
     for q_index, query in enumerate(queries, start=1):
         query_id = f"q{q_index:03d}"
@@ -256,8 +275,17 @@ def discover_api(queries: list[str],
             )
             plan.append((provider, provider_max))
 
-        if parallel_providers and len(plan) > 1:
-            workers = max(1, min(len(plan), provider_workers or len(plan)))
+        provider_results: list[dict[str, Any] | None] = [None] * len(plan)
+        runnable_plan: list[tuple[int, str, int]] = []
+        for idx, (provider, provider_max) in enumerate(plan):
+            failure_count = provider_failures.get(provider, 0)
+            if provider_failure_threshold is not None and failure_count >= provider_failure_threshold:
+                provider_results[idx] = _skipped_provider_call(provider, provider_max, failure_count)
+            else:
+                runnable_plan.append((idx, provider, provider_max))
+
+        if parallel_providers and len(runnable_plan) > 1:
+            workers = max(1, min(len(runnable_plan), provider_workers or len(runnable_plan)))
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [
                     executor.submit(
@@ -272,12 +300,13 @@ def discover_api(queries: list[str],
                         openalex_mailto,
                         openalex_work_types,
                     )
-                    for provider, provider_max in plan
+                    for _idx, provider, provider_max in runnable_plan
                 ]
-                provider_results = [future.result() for future in futures]
+                for (idx, _provider, _provider_max), future in zip(runnable_plan, futures):
+                    provider_results[idx] = future.result()
         else:
-            provider_results = [
-                _run_provider_call(
+            for idx, provider, provider_max in runnable_plan:
+                provider_results[idx] = _run_provider_call(
                     provider,
                     query_id,
                     query,
@@ -288,12 +317,14 @@ def discover_api(queries: list[str],
                     openalex_mailto,
                     openalex_work_types,
                 )
-                for provider, provider_max in plan
-            ]
 
         for provider_result in provider_results:
+            if provider_result is None:
+                continue
             provider = str(provider_result["provider"])
             rows = provider_result["rows"]
+            if _is_provider_failure(str(provider_result["status"])):
+                provider_failures[provider] = provider_failures.get(provider, 0) + 1
 
             for rank, row in enumerate(rows, start=1):
                 candidates.append(enrich_row(
@@ -347,6 +378,7 @@ def discover_api(queries: list[str],
         "query_count": len(queries),
         "providers": providers,
         "provider_statuses": status_counts,
+        "provider_failures": provider_failures,
         "output_csv": str(output_csv),
         "trace_csv": str(trace_csv) if trace_csv else "",
         "report_md": str(report_md) if report_md else "",
@@ -446,6 +478,8 @@ def main() -> None:
                         help="Run different providers for the same query concurrently")
     parser.add_argument("--provider-workers", type=int, default=None,
                         help="Max provider worker threads when --parallel-providers is set")
+    parser.add_argument("--provider-failure-threshold", type=int, default=None,
+                        help="Skip remaining calls for a provider after this many failed calls")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--report-output", type=Path, default=None)
@@ -470,6 +504,7 @@ def main() -> None:
         strict_discovery=args.strict_discovery,
         parallel_providers=args.parallel_providers,
         provider_workers=args.provider_workers,
+        provider_failure_threshold=args.provider_failure_threshold,
         trace_csv=args.trace_output,
         report_md=args.report_output,
     )

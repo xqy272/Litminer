@@ -9,6 +9,7 @@ Agent does not need to scan large CSVs mechanically.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -72,6 +73,51 @@ def metadata_health(rows: list[dict[str, str]]) -> dict[str, int]:
     }
 
 
+def read_manifest(output_dir: Path) -> dict:
+    path = output_dir / "run_manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def append_trust_summary(lines: list[str], rows: dict[str, list[dict[str, str]]]) -> None:
+    discovered = len(rows["deduped"] or rows["api"])
+    verified_rows = rows["verified"] or rows["oa"]
+    trusted_crossref = sum(
+        1
+        for row in verified_rows
+        if (row.get("crossref_status") or "").strip() in {"verified", "title_recovered"}
+    )
+    metric_pass = sum(
+        1
+        for row in rows["metrics"]
+        if (row.get("metric_filter_status") or "").strip() == "pass"
+    )
+    queued = len(rows["queue"])
+    probed = sum(1 for row in rows["probed"] if (row.get("publisher_probe_at") or "").strip())
+
+    lines.extend([
+        "## Trust Tiers",
+        "",
+        f"- discovered_or_deduped: {discovered}",
+        f"- crossref_trusted: {trusted_crossref}",
+        f"- metric_pass: {metric_pass}",
+        f"- publisher_queue: {queued}",
+        f"- publisher_probe_checked: {probed}",
+        "",
+        "Interpretation:",
+        "- Discovery rows are candidates, not verified article facts.",
+        "- Crossref trusted rows have bibliographic metadata support.",
+        "- Metric-pass rows only mean the local verified metric table matched the journal threshold.",
+        "- Publisher queue rows identify pages to inspect; they are not extracted full-text evidence.",
+        "",
+    ])
+
+
 def append_health(lines: list[str], label: str, rows: list[dict[str, str]]) -> None:
     health = metadata_health(rows)
     lines.extend([
@@ -101,8 +147,10 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "metrics": output_dir / "metrics_annotated_candidates.csv",
         "queue": output_dir / "publisher_queue.csv",
         "probed": output_dir / "publisher_queue_probed.csv",
+        "agent_summary": output_dir / "agent_summary.json",
     }
-    rows = {name: read_rows(path) for name, path in paths.items()}
+    rows = {name: read_rows(path) if path.suffix == ".csv" else [] for name, path in paths.items()}
+    manifest = read_manifest(output_dir)
 
     candidate_rows = (
         rows["oa"] or rows["verified"] or rows["selected"] or
@@ -117,12 +165,23 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "## Stage Counts",
         "",
     ]
-    for name in ["api", "api_trace", "deduped", "triaged", "selected", "verified", "oa", "metrics", "queue", "probed"]:
+    for name in [
+        "api", "api_trace", "deduped", "triaged", "selected", "verified",
+        "oa", "metrics", "queue", "probed", "agent_summary",
+    ]:
         path = paths[name]
         if path.exists():
-            lines.append(f"- {path.name}: {len(rows[name])}")
+            if path.suffix == ".csv":
+                lines.append(f"- {path.name}: {len(rows[name])}")
+            else:
+                lines.append(f"- {path.name}: present")
+    if manifest:
+        lines.append(f"- run_manifest.json: {len(manifest.get('stages', []))} stage records")
     if len(rows["api"]) and len(rows["deduped"]):
         lines.append(f"- duplicates_or_removed_before_dedupe: {max(0, len(rows['api']) - len(rows['deduped']))}")
+
+    lines.append("")
+    append_trust_summary(lines, rows)
 
     lines.extend(["", "## Source Distribution", ""])
     for field in ["discovery_provider", "discovery_source"]:

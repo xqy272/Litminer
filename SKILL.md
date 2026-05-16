@@ -10,6 +10,29 @@ description: >
 
 # Litminer
 
+## Skill Contract
+
+Litminer is a skill first, and a CLI/MCP package second. The Agent should use
+this skill to produce traceable local research artifacts, not to answer from
+memory or to generate a final review directly.
+
+Use this skill when the user asks for:
+
+- current or recent literature discovery
+- DOI/title/journal/year verification
+- OA/access-link annotation
+- candidate screening with explicit inclusion/exclusion concepts
+- journal-metric annotation from a verified local table
+- publisher-page evidence queues for later inspection
+- a reproducible trail of what sources were queried and what failed
+
+Do not use this skill as the sole answer when the user only needs a simple
+definition, wants manual prose editing, or asks for final scientific judgement
+without any retrieval step.
+
+The Agent owns the scientific intent. Litminer owns repeatable mechanics:
+retrieval, metadata normalization, status flags, reports, and queues.
+
 ## Core Boundary
 
 Use Litminer when an Agent needs a specialized research information acquisition
@@ -52,6 +75,50 @@ The processing layer is basic but essential. It may:
 It must not make final scientific inclusion decisions or invent unavailable
 facts.
 
+## Agent Decision Flow
+
+1. Decide whether the request needs structured literature retrieval. If yes,
+   use Litminer before giving final claims.
+2. Derive runtime semantics from the active user request: queries, year range,
+   required concepts, optional concepts, negative concepts, article types,
+   metric thresholds, and publisher-page fields.
+3. Check the environment if this is a new workspace, a new machine, or a prior
+   tool call failed. Prefer `doctor`, `offline_smoke`, or
+   `litminer_workspace_doctor`.
+4. Choose the lightest useful run:
+   - `fast`: first pass, query validation, environment validation, low latency.
+   - `balanced`: normal verified workflow with Crossref/Unpaywall.
+   - `expanded` / `full`: deeper semantic recall and provider concurrency when the user
+      accepts higher latency and rate-limit risk.
+5. If interrupted, resume before restarting. Use `--resume` with the same
+   output directory only when the user request has not changed; Litminer checks
+   `run_manifest.json` signatures before reusing old CSVs.
+6. Read `processing_report.md` and Trust Tiers before scanning large CSVs.
+7. Deliver results with counts, local artifact paths, uncertainty, missing
+   evidence, and next actions. Do not silently promote weak rows.
+
+## Skill Runtime Modes
+
+Recommended default sequence:
+
+```bash
+python -m litminer.engine.doctor
+python -m litminer.engine.offline_smoke
+python -m litminer.engine.run_lit_search --mode fast ...
+python -m litminer.engine.run_lit_search --mode balanced --resume ...
+```
+
+Use direct CLI when MCP is unavailable. Use MCP when the Agent has a configured
+stdio server and needs structured tool calls, workspace path enforcement, or
+compact CSV summaries.
+
+When MCP path access fails, do not retry blindly. Call
+`litminer_workspace_doctor` or run:
+
+```bash
+python -m litminer.engine.doctor --workspace WORKSPACE_ROOT --explain-path PATH
+```
+
 ## Runtime Configuration
 
 `config/default.json` is infrastructure configuration only. It can select
@@ -70,6 +137,8 @@ python -m litminer.engine.offline_smoke
 ```
 
 Use `doctor --config PATH` before trusting a user-provided runtime config.
+When workspace paths are confusing, run `doctor --workspace PATH --explain-path SOME_PATH`
+or call the MCP `litminer_workspace_doctor` tool before attempting a long run.
 
 Runtime file boundary:
 
@@ -121,6 +190,7 @@ These examples are not defaults.
 
 ```bash
 python -m litminer.engine.run_lit_search \
+  --mode fast \
   --query "USER_QUERY_HERE" \
   --year-from 2026 \
   --required-concept "main=term1|term2" \
@@ -128,6 +198,20 @@ python -m litminer.engine.run_lit_search \
   --config config/default.json \
   --output-dir .litminer/runs/litminer_run
 ```
+
+Use `--mode fast` for the first pass to validate Python, workspace, network,
+queries, and semantic concepts without slow enrichment. Use `--mode balanced`
+after the first pass for Crossref/Unpaywall verification, or `--mode expanded`
+(`--mode full` alias) only
+when semantic recall is worth the extra time and Semantic Scholar rate-limit
+risk. `full` does not automatically enable arXiv or Europe PMC; add those
+sources only when the user's domain warrants them.
+After a timeout or interrupted run, pass `--resume` with the same `--output-dir`
+to reuse existing stage CSVs. Litminer refuses automatic resume when the run
+signature does not match. Inspect `run_manifest.json` for completed, skipped,
+and reused stages. Batch Crossref and Unpaywall stages write periodic
+checkpoints, so resuming should reuse already annotated rows instead of starting
+from the first DOI again.
 
 Use multiple `--query` values when recall matters. Add
 `--include-semantic-scholar` or set it in config when semantic recall or
@@ -147,7 +231,8 @@ python -m litminer.engine.api_discovery \
 ```
 
 Prefer this over raw provider wrappers because it records provider, query ID,
-rank, source trace, and per-source status.
+rank, source trace, and per-source status. Use `--provider-failure-threshold`
+when a rate-limited provider should be skipped after repeated failures.
 
 ### 4. Triage Without Deleting
 
@@ -250,7 +335,38 @@ Preferred tools:
 - `litminer_probe_publishers`
 - `litminer_import_websearch`
 - `litminer_processing_report`
+- `litminer_agent_summary`
+- `litminer_read_csv_summary`
+- `litminer_workspace_doctor`
 - `litminer_run_lit_search`
+
+MCP call preference:
+
+1. `litminer_workspace_doctor` when paths, workspaces, or file visibility are
+   uncertain.
+2. `litminer_run_lit_search` for end-to-end work.
+3. `litminer_agent_summary` when the Agent needs machine-readable run state.
+4. `litminer_read_csv_summary` for large CSV review instead of loading whole
+   files into context.
+5. Single-purpose tools only when continuing from an intermediate artifact or
+   debugging one stage.
+
+## Artifact Contract
+
+The Agent should treat these files as the skill's main outputs:
+
+- `processing_report.md`: first reading surface; includes stage counts, provider
+  health, Trust Tiers, metadata health, and queue summaries.
+- `agent_summary.json`: first machine-readable status surface; includes trust
+  tiers, provider health, artifact paths, warnings, and recommended next actions.
+- `feasibility_report.md`: explains whether user constraints are currently
+  feasible and why counts may be too low.
+- `run_manifest.json`: machine-readable stage status, run signature, resume
+  information, row counts, file fingerprints, and reused/skipped stages.
+- `triaged_candidates.csv`: semantic review surface, not final inclusion.
+- `publisher_queue.csv`: page-inspection queue, not extracted article facts.
+- `api_discovery_trace.csv`: provider/query/status trail for debugging source
+  failures.
 
 ## Delivery Rules
 
@@ -262,5 +378,11 @@ Preferred tools:
   publisher-page access.
 - Use `processing_report.md` to reduce mechanical CSV scanning before deep
   reading or final judgement.
+- Use Trust Tiers in `processing_report.md` to distinguish discovered
+  candidates, Crossref-trusted rows, metric-pass rows, and publisher queues.
+- Use `run_manifest.json` when deciding whether a run can be resumed rather
+  than restarted.
 - Treat WebSearch-only rows as leads until verified through Crossref and
   publisher pages.
+- In the final user response, report what was actually verified, what remains
+  unknown, which constraints limited counts, and where the local artifacts are.

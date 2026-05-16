@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from litminer.engine import api_discovery
+from litminer.engine import agent_summary
 from litminer.engine import build_publisher_queue
 from litminer.engine import common
 from litminer.engine import dedupe_papers
@@ -132,6 +133,30 @@ class LitminerCoreTests(unittest.TestCase):
             with trace.open(encoding="utf-8", newline="") as handle:
                 trace_rows = list(csv.DictReader(handle))
             self.assertEqual([row["provider"] for row in trace_rows], ["openalex", "arxiv"])
+
+    def test_api_discovery_circuit_breaker_skips_failed_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=RuntimeError("boom")) as run_provider:
+                result = api_discovery.discover_api(
+                    ["query one", "query two", "query three"],
+                    output,
+                    sources=["openalex"],
+                    provider_failure_threshold=1,
+                    trace_csv=trace,
+                )
+
+            self.assertEqual(run_provider.call_count, 1)
+            self.assertEqual(result["provider_statuses"]["skipped_circuit_breaker"], 2)
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [row["status"] for row in trace_rows],
+                ["error", "skipped_circuit_breaker", "skipped_circuit_breaker"],
+            )
 
     def test_openalex_work_type_filter_is_configurable(self) -> None:
         article_url = api_discovery.openalex_search._build_url(
@@ -507,6 +532,24 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["doi"], "10.1234/ready")
         self.assertEqual(rows[0]["fields_needed"], "claim; dataset")
 
+    def test_build_publisher_queue_rejects_priority_filter_without_triage_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "raw.csv"
+            output_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,publication_year\n"
+                "Raw,10.1234/raw,2026\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit):
+                build_publisher_queue.build_queue(
+                    input_csv,
+                    output_csv,
+                    priorities={"high"},
+                )
+
     def test_websearch_import_extracts_doi_from_url_and_marks_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -631,6 +674,83 @@ class LitminerCoreTests(unittest.TestCase):
 
             self.assertEqual(Path(result["output_dir"]), configured_run)
             self.assertTrue((configured_run / "processing_report.md").exists())
+            self.assertTrue((configured_run / "run_manifest.json").exists())
+
+    def test_run_resume_reuses_existing_stage_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal,abstract\n"
+                "Paper,10.1234/example,2026,Journal A,Reports external validation.\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+
+            def make_args(resume: bool) -> argparse.Namespace:
+                return argparse.Namespace(
+                    input_csv=input_csv,
+                    query=None,
+                    query_file=None,
+                    year_from=2026,
+                    year_to=None,
+                    output_dir=out_dir,
+                    config=None,
+                    mode="fast",
+                    resume=resume,
+                    triage_profile=None,
+                    required_concept=["validation=external validation"],
+                    optional_concept=[],
+                    negative_concept=[],
+                    exclude_article_type=[],
+                    queue_priorities="high,medium,needs_review",
+                    include_metadata_blocked=False,
+                    fields_needed=None,
+                    page_required_field=None,
+                    openalex_api_key=None,
+                    discovery_sources="openalex",
+                    max_results_per_query=30,
+                    skip_openalex=False,
+                    include_semantic_scholar=False,
+                    semantic_query_limit=3,
+                    semantic_max_results=50,
+                    skip_crossref=True,
+                    strict_discovery=False,
+                    parallel_providers=False,
+                    provider_workers=None,
+                    provider_failure_threshold=1,
+                    enrich_unpaywall=False,
+                    skip_unpaywall=True,
+                    unpaywall_email=None,
+                    unpaywall_sleep=0,
+                    metrics=None,
+                    min_if=None,
+                    target_count=None,
+                    queue_strict_only=False,
+                    allow_missing_doi=False,
+                    screenshot_root=tmp_path / "screens",
+                    probe_publishers=False,
+                    probe_limit=None,
+                    probe_sleep=0,
+                )
+
+            run_lit_search.run(make_args(resume=False))
+            summary = json.loads((out_dir / "agent_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["trust_tiers"]["crossref_trusted"], 0)
+            self.assertEqual(agent_summary.build_summary(out_dir)["trust_tiers"]["crossref_trusted"], 0)
+            self.assertTrue((out_dir / "processing_report.md").exists())
+
+            with patch("litminer.engine.semantic_triage.triage_csv", side_effect=AssertionError("should resume")):
+                run_lit_search.run(make_args(resume=True))
+
+            manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            statuses = [stage["status"] for stage in manifest["stages"]]
+            self.assertIn("skipped_existing", statuses)
+
+            changed_args = make_args(resume=True)
+            changed_args.required_concept = ["different=not present"]
+            with self.assertRaises(SystemExit):
+                run_lit_search.run(changed_args)
 
     def test_runtime_defaults_use_dot_litminer_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -654,6 +774,28 @@ class LitminerCoreTests(unittest.TestCase):
                 os.chdir(original_cwd)
 
             self.assertEqual(resolved, Path(tmp).resolve() / ".litminer" / "runs" / "litminer_run")
+
+    def test_fast_mode_supplies_first_pass_defaults(self) -> None:
+        args = argparse.Namespace(config=None, mode="fast")
+
+        normalized = run_lit_search.normalize_args(args)
+
+        self.assertEqual(normalized.discovery_sources, "openalex")
+        self.assertFalse(normalized.include_semantic_scholar)
+        self.assertTrue(normalized.skip_crossref)
+        self.assertFalse(normalized.enrich_unpaywall)
+        self.assertFalse(normalized.probe_publishers)
+        self.assertEqual(normalized.max_results_per_query, 30)
+
+    def test_full_mode_keeps_domain_specific_sources_opt_in(self) -> None:
+        args = argparse.Namespace(config=None, mode="full")
+
+        normalized = run_lit_search.normalize_args(args)
+
+        self.assertTrue(normalized.include_semantic_scholar)
+        self.assertFalse(normalized.include_arxiv)
+        self.assertFalse(normalized.include_europe_pmc)
+        self.assertTrue(normalized.parallel_providers)
 
     def test_explicit_discovery_sources_override_config_channels(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -821,6 +963,8 @@ class LitminerCoreTests(unittest.TestCase):
 
         self.assertIn("error", response)
         self.assertIn("escapes Litminer workspace", response["error"]["message"])
+        self.assertIn("workspace_root=", response["error"]["message"])
+        self.assertIn("resolved_path=", response["error"]["message"])
         self.assertNotIn("data", response["error"])
 
     def test_mcp_rejects_unsupported_protocol_version(self) -> None:
@@ -871,7 +1015,38 @@ class LitminerCoreTests(unittest.TestCase):
 
         names = {tool["name"] for tool in response["result"]["tools"]}
         self.assertIn("litminer_batch_verify_crossref", names)
+        self.assertIn("litminer_agent_summary", names)
         self.assertIn("litminer_read_csv_summary", names)
+        self.assertIn("litminer_workspace_doctor", names)
+
+    def test_doctor_workspace_report_explains_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inside = root / "inside.csv"
+            inside.write_text("title\n", encoding="utf-8")
+            outside = root.parent / "outside.csv"
+
+            report = doctor.workspace_report(
+                workspace=root,
+                explain_paths=["inside.csv", outside],
+            )
+
+        self.assertTrue(report["workspace_exists"])
+        self.assertTrue(report["workspace_writable"])
+        self.assertTrue(report["path_checks"][0]["inside_workspace"])
+        self.assertFalse(report["path_checks"][1]["inside_workspace"])
+
+    def test_mcp_workspace_doctor_reports_current_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "input.csv").write_text("title\n", encoding="utf-8")
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(root)}):
+                result = mcp_server.tool_workspace_doctor({"paths": ["input.csv", "../outside.csv"]})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(Path(result["workspace_root"]), root.resolve())
+        self.assertTrue(result["path_checks"][0]["inside_workspace"])
+        self.assertFalse(result["path_checks"][1]["inside_workspace"])
 
     def test_mcp_batch_verify_crossref(self) -> None:
         with patch("litminer.sources.api.crossref_verify.verify_doi", return_value={"crossref_doi": "10.1234/a"}):
