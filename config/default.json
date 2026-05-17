@@ -40,6 +40,12 @@
     "default_output_dir": ".litminer/runs/litminer_run",
     "screenshot_root": ".litminer/screenshots"
   },
+  "cache": {
+    "enabled": true,
+    "cache_dir": ".litminer/cache",
+    "ttl_days": 30.0,
+    "provider_failure_ttl_seconds": 300.0
+  },
   "evidence": {
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",

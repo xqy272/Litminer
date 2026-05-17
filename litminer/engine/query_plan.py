@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from litminer.engine.common import write_text_atomic
+from litminer.engine import source_strategy
 
 
 PLAN_NAME = "query_plan.json"
@@ -51,6 +52,7 @@ def build_plan(
     controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sources = _as_list(discovery_sources)
+    controls = controls or {}
     return {
         "schema_version": 1,
         "mode": mode,
@@ -67,7 +69,17 @@ def build_plan(
         },
         "discovery_sources": sources,
         "source_rationale": _source_rationale(sources),
-        "run_controls": controls or {},
+        "source_strategy": source_strategy.build_strategy(
+            queries=_as_list(queries),
+            selected_sources=sources,
+            required_concepts=_as_list(required_concepts),
+            optional_concepts=_as_list(optional_concepts),
+            negative_concepts=_as_list(negative_concepts),
+            year_from=year_from,
+            mode=mode,
+            controls=controls,
+        ),
+        "run_controls": controls,
         "agent_notes": [
             "Queries and concepts are runtime intent derived by the Agent, not global Litminer defaults.",
             "Required concepts are triage signals; Litminer tags and ranks but does not make final scientific judgement.",

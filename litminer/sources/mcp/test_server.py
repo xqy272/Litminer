@@ -8,6 +8,7 @@ Usage:
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,7 @@ def main():
         stderr=subprocess.PIPE,
         text=True,
         cwd=str(PROJECT_ROOT),
+        env={**os.environ, "LITMINER_MCP_TOOL_PROFILE": "workflow"},
     )
 
     try:
@@ -60,39 +62,24 @@ def main():
         tools = resp.get("result", {}).get("tools", [])
         tool_names = [t["name"] for t in tools]
         expected = [
-            "litminer_search_openalex",
-            "litminer_search_semantic_scholar",
-            "litminer_search_arxiv",
-            "litminer_search_europe_pmc",
-            "litminer_verify_crossref",
-            "litminer_batch_verify_crossref",
-            "litminer_search_crossref_title",
-            "litminer_batch_crossref_title_search",
-            "litminer_dedupe",
-            "litminer_lookup_unpaywall",
-            "litminer_discover_api",
-            "litminer_semantic_triage",
-            "litminer_filter_journal_metrics",
-            "litminer_validate_journal_metrics",
-            "litminer_build_publisher_queue",
-            "litminer_probe_publishers",
-            "litminer_import_websearch",
-            "litminer_processing_report",
-            "litminer_agent_summary",
-            "litminer_read_csv_summary",
             "litminer_workspace_doctor",
             "litminer_bootstrap",
+            "litminer_run_lit_search",
             "litminer_start_run",
             "litminer_run_status",
             "litminer_resume_run",
             "litminer_cancel_run",
-            "litminer_field_provenance",
-            "litminer_publisher_adapters",
-            "litminer_run_lit_search",
+            "litminer_discover_api",
+            "litminer_semantic_triage",
+            "litminer_build_publisher_queue",
+            "litminer_processing_report",
+            "litminer_agent_summary",
+            "litminer_read_csv_summary",
         ]
         for name in expected:
             assert name in tool_names, f"Missing tool: {name}"
-        print(f"  PASS: All {len(tool_names)} tools registered")
+        assert "litminer_search_openalex" not in tool_names
+        print(f"  PASS: Default workflow profile lists {len(tool_names)} tools")
 
         # Test 3: Call a tool that doesn't need network (dedupe)
         print("[3/4] Testing tool call (dedupe with non-existent file)...")

@@ -96,6 +96,21 @@ def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
     return min(wait, RATE_LIMIT_MAX_WAIT_SECONDS)
 
 
+def _status_for_fetch_exception(exc: Exception | None) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in {401, 403}:
+            return "auth_error"
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError) or any(
+        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
+    ):
+        return "network_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "response_parse_error"
+    return "error"
+
+
 def _fetch_json(url: str) -> dict:
     last_error: Exception | None = None
     max_attempts = max(MAX_RETRIES, RATE_LIMIT_RETRIES)
@@ -136,7 +151,13 @@ def _fetch_json(url: str) -> dict:
                 time.sleep(wait)
                 continue
             break
-    raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
+    status = _status_for_fetch_exception(last_error)
+    raise ProviderSearchError(
+        f"Semantic Scholar request failed after {MAX_RETRIES} attempts: {last_error}",
+        status=status,
+        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
+        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
+    ) from last_error
 
 
 # Field mapping
@@ -249,10 +270,23 @@ def search(
             if len(papers) < RESULTS_PER_QUERY:
                 break
     except Exception as e:
-        if isinstance(e, RateLimitError):
+        if isinstance(e, ProviderSearchError):
+            status = e.status
+            if results and not str(status).startswith("partial"):
+                status = f"partial_{status}"
+            retry_after = e.retry_after_seconds
+            http_status = e.http_status
+            transient = e.transient
+        elif isinstance(e, RateLimitError):
             status = "partial_rate_limited" if results else "rate_limited"
+            retry_after = e.retry_after_seconds
+            http_status = 429
+            transient = True
         else:
             status = "partial_error" if results else "error"
+            retry_after = getattr(e, "retry_after_seconds", None)
+            http_status = None
+            transient = None
         message = f"Semantic Scholar search failed at offset {offset}: {e}"
         print(
             f"  ERROR: {message}. Partial rows={len(results)}.",
@@ -262,9 +296,9 @@ def search(
             message,
             partial_results=results,
             status=status,
-            retry_after_seconds=getattr(e, "retry_after_seconds", None),
-            http_status=429 if isinstance(e, RateLimitError) else None,
-            transient=True if isinstance(e, RateLimitError) else None,
+            retry_after_seconds=retry_after,
+            http_status=http_status,
+            transient=transient,
         ) from e
 
     print(f"  Collected: {len(results)} candidates.", file=sys.stderr)

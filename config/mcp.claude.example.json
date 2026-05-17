@@ -7,6 +7,7 @@
   "cwd": "D:/path/to/your/project",
   "env": {
     "LITMINER_WORKSPACE_ROOT": "D:/path/to/your/project",
+    "LITMINER_MCP_TOOL_PROFILE": "workflow",
     "LITMINER_CONTACT_EMAIL": "you@example.org"
   }
 }

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from litminer.engine import cache as cache_helpers
 from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 
@@ -28,6 +29,8 @@ MAX_RETRIES = 3
 USER_AGENT = "litminer/1.0"
 
 OUTPUT_COLUMNS = [
+    "unpaywall_cache_status",
+    "unpaywall_cache_key",
     "unpaywall_status",
     "unpaywall_error",
     "unpaywall_retry_after_seconds",
@@ -45,6 +48,8 @@ OUTPUT_COLUMNS = [
     "best_oa_repository_institution",
     "unpaywall_doi_url",
 ]
+
+CACHEABLE_STATUSES = {"ok"}
 
 
 def utc_now() -> str:
@@ -65,6 +70,12 @@ class UnpaywallRateLimitError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class UnpaywallRequestError(RuntimeError):
+    def __init__(self, message: str, status: str = "error") -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
     retry_after = exc.headers.get("Retry-After") if exc.headers else None
     if retry_after:
@@ -73,6 +84,19 @@ def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
         except ValueError:
             pass
     return float(2 ** attempt)
+
+
+def _status_for_request_exception(exc: Exception | None) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError) or any(
+        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
+    ):
+        return "network_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "response_parse_error"
+    return "error"
 
 
 def _request_json(url: str) -> dict[str, Any]:
@@ -112,7 +136,10 @@ def _request_json(url: str) -> dict[str, Any]:
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
                 time.sleep(wait)
                 continue
-    raise RuntimeError(f"Unpaywall request failed after {MAX_RETRIES} attempts: {last_error}")
+    raise UnpaywallRequestError(
+        f"Unpaywall request failed after {MAX_RETRIES} attempts: {last_error}",
+        status=_status_for_request_exception(last_error),
+    ) from last_error
 
 
 def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:
@@ -141,6 +168,8 @@ def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:
             "retry_after_seconds": exc.retry_after_seconds,
             "data": None,
         }
+    except UnpaywallRequestError as exc:
+        return {"status": exc.status, "error": str(exc), "data": None}
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return {"status": "not_found", "error": "DOI not found in Unpaywall", "data": None}
@@ -192,6 +221,36 @@ def annotate_row(row: dict[str, str], email: str | None = None,
     return out
 
 
+def _cache_identity(doi: str) -> str:
+    return f"doi:{cache_helpers.cache_key(normalize_doi(doi))}"
+
+
+def _cache_lookup(cache_obj: cache_helpers.JsonCache | None, key: str) -> dict[str, str] | None:
+    if cache_obj is None:
+        return None
+    hit = cache_obj.get(key)
+    if hit is None or not isinstance(hit.value, dict):
+        return None
+    cached = {str(k): str(v) for k, v in hit.value.items()}
+    if cached.get("unpaywall_status") != "ok":
+        return None
+    return cached
+
+
+def _cache_store(
+    cache_obj: cache_helpers.JsonCache | None,
+    key: str,
+    flattened: dict[str, str],
+) -> bool:
+    if cache_obj is None:
+        return False
+    status = (flattened.get("unpaywall_status") or "").strip()
+    if status not in CACHEABLE_STATUSES:
+        return False
+    cache_obj.set(key, flattened, status=status)
+    return True
+
+
 def _row_identity(row: dict[str, str]) -> str:
     doi = normalize_doi(row.get("crossref_doi") or row.get("doi") or "")
     if doi:
@@ -211,7 +270,7 @@ def _existing_annotated_rows(output_path: Path) -> dict[str, dict[str, str]]:
     existing = {}
     for row in rows:
         status = (row.get("unpaywall_status") or "").strip()
-        if status in {"ok", "not_found", "skipped_missing_email", "missing_doi"}:
+        if status in {"ok", "not_found", "missing_doi"}:
             existing[_row_identity(row)] = row
     return existing
 
@@ -220,7 +279,10 @@ def annotate_csv(input_path: Path, output_path: Path,
                  email: str | None = None,
                  sleep_s: float = 0.1,
                  checkpoint_interval: int = 25,
-                 max_rows: int | None = None) -> dict[str, int]:
+                 max_rows: int | None = None,
+                 cache_dir: Path | None = None,
+                 cache_ttl_days: float | None = None,
+                 cache_enabled: bool = True) -> dict[str, int]:
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
         raise SystemExit("Input CSV has no header")
@@ -233,6 +295,16 @@ def annotate_csv(input_path: Path, output_path: Path,
     checked_at = utc_now()
     output_rows: list[dict[str, str]] = []
     existing_rows = _existing_annotated_rows(output_path)
+    cache_obj = (
+        cache_helpers.JsonCache(
+            cache_dir,
+            "unpaywall",
+            enabled=cache_enabled,
+            ttl_seconds=cache_helpers.ttl_days_to_seconds(cache_ttl_days),
+        )
+        if cache_dir
+        else None
+    )
 
     def checkpoint(index: int) -> None:
         if checkpoint_interval and checkpoint_interval > 0 and (index + 1) % checkpoint_interval == 0:
@@ -258,12 +330,32 @@ def annotate_csv(input_path: Path, output_path: Path,
             annotated["unpaywall_status"] = "skipped_budget"
             annotated["unpaywall_checked_at"] = checked_at
         else:
-            annotated = annotate_row(row, email=email, checked_at=checked_at)
+            annotated = dict(row)
+            doi = normalize_doi(row.get("crossref_doi") or row.get("doi") or "")
+            cache_key = _cache_identity(doi) if doi else ""
+            cached = _cache_lookup(cache_obj, cache_key) if cache_key else None
+            if cached is not None:
+                counts["cache_hit"] = counts.get("cache_hit", 0) + 1
+                for col in OUTPUT_COLUMNS:
+                    annotated[col] = cached.get(col, "")
+                annotated["unpaywall_cache_status"] = "hit"
+                annotated["unpaywall_cache_key"] = cache_key
+                annotated["unpaywall_checked_at"] = checked_at
+            else:
+                if cache_obj is not None and cache_key:
+                    counts["cache_miss"] = counts.get("cache_miss", 0) + 1
+                annotated = annotate_row(row, email=email, checked_at=checked_at)
+                annotated["unpaywall_cache_status"] = "miss" if cache_obj is not None and cache_key else "disabled"
+                annotated["unpaywall_cache_key"] = cache_key if cache_obj is not None else ""
+                cache_value = {col: annotated.get(col, "") for col in OUTPUT_COLUMNS}
+                if cache_key and _cache_store(cache_obj, cache_key, cache_value):
+                    counts["cache_store"] = counts.get("cache_store", 0) + 1
+                    annotated["unpaywall_cache_status"] = "store"
         status = annotated.get("unpaywall_status", "unknown")
         counts[status] = counts.get(status, 0) + 1
         output_rows.append(annotated)
         checkpoint(index)
-        if sleep_s and status != "skipped_budget":
+        if sleep_s and status != "skipped_budget" and annotated.get("unpaywall_cache_status") != "hit":
             time.sleep(sleep_s)
 
     write_csv_atomic(output_rows, output_path, fieldnames=fieldnames)
@@ -285,6 +377,12 @@ def main() -> None:
                         help="Write batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="Only annotate the first N CSV rows; remaining rows are marked skipped_budget")
+    parser.add_argument("--cache-dir", type=Path, default=None,
+                        help="Optional JSON cache directory for Unpaywall DOI metadata")
+    parser.add_argument("--cache-ttl-days", type=float, default=None,
+                        help="Cache TTL in days; omitted means no TTL for this cache invocation")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Disable Unpaywall cache even when --cache-dir is set")
     args = parser.parse_args()
 
     if args.doi:
@@ -299,6 +397,9 @@ def main() -> None:
         sleep_s=args.sleep,
         checkpoint_interval=args.checkpoint_interval,
         max_rows=args.max_rows,
+        cache_dir=args.cache_dir,
+        cache_ttl_days=args.cache_ttl_days,
+        cache_enabled=not args.no_cache,
     )
 
 

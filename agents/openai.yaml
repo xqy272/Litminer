@@ -1,4 +1,4 @@
 interface:
   display_name: "Litminer"
-  short_description: "Agent-facing literature discovery, verification, provenance, and evidence queueing"
-  default_prompt: "Use $litminer to plan literature queries, discover papers through APIs, verify metadata, triage candidates, track provenance, and build publisher-page evidence queues."
+  short_description: "Agent-facing literature discovery, verification, resumable recovery, provenance, and evidence queueing"
+  default_prompt: "Use $litminer to plan literature queries, choose source strategy, discover papers through APIs, recover from provider failures, verify metadata, triage candidates, track artifacts/provenance, and build publisher-page evidence queues."

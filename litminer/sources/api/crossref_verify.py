@@ -34,6 +34,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from litminer.engine import cache as cache_helpers
 from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 
 # Configuration
@@ -47,6 +48,18 @@ USER_AGENT = "litminer/1.0"
 class CrossrefRateLimitError(RuntimeError):
     def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
         super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class CrossrefRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        status: str = "provider_error",
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
         self.retry_after_seconds = retry_after_seconds
 
 
@@ -67,6 +80,21 @@ def _retry_wait_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
         except ValueError:
             pass
     return float(2 ** attempt)
+
+
+def _status_for_request_exception(exc: Exception | None) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in {401, 403}:
+            return "auth_error"
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError) or any(
+        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
+    ):
+        return "network_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "response_parse_error"
+    return "provider_error"
 
 
 def _fetch_json(url: str) -> dict:
@@ -96,7 +124,15 @@ def _fetch_json(url: str) -> dict:
             f"Crossref rate limit persisted after {MAX_RETRIES} attempts",
             retry_after_seconds=_retry_wait_seconds(last_error, MAX_RETRIES - 1),
         ) from last_error
-    raise RuntimeError(f"Crossref request failed: {last_error}")
+    raise CrossrefRequestError(
+        f"Crossref request failed after {MAX_RETRIES} attempts: {last_error}",
+        status=_status_for_request_exception(last_error),
+        retry_after_seconds=(
+            _retry_wait_seconds(last_error, MAX_RETRIES - 1)
+            if isinstance(last_error, urllib.error.HTTPError) and 500 <= last_error.code < 600
+            else None
+        ),
+    ) from last_error
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -195,6 +231,11 @@ def verify_doi(doi: str, *, raise_transient: bool = False) -> dict[str, str] | N
             raise
         print(f"  Crossref lookup rate limited for {doi_clean}", file=sys.stderr)
         return None
+    except CrossrefRequestError as e:
+        if raise_transient:
+            raise
+        print(f"  Crossref lookup failed for {doi_clean}: {e}", file=sys.stderr)
+        return None
     except RuntimeError as e:
         print(f"  Crossref lookup failed for {doi_clean}: {e}", file=sys.stderr)
         return None
@@ -224,6 +265,11 @@ def search_by_title(title: str, max_results: int = 5, *, raise_transient: bool =
             raise
         print("  Crossref title search rate limited", file=sys.stderr)
         return []
+    except CrossrefRequestError as e:
+        if raise_transient:
+            raise
+        print(f"  Crossref title search failed: {e}", file=sys.stderr)
+        return []
     except RuntimeError as e:
         print(f"  Crossref title search failed: {e}", file=sys.stderr)
         return []
@@ -244,6 +290,32 @@ def _row_title_identity(row: dict[str, str]) -> str:
     year = (row.get("crossref_year") or row.get("publication_year") or row.get("year") or "").strip()
     journal = re.sub(r"\s+", " ", (row.get("crossref_container") or row.get("journal") or "").strip().lower())
     return f"title:{title}|year:{year}|journal:{journal}"
+
+
+def _cache_identity(prefix: str, *parts: object) -> str:
+    return f"{prefix}:{cache_helpers.cache_key(*parts)}"
+
+
+def _cache_lookup(cache_obj: cache_helpers.JsonCache | None, key: str) -> dict | None:
+    if cache_obj is None:
+        return None
+    hit = cache_obj.get(key)
+    if hit is None or not isinstance(hit.value, dict):
+        return None
+    if hit.value.get("found") is not True:
+        return None
+    return hit.value
+
+
+def _cache_store(
+    cache_obj: cache_helpers.JsonCache | None,
+    key: str,
+    value: dict,
+    *,
+    status: str,
+) -> None:
+    if cache_obj is not None:
+        cache_obj.set(key, value, status=status)
 
 
 def _existing_verified_rows(output_path: Path) -> dict[str, dict[str, str]]:
@@ -337,7 +409,10 @@ def _best_title_match(title: str, input_row: dict[str, str] | None = None,
 def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                title_lookup: bool = False,
                checkpoint_interval: int = 25,
-               max_rows: int | None = None) -> dict[str, int]:
+               max_rows: int | None = None,
+               cache_dir: Path | None = None,
+               cache_ttl_days: float | None = None,
+               cache_enabled: bool = True) -> dict[str, int]:
     """Verify all DOIs in a CSV file and write augmented output."""
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
@@ -358,6 +433,9 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
     for col in xref_cols:
         if col not in fieldnames:
             fieldnames.append(col)
+    for col in ["crossref_cache_status", "crossref_cache_key"]:
+        if col not in fieldnames:
+            fieldnames.append(col)
 
     counts = {
         "rows": len(rows),
@@ -368,11 +446,28 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "missing_doi": 0,
         "title_lookup_failed": 0,
         "rate_limited": 0,
+        "network_error": 0,
+        "auth_error": 0,
+        "response_parse_error": 0,
+        "provider_error": 0,
+        "cache_hit": 0,
+        "cache_miss": 0,
+        "cache_store": 0,
         "reused": 0,
         "skipped_budget": 0,
     }
     request_count = 0
     existing_rows = _existing_verified_rows(output_path)
+    cache_obj = (
+        cache_helpers.JsonCache(
+            cache_dir,
+            "crossref",
+            enabled=cache_enabled,
+            ttl_seconds=cache_helpers.ttl_days_to_seconds(cache_ttl_days),
+        )
+        if cache_dir
+        else None
+    )
 
     def polite_pause() -> None:
         nonlocal request_count
@@ -393,8 +488,9 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
 
     for i, row in enumerate(rows):
         existing = existing_rows.get(_row_identity(row))
-        if existing is not None:
-            for col in ["doi", *xref_cols]:
+        existing_status = (existing.get("crossref_status") or "").strip() if existing is not None else ""
+        if existing is not None and not (title_lookup and existing_status == "missing_doi"):
+            for col in ["doi", *xref_cols, "crossref_cache_status", "crossref_cache_key"]:
                 if existing.get(col):
                     row[col] = existing[col]
             counts["reused"] += 1
@@ -414,20 +510,57 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         if not doi:
             if title_lookup:
                 title = row.get("title", "").strip()
-                try:
-                    meta = _best_title_match(title, input_row=row, raise_transient=True)
-                except CrossrefRateLimitError as exc:
+                title_key = _cache_identity(
+                    "title",
+                    title,
+                    row.get("publication_year") or row.get("year") or "",
+                    row.get("journal") or row.get("container") or "",
+                )
+                cached_title = _cache_lookup(cache_obj, title_key)
+                if cached_title is not None:
+                    counts["cache_hit"] += 1
+                    row["crossref_cache_status"] = "hit"
+                    row["crossref_cache_key"] = title_key
+                    meta = cached_title.get("metadata") if cached_title.get("found") else None
+                else:
+                    if cache_obj is not None:
+                        counts["cache_miss"] += 1
+                    row["crossref_cache_status"] = "miss" if cache_obj is not None else "disabled"
+                    row["crossref_cache_key"] = title_key if cache_obj is not None else ""
+                    try:
+                        meta = _best_title_match(title, input_row=row, raise_transient=True)
+                    except CrossrefRateLimitError as exc:
+                        polite_pause()
+                        row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+                        row["crossref_status"] = "rate_limited"
+                        row["crossref_verified"] = "false"
+                        row["crossref_retry_after_seconds"] = (
+                            "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+                        )
+                        counts["rate_limited"] += 1
+                        checkpoint(i)
+                        continue
+                    except CrossrefRequestError as exc:
+                        polite_pause()
+                        row["crossref_mismatches"] = f"CROSSREF_{exc.status.upper()}"
+                        row["crossref_status"] = exc.status
+                        row["crossref_verified"] = "false"
+                        row["crossref_retry_after_seconds"] = (
+                            "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+                        )
+                        counts[exc.status] = counts.get(exc.status, 0) + 1
+                        checkpoint(i)
+                        continue
                     polite_pause()
-                    row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
-                    row["crossref_status"] = "rate_limited"
-                    row["crossref_verified"] = "false"
-                    row["crossref_retry_after_seconds"] = (
-                        "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
-                    )
-                    counts["rate_limited"] += 1
-                    checkpoint(i)
-                    continue
-                polite_pause()
+                    if meta is not None and cache_obj is not None:
+                        _cache_store(
+                            cache_obj,
+                            title_key,
+                            {"found": True, "metadata": meta},
+                            status="title_recovered",
+                        )
+                        counts["cache_store"] += 1
+                        row["crossref_cache_status"] = "store"
                 if meta is None:
                     row["crossref_mismatches"] = "NO_DOI_TITLE_LOOKUP_FAILED"
                     row["crossref_status"] = "title_lookup_failed"
@@ -452,20 +585,52 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             checkpoint(i)
             continue
 
-        try:
-            meta = verify_doi(doi, raise_transient=True)
-        except CrossrefRateLimitError as exc:
+        doi_key = _cache_identity("doi", normalize_doi(doi))
+        cached_doi = _cache_lookup(cache_obj, doi_key)
+        if cached_doi is not None:
+            counts["cache_hit"] += 1
+            row["crossref_cache_status"] = "hit"
+            row["crossref_cache_key"] = doi_key
+            meta = cached_doi.get("metadata") if cached_doi.get("found") else None
+        else:
+            if cache_obj is not None:
+                counts["cache_miss"] += 1
+            row["crossref_cache_status"] = "miss" if cache_obj is not None else "disabled"
+            row["crossref_cache_key"] = doi_key if cache_obj is not None else ""
+            try:
+                meta = verify_doi(doi, raise_transient=True)
+            except CrossrefRateLimitError as exc:
+                polite_pause()
+                row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+                row["crossref_status"] = "rate_limited"
+                row["crossref_verified"] = "false"
+                row["crossref_retry_after_seconds"] = (
+                    "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+                )
+                counts["rate_limited"] += 1
+                checkpoint(i)
+                continue
+            except CrossrefRequestError as exc:
+                polite_pause()
+                row["crossref_mismatches"] = f"CROSSREF_{exc.status.upper()}"
+                row["crossref_status"] = exc.status
+                row["crossref_verified"] = "false"
+                row["crossref_retry_after_seconds"] = (
+                    "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
+                )
+                counts[exc.status] = counts.get(exc.status, 0) + 1
+                checkpoint(i)
+                continue
             polite_pause()
-            row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
-            row["crossref_status"] = "rate_limited"
-            row["crossref_verified"] = "false"
-            row["crossref_retry_after_seconds"] = (
-                "" if exc.retry_after_seconds is None else str(exc.retry_after_seconds)
-            )
-            counts["rate_limited"] += 1
-            checkpoint(i)
-            continue
-        polite_pause()
+            if meta is not None and cache_obj is not None:
+                _cache_store(
+                    cache_obj,
+                    doi_key,
+                    {"found": True, "metadata": meta},
+                    status="verified",
+                )
+                counts["cache_store"] += 1
+                row["crossref_cache_status"] = "store"
         if meta is None:
             row["crossref_mismatches"] = "CROSSREF_LOOKUP_FAILED"
             row["crossref_status"] = "lookup_failed"
@@ -501,7 +666,10 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         f"(doi={counts['verified']}, title_recovered={counts['title_recovered']}), "
         f"mismatch={counts['mismatch']}, failed={counts['lookup_failed']}, "
         f"missing_doi={counts['missing_doi']}, title_lookup_failed={counts['title_lookup_failed']}, "
-        f"rate_limited={counts['rate_limited']}, skipped_budget={counts['skipped_budget']}.",
+        f"rate_limited={counts['rate_limited']}, network_error={counts['network_error']}, "
+        f"auth_error={counts['auth_error']}, response_parse_error={counts['response_parse_error']}, "
+        f"provider_error={counts['provider_error']}, cache_hit={counts['cache_hit']}, "
+        f"cache_store={counts['cache_store']}, skipped_budget={counts['skipped_budget']}.",
         file=sys.stderr,
     )
 
@@ -531,6 +699,12 @@ def main() -> None:
                         help="Write batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="Only verify the first N CSV rows; remaining rows are marked skipped_budget")
+    parser.add_argument("--cache-dir", type=Path, default=None,
+                        help="Optional JSON cache directory for Crossref DOI/title metadata")
+    parser.add_argument("--cache-ttl-days", type=float, default=None,
+                        help="Cache TTL in days; omitted means no TTL for this cache invocation")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Disable Crossref cache even when --cache-dir is set")
     parser.add_argument("--json", action="store_true",
                         help="Output JSON for single --doi lookups instead of table")
     args = parser.parse_args()
@@ -574,6 +748,9 @@ def main() -> None:
             title_lookup=args.title_lookup,
             checkpoint_interval=args.checkpoint_interval,
             max_rows=args.max_rows,
+            cache_dir=args.cache_dir,
+            cache_ttl_days=args.cache_ttl_days,
+            cache_enabled=not args.no_cache,
         )
         print(f"Done: verified -> {args.output}", file=sys.stderr)
 

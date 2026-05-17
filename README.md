@@ -3,9 +3,9 @@
 中文 | [English](README.en.md)
 
 > 2026-05 更新：本项目按 “AI Agent 使用的科研文献信息获取 skill” 继续收敛。新的主流程会额外生成
-> `query_plan.json`、`field_provenance.json`、`publisher_adapters.json`，支持
+> `query_plan.json`、`artifacts_index.json`、`field_provenance.json`、`publisher_adapters.json`，支持
 > `--time-budget-seconds`、`--stop-after-stage`、`--max-crossref-rows`、
-> `--max-unpaywall-rows` 等可控运行参数；MCP 也提供
+> `--max-unpaywall-rows`、本地 cache 和 provider 失败恢复等可控运行参数；MCP 也提供
 > `litminer_start_run` / `litminer_run_status` 这类后台任务工具，适合长检索。
 > 首次或 Windows 环境不确定时，先运行 `python -m litminer.engine.bootstrap`。
 
@@ -139,7 +139,7 @@ python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
 ```
 
-这两个命令不需要 API key。`offline_smoke` 不访问网络，会用内置样本在当前工作区的 `.litminer/runs/offline_smoke/` 下生成 `processing_report.md` 和 `publisher_queue.csv`。
+这些命令不需要 API key。`offline_smoke` 不访问网络，会用内置样本在当前工作区的 `.litminer/runs/offline_smoke/` 下生成 `processing_report.md` 和 `publisher_queue.csv`。
 
 ### Windows 首次运行建议
 
@@ -206,6 +206,7 @@ claude mcp add-json litminer '{
   "cwd": "D:/path/to/your/project",
   "env": {
     "LITMINER_WORKSPACE_ROOT": "D:/path/to/your/project",
+    "LITMINER_MCP_TOOL_PROFILE": "workflow",
     "LITMINER_CONTACT_EMAIL": "you@example.org"
   }
 }'
@@ -220,7 +221,7 @@ Codex 可在 `config.toml` 中添加：
 command = "python"
 args = ["C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"]
 cwd = "D:/path/to/your/project"
-env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project" }
+env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project", LITMINER_MCP_TOOL_PROFILE = "workflow" }
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
@@ -237,37 +238,14 @@ env_vars = [
 - Codex MCP: [config/mcp.codex.example.toml](config/mcp.codex.example.toml)
 - Claude Code MCP: [config/mcp.claude.example.json](config/mcp.claude.example.json)
 
-主要 MCP 工具：
+MCP 默认使用 `LITMINER_MCP_TOOL_PROFILE=workflow`，`tools/list` 只展示工作流工具，避免 Agent 被底层阶段工具干扰。默认可见工具包括：
 
-| 工具 | 用途 |
-|------|------|
-| `litminer_search_openalex` | 搜索 OpenAlex 候选文献。 |
-| `litminer_search_semantic_scholar` | 搜索 Semantic Scholar，或从 DOI 做一跳 citation/reference expansion。 |
-| `litminer_search_arxiv` | 通过 arXiv Atom API 搜索预印本。 |
-| `litminer_search_europe_pmc` | 搜索 Europe PMC 生物医学/生命科学元数据。 |
-| `litminer_discover_api` | 多 query、多 provider API 发现，并写出候选、trace 和报告。 |
-| `litminer_verify_crossref` | 验证单个 DOI。 |
-| `litminer_batch_verify_crossref` | 批量验证 DOI。 |
-| `litminer_search_crossref_title` | 按标题搜索 Crossref，辅助恢复 DOI。 |
-| `litminer_batch_crossref_title_search` | 批量按标题搜索 Crossref。 |
-| `litminer_lookup_unpaywall` | 查询单个 DOI 的 OA 线索。 |
-| `litminer_dedupe` | 对候选 CSV 去重。 |
-| `litminer_semantic_triage` | 对候选 CSV 做语义标签和排序。 |
-| `litminer_filter_journal_metrics` | 用本地 verified metrics CSV 标注或过滤期刊指标。 |
-| `litminer_build_publisher_queue` | 生成出版社页面证据队列。 |
-| `litminer_probe_publishers` | 轻量探测 DOI/出版社页面可达性和 PDF/SI 链接。 |
-| `litminer_import_websearch` | 把 WebSearch 结果正规化为未验证候选。 |
-| `litminer_processing_report` | 生成处理摘要报告。 |
-| `litminer_agent_summary` | 生成机器可读的运行状态、Trust Tiers、artifact 路径和下一步建议。 |
-| `litminer_read_csv_summary` | 分页读取 CSV 摘要，支持按优先级/状态筛选，适合 Agent 查看大表。 |
-| `litminer_workspace_doctor` | 诊断 MCP 工作区根目录、写入权限和路径映射。 |
-| `litminer_bootstrap` | 生成首次运行环境、Python、工作区和联系邮箱检查报告。 |
-| `litminer_start_run` / `litminer_run_status` | 后台运行长检索任务并轮询状态。 |
-| `litminer_resume_run` / `litminer_cancel_run` | 后台续跑或请求协作式取消。 |
-| `litminer_validate_journal_metrics` | 校验期刊指标 CSV 的列、来源、数值和重复映射。 |
-| `litminer_field_provenance` | 为 CSV 生成字段级来源与信任等级 JSON。 |
-| `litminer_publisher_adapters` | 列出出版商页面检查适配器能力和边界。 |
-| `litminer_run_lit_search` | 运行完整工作流。 |
+- 环境与工作区：`litminer_workspace_doctor`、`litminer_bootstrap`
+- 长任务：`litminer_start_run`、`litminer_run_status`、`litminer_resume_run`、`litminer_cancel_run`
+- 主流程：`litminer_run_lit_search`、`litminer_discover_api`、`litminer_semantic_triage`、`litminer_build_publisher_queue`
+- 摘要与读取：`litminer_processing_report`、`litminer_agent_summary`、`litminer_read_csv_summary`
+
+需要单独调用 OpenAlex/Semantic Scholar/Crossref/Unpaywall、期刊指标校验、字段 provenance 或 publisher adapter 等底层工具时，把环境变量设为 `LITMINER_MCP_TOOL_PROFILE=all`。更详细的工具分层见 [references/mcp-surface.md](references/mcp-surface.md)。
 
 如果只想通过命令行脚本使用 Litminer，可以跳过 MCP。
 
@@ -401,6 +379,7 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
 - `channels` 决定启用哪些来源或处理阶段，例如 OpenAlex、Semantic Scholar、Crossref、Unpaywall、publisher probe。
 - `limits` 决定运行成本和节流策略，例如每个 query 最多取多少候选、Semantic Scholar 最多处理几个 query、是否并行不同 provider、出版社页面探测间隔。
 - `outputs` 决定默认输出目录和截图目录。
+- `cache` 决定工作区本地缓存位置和 TTL；它只缓存 Crossref/Unpaywall 的正向 DOI 元数据，以及短期 provider 失败状态，不是证据库。
 - `evidence` 决定证据队列策略，例如是否要求 DOI、哪些 triage 优先级进入 `publisher_queue.csv`、是否允许 metadata-blocked 行进入队列。
 - `api` 决定 API key/contact email 的环境变量名，以及 OpenAlex 的 work type 过滤。
 
@@ -431,6 +410,12 @@ $env:OPENALEX_API_KEY = "your-openalex-api-key"
   "outputs": {
     "default_output_dir": ".litminer/runs/litminer_run",
     "screenshot_root": ".litminer/screenshots"
+  },
+  "cache": {
+    "enabled": true,
+    "cache_dir": ".litminer/cache",
+    "ttl_days": 30.0,
+    "provider_failure_ttl_seconds": 300.0
   },
   "evidence": {
     "require_doi_for_queue": true,
@@ -491,6 +476,9 @@ python -m litminer.engine.run_lit_search \
 - `parallel_providers` / `--parallel-providers`：可选地并行执行同一 query 下的不同 API provider；实现使用标准库线程，同一 provider 在不同 query 间仍保持串行。
 - `provider_workers` / `--provider-workers`：限制 provider 并发线程数；默认等于同一 query 下启用的 provider 数量。
 - `provider_failure_threshold` / `--provider-failure-threshold`：同一次发现运行中，某个 provider 连续失败达到阈值后跳过剩余调用，避免 Semantic Scholar 429 或网络故障拖垮整轮任务。
+- `cache.enabled` / `--no-cache`：默认启用工作区本地轻量缓存。缓存只用于减少重复正向 DOI 元数据查询和短期 provider 失败重试；失败、not found、mismatch 不会作为长期证据缓存。如果已经修复网络、代理或 API key 问题，可用 `--no-cache` 强制重新访问来源。
+- `cache_dir` / `--cache-dir`：缓存默认写到工作区 `.litminer/cache`，不应视为最终交付证据，也不建议提交到项目仓库。
+- `provider_failure_cache_ttl_seconds` / `--provider-failure-cache-ttl-seconds`：短期记住 rate limit、network 和明确标记为 transient 的 provider 失败，避免 Agent 续跑时立刻重复打同一个失败来源。`auth` 和普通 `error` 默认不写入失败缓存，因为这些问题通常应修复后马上重试。
 - `--resume`：复用输出目录中已经存在的阶段 CSV，并把复用记录写入 `run_manifest.json`；适合超时后继续跑。Litminer 会用运行签名校验 query、概念、年份、来源和关键策略是否一致，不一致时会拒绝自动复用。
 - `--time-budget-seconds`：设置单次运行的总时间预算；预算耗尽后在阶段边界停止，并写出 partial 报告。
 - `--stop-after-stage`：显式停在 `query_plan`、`discovery`、`dedupe`、`crossref`、`triage`、`queue` 等阶段，适合 Agent 分步执行。
@@ -541,14 +529,15 @@ python -m litminer.engine.run_lit_search \
 
 `litminer.engine.run_lit_search` 会执行一条完整的文献处理链：
 
-1. API 发现候选文献，默认使用 OpenAlex。
-2. DOI/标题去重，并合并互补字段。
-3. Crossref 验证书目信息，缺 DOI 时尝试标题恢复。
-4. 按用户提供的 required/optional/negative 概念做语义初筛。
-5. 通过 Unpaywall 标注 OA 和访问线索。
-6. 可选：用本地已验证期刊指标表做标注或过滤。
-7. 构建出版社页面证据队列。
-8. 生成 `feasibility_report.md` 和 `processing_report.md`。
+1. 生成 `query_plan.json`，记录 Agent 派生的查询、概念、来源和 advisory source strategy。
+2. API 发现候选文献，默认使用 OpenAlex。
+3. DOI/标题去重，并合并互补字段。
+4. Crossref 验证书目信息，缺 DOI 时尝试标题恢复。
+5. 按用户提供的 required/optional/negative 概念做语义初筛。
+6. 通过 Unpaywall 标注 OA 和访问线索。
+7. 可选：用本地已验证期刊指标表做标注或过滤。
+8. 构建出版社页面证据队列。
+9. 生成 `feasibility_report.md`、`processing_report.md`、`agent_summary.json` 和 `artifacts_index.json`。
 
 默认配置位于 [config/default.json](config/default.json)。配置只放基础设施参数，例如渠道开关、API 环境变量名、限额、默认输出目录。检索主题、领域词表和纳入/排除概念不应写入全局配置。
 
@@ -569,13 +558,16 @@ python -m litminer.engine.run_lit_search \
 | `publisher_queue_probed.csv` | 可选页面探测结果。 |
 | `feasibility_report.md` | 可行性、数量和阻塞原因。 |
 | `processing_report.md` | 来源、元数据健康、Crossref、triage、OA/access 和队列摘要。 |
-| `agent_summary.json` | Agent 优先读取的机器可读状态摘要，包含 Trust Tiers、provider 健康、artifact 路径、告警和下一步建议。 |
-| `query_plan.json` | Agent 派生的查询、来源、概念表达式和运行预算。 |
+| `agent_summary.json` | Agent 优先读取的机器可读状态摘要，包含 Trust Tiers、provider 健康、primary artifact 路径、告警、source strategy 和下一步建议。 |
+| `artifacts_index.json` | 按 primary/supporting/debug 分层列出本次运行产物，帮助 Agent 先读关键入口、再按需进入大表或 debug 文件。 |
+| `query_plan.json` | Agent 派生的查询、来源、概念表达式、运行预算和 advisory source strategy。 |
 | `field_provenance.json` | 队列或探测结果中关键字段的来源与信任等级。 |
 | `publisher_adapters.json` | 内置/外部出版商页面检查适配器及边界说明。 |
 | `run_manifest.json` | 阶段状态、复用/跳过记录、行数、文件指纹、运行签名和参数摘要；用于安全续跑、超时恢复和审计。 |
 
 如果通过 MCP 查看较大的 CSV，优先用 `litminer_read_csv_summary` 分页读取，而不是把完整 CSV 一次性塞进 Agent 上下文。
+
+`query_plan.json` 中的 `source_strategy` 只提供检索策略提示：例如当前查询可能更适合补充 Europe PMC、arXiv 或 Semantic Scholar，或者当前只有单个 query、缺少 required concepts、年份过新导致元数据滞后风险较高。它不会自动改变检索范围；是否扩展来源仍由 Agent 结合用户任务决定。
 
 ## 常用命令
 
@@ -632,7 +624,7 @@ python -m litminer.engine.processing_report \
 
 耗时主要来自四类因素：`query 数量 × provider 数量 × max_results_per_query` 的发现调用、Semantic Scholar 限流、Crossref/Unpaywall 对 DOI 逐条补充、以及可选的出版社页面探测。首次使用不要直接打开所有来源和页面探测，先用 `--mode fast` 验证工作区和语义筛选，再逐步放大。
 
-如果 Agent 在固定时间窗口内超时，Litminer 仍会尽量保留阶段文件。当前工作流会在关键阶段刷新 `processing_report.md` 和 `agent_summary.json`，并持续写入带文件指纹的 `run_manifest.json`；Crossref 和 Unpaywall 批处理会定期写 checkpoint。如果只看到 `api_candidates.csv` 或 `deduped_candidates.csv`，可以手动重建摘要：
+如果 Agent 在固定时间窗口内超时，Litminer 仍会尽量保留阶段文件。当前工作流会在关键阶段刷新 `processing_report.md` 和 `agent_summary.json`，并持续写入带文件指纹的 `run_manifest.json`；完成或中途停止时还会写 `artifacts_index.json`。Crossref 和 Unpaywall 批处理会定期写 checkpoint，并通过 `.litminer/cache` 复用已稳定查询过的 DOI 元数据。如果只看到 `api_candidates.csv` 或 `deduped_candidates.csv`，可以手动重建摘要：
 
 ```bash
 python -m litminer.engine.processing_report --output-dir .litminer/runs/litminer_run
@@ -640,6 +632,8 @@ python -m litminer.engine.agent_summary --output-dir .litminer/runs/litminer_run
 ```
 
 然后用 `--resume` 或 `--input-csv` 从已有 CSV 继续后续阶段，避免重复访问发现 API。`--resume` 会检查 `run_manifest.json` 里的运行签名；如果本次用户条件已经改变，应使用新的 `--output-dir`，不要强行复用旧结果。
+
+缓存和 resume 的边界不同：`--resume` 复用某次运行的阶段产物，适合同一用户条件下继续跑；cache 只是工作区本地查询加速和短期失败抑制，不代表论文证据已经核验。如果网络、代理、API key 或联系邮箱刚被修复，可以加 `--no-cache` 重新访问来源。
 
 `processing_report.md` 里的 Trust Tiers 会把结果分成 `discovered_or_deduped`、`crossref_trusted`、`metric_pass`、`publisher_queue` 和 `publisher_probe_checked`。不要把发现候选数等同于已核验论文数。
 
@@ -661,7 +655,8 @@ python -m litminer.engine.doctor --workspace "D:/path/to/project" --explain-path
 
 常见情况：
 
-- API 请求失败或限流：减少 `max_results_per_query`，减少来源数量，稍后重试；不要把失败来源的空结果当作最终事实。
+- API 请求失败或限流：查看 `api_discovery_trace.csv` 的 `status_class`、`http_status`、`transient_error` 和 `next_action`。`rate_limited` 适合稍后续跑或减少请求量；`network` / `auth` 通常是 Agent 网络权限、代理/证书或 API key/contact email 问题；不要把失败来源的空结果当作最终事实。
+- `api_discovery_trace.csv` 显示 `skipped_cached_provider_failure`：Litminer 命中了短期 provider 失败缓存，通常表示上一次同源同 query 刚遇到 rate limit、network 或明确 transient 的 provider 错误；等待 TTL 后续跑，或在确认环境已修复后用 `--no-cache`。`auth` 和普通 `error` 默认不会写入该失败缓存。
 - Unpaywall 显示 `skipped_missing_email`：设置 `UNPAYWALL_EMAIL` 或 `LITMINER_CONTACT_EMAIL` 后重跑。
 - Crossref `lookup_failed` 或 `mismatch`：保留阻塞状态，不要手工伪造 DOI；必要时扩大检索或人工核验。
 - 出版社页面不可达：降低 `--probe-limit`，提高 `--probe-sleep`，或跳过自动探测后人工检查 `publisher_queue.csv`。

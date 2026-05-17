@@ -56,7 +56,11 @@ serve the Agent workflow described in `SKILL.md`.
 - `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
 - `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
 - `litminer/engine/agent_summary.py`: machine-readable trust tiers, stage status, artifact paths, and next actions.
+- `litminer/engine/artifacts.py`: artifact tier index for Agent navigation.
+- `litminer/engine/cache.py`: workspace-local JSON cache for deterministic metadata and short-lived provider failures.
+- `litminer/engine/status_policy.py`: shared status class and next-action semantics.
 - `litminer/engine/query_plan.py`: runtime query/source/concept/run-control plan.
+- `litminer/engine/source_strategy.py`: advisory source coverage, retrieval-gap, and risk hints for `query_plan.json`.
 - `litminer/engine/provenance.py`: field-level source/trust provenance for queued or probed rows.
 - `litminer/engine/publisher_adapters.py`: publisher inspection adapter registry and boundaries.
 - `litminer/engine/bootstrap.py`: first-run Python/workspace/contact-email bootstrap report.
@@ -88,6 +92,7 @@ Installation and environment policy:
 - For first use in a new Agent/workspace, prefer `--mode fast` before broad discovery or publisher probing.
 - If MCP file access fails, call `litminer_workspace_doctor` or run `doctor --workspace PATH --explain-path PATH` before retrying.
 - If a run times out or is interrupted, retry with `--resume` and the same `--output-dir` before restarting discovery, but only when the user request has not changed.
+- Keep cache local to the active workspace. Cache can reduce repeated provider calls, but it is not evidence and must not replace artifact/provenance checks.
 
 Allowed in config:
 
@@ -178,6 +183,11 @@ Use repeated `--query` when recall matters. Add source flags only when useful:
 - `--include-europe-pmc` for biomedical/life-science tasks.
 - `--probe-publishers` only when lightweight access/PDF/SI hints are needed.
 
+After the runner creates `query_plan.json`, inspect `source_strategy`.
+`missing_recommended_sources` and `risk_flags` identify retrieval gaps and
+timeout/noise risks. They are advisory; the Agent must still decide whether the
+user's task justifies a broader run.
+
 For long runs, prefer explicit controls:
 
 - `--time-budget-seconds N`: stop cleanly at a stage boundary once budget is exhausted.
@@ -188,14 +198,15 @@ For long runs, prefer explicit controls:
 ### 3. Read Outputs In This Order
 
 1. `agent_summary.json` for machine-readable trust tiers, status, artifacts, and next actions.
-2. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, and queue summary.
-3. `query_plan.json` for Agent-derived queries, sources, concepts, and budgets.
-4. `run_manifest.json` for stage status, resume decisions, row counts, and file fingerprints.
-5. `feasibility_report.md` for feasibility and blocking reasons.
-6. `field_provenance.json` for field-level source/trust checks.
-7. `triaged_candidates.csv` for semantic review.
-8. `publisher_queue.csv` for article-page evidence work.
-9. `publisher_queue_probed.csv` only if probing was enabled.
+2. `artifacts_index.json` for primary/supporting/debug artifact navigation.
+3. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, cache/recovery notes, and queue summary.
+4. `query_plan.json` for Agent-derived queries, sources, concepts, budgets, and advisory source strategy.
+5. `run_manifest.json` for stage status, resume decisions, row counts, file fingerprints, and cache config.
+6. `feasibility_report.md` for feasibility and blocking reasons.
+7. `field_provenance.json` for field-level source/trust checks.
+8. `triaged_candidates.csv` for semantic review.
+9. `publisher_queue.csv` for article-page evidence work.
+10. `publisher_queue_probed.csv` only if probing was enabled.
 
 Do not mechanically scan large CSVs before checking `processing_report.md`.
 Use the report's Trust Tiers to keep discovered candidates separate from
@@ -220,6 +231,16 @@ python -m litminer.engine.api_discovery \
 Use `--provider-failure-threshold N` to skip the remaining calls for a provider
 after repeated failures in one discovery run. This is especially useful for
 Semantic Scholar 429s or network outages.
+Discovery trace `status_class` separates `rate_limited`, `network`, `auth`,
+`partial`, `skipped`, and generic `error` failures. Network/certificate/auth
+classes should be treated as environment or access problems, not as evidence
+that the literature does not exist.
+Discovery may use a short-lived provider-failure cache. A
+`skipped_cached_provider_failure` trace row means the same provider/query
+recently failed with a cacheable transient failure such as rate limit, network,
+or explicitly transient provider error. Auth and generic errors are not cached
+by default; fix them and retry. Wait for the TTL or rerun with `--no-cache`
+after fixing the environment.
 
 ### Crossref Verification
 
@@ -232,6 +253,11 @@ Crossref status is explicit:
 - `mismatch`: Crossref metadata conflicts with input metadata.
 
 Only `verified` and `title_recovered` are trusted for default promotion. Failed or mismatched rows must remain blocked unless the user explicitly asks for manual review of blocked rows.
+Crossref DOI/title cache hits are acceptable for avoiding repeat positive
+metadata calls, but final reporting should still cite the run artifact row and
+status, not the cache file. Failed, not-found, and mismatch rows should be
+re-evaluated through normal artifacts rather than treated as durable cache
+evidence.
 
 ### Semantic Triage
 
@@ -270,7 +296,7 @@ The publisher probe is heuristic and safe by design:
 
 ## MCP Use
 
-The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly. File path arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Default MCP workflow outputs should go under `.litminer/` in that workspace.
+The MCP server is optional. If configured, prefer tool calls for repeatable operations; otherwise run scripts directly. File path arguments must stay inside `LITMINER_WORKSPACE_ROOT` when set, or inside the MCP process `cwd` when unset. Default MCP workflow outputs should go under `.litminer/` in that workspace. The default `tools/list` surface is `LITMINER_MCP_TOOL_PROFILE=workflow`; use `all` only when low-level source/stage/debug tools are needed.
 
 Start/test:
 
@@ -279,27 +305,30 @@ python -m litminer.sources.mcp.server
 python -m litminer.sources.mcp.test_server
 ```
 
-Core MCP tools:
+Primary MCP tools:
 
 - `litminer_discover_api`
 - `litminer_run_lit_search`
+- `litminer_start_run`
+- `litminer_run_status`
+- `litminer_resume_run`
 - `litminer_semantic_triage`
-- `litminer_verify_crossref`
-- `litminer_search_crossref_title`
-- `litminer_lookup_unpaywall`
-- `litminer_filter_journal_metrics`
 - `litminer_build_publisher_queue`
-- `litminer_probe_publishers`
-- `litminer_import_websearch`
 - `litminer_processing_report`
 - `litminer_agent_summary`
 - `litminer_read_csv_summary`
 - `litminer_workspace_doctor`
 - `litminer_bootstrap`
-- `litminer_start_run`
-- `litminer_run_status`
-- `litminer_resume_run`
 - `litminer_cancel_run`
+
+Stage-specific and governance tools (`LITMINER_MCP_TOOL_PROFILE=all`):
+
+- `litminer_verify_crossref`
+- `litminer_search_crossref_title`
+- `litminer_lookup_unpaywall`
+- `litminer_filter_journal_metrics`
+- `litminer_probe_publishers`
+- `litminer_import_websearch`
 - `litminer_validate_journal_metrics`
 - `litminer_field_provenance`
 - `litminer_publisher_adapters`

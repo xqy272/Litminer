@@ -163,6 +163,29 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, page_size
     return f"{EUROPE_PMC_BASE}?{urllib.parse.urlencode(params)}"
 
 
+def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    if retry_after:
+        try:
+            return max(0.0, min(float(retry_after), 120.0))
+        except ValueError:
+            pass
+    return float(2 ** attempt)
+
+
+def _status_for_fetch_exception(exc: Exception | None) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError) or any(
+        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
+    ):
+        return "network_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "response_parse_error"
+    return "error"
+
+
 def _fetch_json(url: str) -> dict[str, Any]:
     last_error: Exception | None = None
     for attempt in range(MAX_RETRIES):
@@ -170,6 +193,22 @@ def _fetch_json(url: str) -> dict[str, Any]:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code == 429 and attempt < MAX_RETRIES - 1:
+                wait = _retry_after_seconds(exc, attempt)
+                print(
+                    f"  Rate limited by Europe PMC (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                continue
+            if 500 <= exc.code < 600 and attempt < MAX_RETRIES - 1:
+                wait = _retry_after_seconds(exc, attempt)
+                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            break
         except (urllib.error.URLError, json.JSONDecodeError, OSError,
                 http.client.IncompleteRead) as exc:
             last_error = exc
@@ -177,7 +216,21 @@ def _fetch_json(url: str) -> dict[str, Any]:
                 wait = 2 ** attempt
                 print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {exc}", file=sys.stderr)
                 time.sleep(wait)
-    raise RuntimeError(f"Europe PMC request failed: {last_error}")
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+        raise ProviderSearchError(
+            f"Europe PMC rate limit persisted after {MAX_RETRIES} attempts",
+            status="rate_limited",
+            retry_after_seconds=_retry_after_seconds(last_error, MAX_RETRIES - 1),
+            http_status=429,
+            transient=True,
+        ) from last_error
+    status = _status_for_fetch_exception(last_error)
+    raise ProviderSearchError(
+        f"Europe PMC request failed after {MAX_RETRIES} attempts: {last_error}",
+        status=status,
+        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
+        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
+    ) from last_error
 
 
 def _year_ok(row: dict[str, str], year_from: int | None, year_to: int | None = None) -> bool:
@@ -228,9 +281,27 @@ def search(query: str, year_from: int | None = None,
                 break
             cursor = next_cursor
     except Exception as exc:
-        status = "partial_error" if results else "error"
+        if isinstance(exc, ProviderSearchError):
+            status = exc.status
+            if results and not str(status).startswith("partial"):
+                status = f"partial_{status}"
+            retry_after = exc.retry_after_seconds
+            http_status = exc.http_status
+            transient = exc.transient
+        else:
+            status = "partial_error" if results else "error"
+            retry_after = getattr(exc, "retry_after_seconds", None)
+            http_status = None
+            transient = None
         message = f"Europe PMC search failed at cursor={cursor}: {exc}"
-        raise ProviderSearchError(message, partial_results=results, status=status) from exc
+        raise ProviderSearchError(
+            message,
+            partial_results=results,
+            status=status,
+            retry_after_seconds=retry_after,
+            http_status=http_status,
+            transient=transient,
+        ) from exc
 
     print(f"  Collected: {len(results)} candidates.", file=sys.stderr)
     return results

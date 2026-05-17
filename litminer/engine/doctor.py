@@ -61,6 +61,12 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "default_output_dir": (str,),
         "screenshot_root": (str,),
     },
+    "cache": {
+        "enabled": (bool,),
+        "cache_dir": (str,),
+        "ttl_days": (int, float),
+        "provider_failure_ttl_seconds": (int, float),
+    },
     "evidence": {
         "require_doi_for_queue": (bool,),
         "queue_priorities": (str,),
@@ -152,6 +158,12 @@ def validate_config(path: Path) -> list[Check]:
             value = limits.get(key)
             if value is not None and isinstance(value, (int, float)) and value < 0:
                 checks.append(Check("config", "error", f"{key} must not be negative"))
+    cache = data.get("cache", {})
+    if isinstance(cache, dict):
+        for key in ("ttl_days", "provider_failure_ttl_seconds"):
+            value = cache.get(key)
+            if value is not None and isinstance(value, (int, float)) and value < 0:
+                checks.append(Check("config", "error", f"cache.{key} must not be negative"))
 
     return checks
 

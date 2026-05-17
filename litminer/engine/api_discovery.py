@@ -28,6 +28,8 @@ from litminer.sources.api import europe_pmc_search
 from litminer.sources.api import openalex_search
 from litminer.sources.api import registry as provider_registry
 from litminer.sources.api import semantic_scholar_search
+from litminer.engine import cache as cache_helpers
+from litminer.engine import status_policy
 from litminer.engine.common import write_csv_atomic, write_text_atomic
 
 
@@ -72,8 +74,12 @@ TRACE_FIELDS = [
     "returned_count",
     "status",
     "status_class",
+    "http_status",
+    "transient_error",
     "retry_after_seconds",
     "next_action",
+    "cache_status",
+    "cache_key",
     "error",
     "started_at",
     "ended_at",
@@ -189,6 +195,8 @@ def _run_provider_call(
     started_at = utc_now()
     status = "ok"
     error = ""
+    http_status = ""
+    transient_error = ""
     retry_after_seconds = ""
     rows: list[dict[str, str]] = []
     try:
@@ -210,20 +218,30 @@ def _run_provider_call(
         retry_after = getattr(exc, "retry_after_seconds", None)
         if retry_after is not None:
             retry_after_seconds = f"{float(retry_after):.3f}".rstrip("0").rstrip(".")
+        http_status_value = getattr(exc, "http_status", None)
+        if http_status_value is not None:
+            http_status = str(http_status_value)
+        transient_value = getattr(exc, "transient", None)
+        if transient_value is not None:
+            transient_error = str(bool(transient_value)).lower()
         error = f"{type(exc).__name__}: {exc}"
         print(f"WARNING: {provider} query {query_id} failed: {error}", file=sys.stderr)
     if status == "ok" and not rows:
         status = "empty_result"
 
-    status_class = classify_status(status)
+    status_class = status_policy.classify_status(status)
     return {
         "provider": provider,
         "provider_max": provider_max,
         "rows": rows,
         "status": status,
         "status_class": status_class,
+        "http_status": http_status,
+        "transient_error": transient_error,
         "retry_after_seconds": retry_after_seconds,
-        "next_action": next_action_for_status(status, retry_after_seconds),
+        "next_action": status_policy.provider_next_action(status, retry_after_seconds),
+        "cache_status": "",
+        "cache_key": "",
         "error": error,
         "started_at": started_at,
         "ended_at": utc_now(),
@@ -237,9 +255,13 @@ def _skipped_provider_call(provider: str, provider_max: int, failure_count: int)
         "provider_max": provider_max,
         "rows": [],
         "status": "skipped_circuit_breaker",
-        "status_class": "skipped",
+        "status_class": status_policy.classify_status("skipped_circuit_breaker"),
+        "http_status": "",
+        "transient_error": "",
         "retry_after_seconds": "",
-        "next_action": "continue_with_other_sources_or_lower_provider_failure_threshold",
+        "next_action": status_policy.provider_next_action("skipped_circuit_breaker"),
+        "cache_status": "",
+        "cache_key": "",
         "error": f"Skipped after {failure_count} failed provider call(s) in this discovery run.",
         "started_at": now,
         "ended_at": now,
@@ -254,51 +276,89 @@ def _cooldown_provider_call(provider: str, provider_max: int, remaining_seconds:
         "provider_max": provider_max,
         "rows": [],
         "status": "skipped_rate_limit_cooldown",
-        "status_class": "skipped",
+        "status_class": status_policy.classify_status("skipped_rate_limit_cooldown"),
+        "http_status": "",
+        "transient_error": "",
         "retry_after_seconds": retry_after,
-        "next_action": "retry_this_provider_after_cooldown_or_continue_with_other_sources",
+        "next_action": status_policy.provider_next_action("skipped_rate_limit_cooldown"),
+        "cache_status": "",
+        "cache_key": "",
         "error": f"Skipped because this provider is cooling down for about {retry_after or '0'}s after a rate limit.",
         "started_at": now,
         "ended_at": now,
     }
 
 
+def _provider_failure_cache_key(
+    provider: str,
+    query: str,
+    year_from: int | None,
+    year_to: int | None,
+    provider_max: int,
+    openalex_work_types: str | list[str] | None,
+) -> str:
+    return "failure:" + cache_helpers.cache_key(
+        provider,
+        query,
+        year_from or "",
+        year_to or "",
+        provider_max,
+        ",".join(openalex_work_types) if isinstance(openalex_work_types, list) else (openalex_work_types or ""),
+    )
+
+
+def _cached_provider_failure_call(
+    provider: str,
+    provider_max: int,
+    key: str,
+    hit: cache_helpers.CacheHit,
+) -> dict[str, Any]:
+    now = utc_now()
+    value = hit.value if isinstance(hit.value, dict) else {}
+    original_status = str(value.get("status") or hit.status or "provider_error")
+    retry_after = str(value.get("retry_after_seconds") or "")
+    original_action = str(value.get("next_action") or status_policy.provider_next_action(original_status, retry_after))
+    return {
+        "provider": provider,
+        "provider_max": provider_max,
+        "rows": [],
+        "status": "skipped_cached_provider_failure",
+        "status_class": status_policy.classify_status("skipped_cached_provider_failure"),
+        "http_status": str(value.get("http_status") or ""),
+        "transient_error": str(value.get("transient_error") or ""),
+        "retry_after_seconds": retry_after,
+        "next_action": status_policy.provider_next_action("skipped_cached_provider_failure"),
+        "cache_status": "hit",
+        "cache_key": key,
+        "error": (
+            f"Skipped due to cached provider failure: status={original_status}; "
+            f"next_action={original_action}; error={value.get('error', '')}"
+        ),
+        "started_at": now,
+        "ended_at": now,
+    }
+
+
 def classify_status(status: str) -> str:
-    normalized = (status or "").strip().lower()
-    if normalized == "ok":
-        return "ok"
-    if normalized == "empty_result":
-        return "empty"
-    if "rate_limited" in normalized or "rate_limit" in normalized:
-        return "rate_limited"
-    if normalized.startswith("partial"):
-        return "partial"
-    if normalized.startswith("skipped"):
-        return "skipped"
-    return "error"
+    return status_policy.classify_status(status)
 
 
 def next_action_for_status(status: str, retry_after_seconds: str = "") -> str:
-    status_class = classify_status(status)
-    if status_class == "ok":
-        return "use_returned_candidates"
-    if status_class == "empty":
-        return "treat_as_no_candidates_for_this_query_source_only"
-    if status_class == "rate_limited":
-        if retry_after_seconds:
-            return "retry_provider_after_retry_after_or_resume_later"
-        return "retry_provider_later_or_reduce_query_volume"
-    if status_class == "partial":
-        return "keep_partial_rows_and_resume_or_retry_provider_later"
-    if status == "skipped_circuit_breaker":
-        return "continue_with_other_sources_or_lower_provider_failure_threshold"
-    if status == "skipped_rate_limit_cooldown":
-        return "retry_this_provider_after_cooldown_or_continue_with_other_sources"
-    return "inspect_error_and_continue_with_other_sources_when_possible"
+    return status_policy.provider_next_action(status, retry_after_seconds)
 
 
 def _is_provider_failure(status: str) -> bool:
-    return classify_status(status) in {"error", "partial", "rate_limited"}
+    return status_policy.is_provider_failure(status)
+
+
+def _is_cacheable_provider_failure(provider_result: dict[str, Any]) -> bool:
+    transient_raw = str(provider_result.get("transient_error") or "").strip().lower()
+    transient = None if not transient_raw else transient_raw == "true"
+    return status_policy.is_cacheable_provider_failure(
+        str(provider_result.get("status") or ""),
+        has_rows=bool(provider_result.get("rows")),
+        transient=transient,
+    )
 
 
 def _cooldown_seconds(provider_result: dict[str, Any], default_seconds: float) -> float:
@@ -308,6 +368,12 @@ def _cooldown_seconds(provider_result: dict[str, Any], default_seconds: float) -
             return max(0.0, float(raw))
         except ValueError:
             pass
+    return max(0.0, default_seconds)
+
+
+def _provider_failure_cache_ttl(provider_result: dict[str, Any], default_seconds: float) -> float:
+    if status_policy.classify_status(str(provider_result.get("status") or "")) == "rate_limited":
+        return _cooldown_seconds(provider_result, default_seconds)
     return max(0.0, default_seconds)
 
 
@@ -327,6 +393,9 @@ def discover_api(queries: list[str],
                   provider_workers: int | None = None,
                   provider_failure_threshold: int | None = None,
                   provider_rate_limit_cooldown_seconds: float = 60.0,
+                  provider_failure_cache_dir: Path | None = None,
+                  provider_failure_cache_enabled: bool = True,
+                  provider_failure_cache_ttl_seconds: float | None = None,
                   trace_csv: Path | None = None,
                   report_md: Path | None = None,
                   run_id: str | None = None) -> dict[str, object]:
@@ -343,6 +412,21 @@ def discover_api(queries: list[str],
     traces: list[dict[str, str]] = []
     provider_failures: dict[str, int] = {}
     provider_cooldowns: dict[str, float] = {}
+    failure_cache_ttl = (
+        cache_helpers.DEFAULT_PROVIDER_FAILURE_TTL_SECONDS
+        if provider_failure_cache_ttl_seconds is None
+        else float(provider_failure_cache_ttl_seconds)
+    )
+    failure_cache = (
+        cache_helpers.JsonCache(
+            provider_failure_cache_dir,
+            "provider_failures",
+            enabled=provider_failure_cache_enabled,
+            ttl_seconds=failure_cache_ttl,
+        )
+        if provider_failure_cache_dir
+        else None
+    )
 
     for q_index, query in enumerate(queries, start=1):
         query_id = f"q{q_index:03d}"
@@ -364,10 +448,21 @@ def discover_api(queries: list[str],
             failure_count = provider_failures.get(provider, 0)
             cooldown_until = provider_cooldowns.get(provider, 0.0)
             cooldown_remaining = cooldown_until - time.monotonic()
+            cache_key = _provider_failure_cache_key(
+                provider,
+                query,
+                year_from,
+                year_to,
+                provider_max,
+                openalex_work_types,
+            )
+            cached_failure = failure_cache.get(cache_key) if failure_cache is not None else None
             if cooldown_remaining > 0:
                 provider_results[idx] = _cooldown_provider_call(provider, provider_max, cooldown_remaining)
             elif provider_failure_threshold is not None and failure_count >= provider_failure_threshold:
                 provider_results[idx] = _skipped_provider_call(provider, provider_max, failure_count)
+            elif cached_failure is not None:
+                provider_results[idx] = _cached_provider_failure_call(provider, provider_max, cache_key, cached_failure)
             else:
                 runnable_plan.append((idx, provider, provider_max))
 
@@ -412,12 +507,11 @@ def discover_api(queries: list[str],
             rows = provider_result["rows"]
             if _is_provider_failure(str(provider_result["status"])):
                 provider_failures[provider] = provider_failures.get(provider, 0) + 1
-            if classify_status(str(provider_result["status"])) == "rate_limited":
+            if status_policy.classify_status(str(provider_result["status"])) == "rate_limited":
                 provider_cooldowns[provider] = time.monotonic() + _cooldown_seconds(
                     provider_result,
                     rate_limit_cooldown_default,
                 )
-
             for rank, row in enumerate(rows, start=1):
                 candidates.append(enrich_row(
                     row=row,
@@ -429,7 +523,7 @@ def discover_api(queries: list[str],
                     retrieved_at=retrieved_at,
                 ))
 
-            traces.append({
+            trace_row = {
                 "discovery_run_id": run_id,
                 "provider": provider,
                 "query_id": query_id,
@@ -440,12 +534,44 @@ def discover_api(queries: list[str],
                 "returned_count": str(len(rows)),
                 "status": str(provider_result["status"]),
                 "status_class": str(provider_result["status_class"]),
+                "http_status": str(provider_result.get("http_status", "")),
+                "transient_error": str(provider_result.get("transient_error", "")),
                 "retry_after_seconds": str(provider_result["retry_after_seconds"]),
                 "next_action": str(provider_result["next_action"]),
+                "cache_status": str(provider_result.get("cache_status", "")),
+                "cache_key": str(provider_result.get("cache_key", "")),
                 "error": str(provider_result["error"]),
                 "started_at": str(provider_result["started_at"]),
                 "ended_at": str(provider_result["ended_at"]),
-            })
+            }
+            if failure_cache is not None and _is_cacheable_provider_failure(provider_result):
+                cache_key = _provider_failure_cache_key(
+                    provider,
+                    query,
+                    year_from,
+                    year_to,
+                    int(provider_result["provider_max"]),
+                    openalex_work_types,
+                )
+                failure_cache.set(
+                    cache_key,
+                    {
+                        "provider": provider,
+                        "query": query,
+                        "status": str(provider_result["status"]),
+                        "status_class": str(provider_result["status_class"]),
+                        "http_status": str(provider_result.get("http_status", "")),
+                        "transient_error": str(provider_result.get("transient_error", "")),
+                        "retry_after_seconds": str(provider_result["retry_after_seconds"]),
+                        "next_action": str(provider_result["next_action"]),
+                        "error": str(provider_result["error"]),
+                    },
+                    status=str(provider_result["status"]),
+                    ttl_seconds=_provider_failure_cache_ttl(provider_result, failure_cache_ttl),
+                )
+                trace_row["cache_status"] = trace_row["cache_status"] or "store"
+                trace_row["cache_key"] = cache_key
+            traces.append(trace_row)
 
     write_csv(candidates, output_csv, DEFAULT_OUTPUT_FIELDS)
     if trace_csv is not None:
@@ -475,6 +601,7 @@ def discover_api(queries: list[str],
         "provider_statuses": status_counts,
         "provider_status_classes": dict(Counter(trace["status_class"] for trace in traces)),
         "provider_failures": provider_failures,
+        "provider_failure_cache": failure_cache.stats() if failure_cache is not None else {"enabled": False},
         "output_csv": str(output_csv),
         "trace_csv": str(trace_csv) if trace_csv else "",
         "report_md": str(report_md) if report_md else "",
@@ -550,17 +677,19 @@ def write_report(report_md: Path, output_csv: Path, trace_csv: Path | None,
         "",
         "## Query Trace",
         "",
-        "| Provider | Query ID | Returned | Status | Class | Retry After | Next Action | Query | Error |",
-        "|----------|----------|----------|--------|-------|-------------|-------------|-------|-------|",
+        "| Provider | Query ID | Returned | Status | Class | HTTP | Transient | Retry After | Cache | Next Action | Query | Error |",
+        "|----------|----------|----------|--------|-------|------|-----------|-------------|-------|-------------|-------|-------|",
     ])
     for trace in traces:
         query = trace["query"].replace("|", "\\|")
         error = trace.get("error", "").replace("|", "\\|")
         next_action = trace.get("next_action", "").replace("|", "\\|")
+        cache_status = trace.get("cache_status", "").replace("|", "\\|")
         lines.append(
             f"| {trace['provider']} | {trace['query_id']} | "
             f"{trace['returned_count']} | {trace['status']} | {trace.get('status_class', '')} | "
-            f"{trace.get('retry_after_seconds', '')} | {next_action} | {query} | {error} |"
+            f"{trace.get('http_status', '')} | {trace.get('transient_error', '')} | "
+            f"{trace.get('retry_after_seconds', '')} | {cache_status} | {next_action} | {query} | {error} |"
         )
     write_text_atomic(report_md, "\n".join(lines) + "\n")
 
@@ -591,6 +720,12 @@ def main() -> None:
                         help="Skip remaining calls for a provider after this many failed calls")
     parser.add_argument("--provider-rate-limit-cooldown-seconds", type=float, default=60.0,
                         help="Default cooldown for repeated calls to a rate-limited provider when Retry-After is unavailable")
+    parser.add_argument("--provider-failure-cache-dir", type=Path, default=None,
+                        help="Optional JSON cache directory for short-lived provider failure state")
+    parser.add_argument("--provider-failure-cache-ttl-seconds", type=float, default=None,
+                        help="TTL for cached provider failures; defaults to Litminer short failure TTL")
+    parser.add_argument("--no-provider-failure-cache", action="store_true",
+                        help="Disable provider failure cache even when --provider-failure-cache-dir is set")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path, default=None)
     parser.add_argument("--report-output", type=Path, default=None)
@@ -617,6 +752,9 @@ def main() -> None:
         provider_workers=args.provider_workers,
         provider_failure_threshold=args.provider_failure_threshold,
         provider_rate_limit_cooldown_seconds=args.provider_rate_limit_cooldown_seconds,
+        provider_failure_cache_dir=args.provider_failure_cache_dir,
+        provider_failure_cache_enabled=not args.no_provider_failure_cache,
+        provider_failure_cache_ttl_seconds=args.provider_failure_cache_ttl_seconds,
         trace_csv=args.trace_output,
         report_md=args.report_output,
     )

@@ -8,22 +8,10 @@ MCP-style JSON-RPC tools.
 Usage:
     python -m litminer.sources.mcp.server
 
-Tools exposed:
-    litminer_search_openalex    - Search OpenAlex for papers
-    litminer_search_arxiv       - Search arXiv preprints
-    litminer_search_europe_pmc  - Search Europe PMC metadata
-    litminer_discover_api       - Run multi-query API discovery with trace files
-    litminer_verify_crossref    - Verify DOIs against Crossref
-    litminer_batch_verify_crossref - Verify multiple DOIs against Crossref
-    litminer_lookup_unpaywall   - Find structured OA links for a DOI
-    litminer_dedupe             - Deduplicate paper CSV
-    litminer_semantic_triage    - Annotate/rank candidates with caller-supplied concepts
-    litminer_processing_report  - Summarize workflow outputs for Agent review
-    litminer_agent_summary      - Generate machine-readable run status
-    litminer_read_csv_summary   - Read compact, paginated CSV summaries
-    litminer_workspace_doctor   - Diagnose workspace root/path visibility
-    litminer_build_publisher_queue - Build DOI/publisher-page queues
-    litminer_run_lit_search     - Run the full Agent-facing workflow
+Tool surface:
+    By default, tools/list advertises the compact workflow profile controlled
+    by LITMINER_MCP_TOOL_PROFILE=workflow. Set LITMINER_MCP_TOOL_PROFILE=all to
+    advertise lower-level source, stage, and debug tools.
 
 This server uses stdlib-only JSON-RPC over stdio (no MCP SDK dependency) for
 maximum portability.
@@ -57,6 +45,23 @@ from litminer.engine import workspace
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION, "2024-11-05"}
 MAX_STDIN_LINE_BYTES = int(os.environ.get("LITMINER_MCP_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
+MCP_TOOL_PROFILE_ENV = "LITMINER_MCP_TOOL_PROFILE"
+DEFAULT_MCP_TOOL_PROFILE = "workflow"
+WORKFLOW_TOOL_NAMES = [
+    "litminer_workspace_doctor",
+    "litminer_bootstrap",
+    "litminer_run_lit_search",
+    "litminer_start_run",
+    "litminer_run_status",
+    "litminer_resume_run",
+    "litminer_cancel_run",
+    "litminer_discover_api",
+    "litminer_semantic_triage",
+    "litminer_build_publisher_queue",
+    "litminer_processing_report",
+    "litminer_agent_summary",
+    "litminer_read_csv_summary",
+]
 
 _import_lock = threading.Lock()
 _jobs_lock = threading.Lock()
@@ -454,6 +459,9 @@ def tool_discover_api(args: dict) -> dict:
         provider_workers=args.get("provider_workers"),
         provider_failure_threshold=args.get("provider_failure_threshold"),
         provider_rate_limit_cooldown_seconds=args.get("provider_rate_limit_cooldown_seconds", 60.0),
+        provider_failure_cache_dir=_optional_workspace_path(args.get("cache_dir"), "cache_dir"),
+        provider_failure_cache_enabled=not bool(args.get("no_cache", False)),
+        provider_failure_cache_ttl_seconds=args.get("provider_failure_cache_ttl_seconds"),
         trace_csv=trace_csv,
         report_md=report_md,
     )
@@ -651,6 +659,9 @@ def tool_read_csv_summary(args: dict) -> dict:
         "candidate_status",
         "metadata_status",
         "crossref_status",
+        "crossref_cache_status",
+        "unpaywall_status",
+        "unpaywall_cache_status",
         "metric_filter_status",
         "access_status",
     ]
@@ -741,6 +752,10 @@ def _run_namespace(args: dict):
         provider_workers=args.get("provider_workers"),
         provider_failure_threshold=args.get("provider_failure_threshold"),
         provider_rate_limit_cooldown_seconds=args.get("provider_rate_limit_cooldown_seconds"),
+        cache_dir=_optional_workspace_path(args.get("cache_dir"), "cache_dir"),
+        cache_ttl_days=args.get("cache_ttl_days"),
+        provider_failure_cache_ttl_seconds=args.get("provider_failure_cache_ttl_seconds"),
+        cache_enabled=(False if args.get("no_cache") else args.get("cache_enabled")),
         crossref_checkpoint_interval=args.get("crossref_checkpoint_interval"),
         unpaywall_checkpoint_interval=args.get("unpaywall_checkpoint_interval"),
         max_crossref_rows=args.get("max_crossref_rows"),
@@ -998,6 +1013,9 @@ TOOLS: dict[str, dict] = {
             "provider_workers": {"type": "integer", "required": False, "description": "Max provider worker threads"},
             "provider_failure_threshold": {"type": "integer", "required": False, "description": "Skip remaining provider calls after this many failures"},
             "provider_rate_limit_cooldown_seconds": {"type": "number", "required": False, "description": "Default cooldown for repeated calls to a rate-limited provider"},
+            "cache_dir": {"type": "string", "required": False, "description": "Workspace-local cache directory for provider failure state"},
+            "provider_failure_cache_ttl_seconds": {"type": "number", "required": False, "description": "TTL for cached provider failures"},
+            "no_cache": {"type": "boolean", "required": False, "description": "Disable provider failure cache for this call"},
             "output_csv": {"type": "string", "required": False, "description": "Unified candidate output CSV"},
             "trace_csv": {"type": "string", "required": False, "description": "Discovery trace CSV"},
             "report_md": {"type": "string", "required": False, "description": "Discovery report markdown"},
@@ -1204,6 +1222,11 @@ TOOLS: dict[str, dict] = {
             "provider_workers": {"type": "integer", "required": False, "description": "Max provider worker threads"},
             "provider_failure_threshold": {"type": "integer", "required": False, "description": "Skip remaining provider calls after this many failures"},
             "provider_rate_limit_cooldown_seconds": {"type": "number", "required": False, "description": "Default cooldown for repeated calls to a rate-limited provider"},
+            "cache_dir": {"type": "string", "required": False, "description": "Workspace-local cache directory"},
+            "cache_ttl_days": {"type": "number", "required": False, "description": "TTL for Crossref/Unpaywall metadata cache"},
+            "provider_failure_cache_ttl_seconds": {"type": "number", "required": False, "description": "TTL for cached provider failures"},
+            "cache_enabled": {"type": "boolean", "required": False, "description": "Enable or disable Litminer cache"},
+            "no_cache": {"type": "boolean", "required": False, "description": "Disable Litminer cache for this run"},
             "crossref_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Crossref progress every N rows"},
             "unpaywall_checkpoint_interval": {"type": "integer", "required": False, "description": "Write Unpaywall progress every N rows"},
             "max_crossref_rows": {"type": "integer", "required": False, "description": "Crossref row budget; remaining rows are marked skipped_budget"},
@@ -1231,6 +1254,22 @@ for _async_tool_name in ("litminer_start_run", "litminer_resume_run"):
     TOOLS[_async_tool_name]["parameters"] = dict(TOOLS["litminer_run_lit_search"]["parameters"])
 
 
+def _tool_profile() -> str:
+    raw = os.environ.get(MCP_TOOL_PROFILE_ENV, DEFAULT_MCP_TOOL_PROFILE).strip().lower()
+    if raw in {"", "default", "core"}:
+        return DEFAULT_MCP_TOOL_PROFILE
+    if raw in {"workflow", "all", "advanced", "debug"}:
+        return raw
+    return DEFAULT_MCP_TOOL_PROFILE
+
+
+def _visible_tool_names() -> list[str]:
+    profile = _tool_profile()
+    if profile in {"all", "advanced", "debug"}:
+        return list(TOOLS)
+    return [name for name in WORKFLOW_TOOL_NAMES if name in TOOLS]
+
+
 # JSON-RPC handler (MCP protocol subset)
 
 def handle_request(request: dict) -> dict | None:
@@ -1240,7 +1279,8 @@ def handle_request(request: dict) -> dict | None:
     # tools/list
     if method == "tools/list":
         tools_list = []
-        for name, tool in TOOLS.items():
+        for name in _visible_tool_names():
+            tool = TOOLS[name]
             properties = {
                 key: {k: v for k, v in schema.items() if k != "required"}
                 for key, schema in tool["parameters"].items()

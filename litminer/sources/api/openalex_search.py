@@ -194,6 +194,19 @@ def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
     return float(2 ** attempt)
 
 
+def _status_for_fetch_exception(exc: Exception | None) -> str:
+    text = str(exc or "").lower()
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, urllib.error.URLError) or any(
+        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
+    ):
+        return "network_error"
+    if isinstance(exc, json.JSONDecodeError):
+        return "response_parse_error"
+    return "error"
+
+
 def _fetch_json(url: str) -> dict:
     """Fetch URL with retries and backoff.
     Distinguishes transient errors (429 rate-limit) from permanent ones (403 auth, 409 credit exhaustion).
@@ -236,7 +249,13 @@ def _fetch_json(url: str) -> dict:
             http_status=429,
             transient=True,
         ) from last_error
-    raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {last_error}")
+    status = _status_for_fetch_exception(last_error)
+    raise ProviderSearchError(
+        f"OpenAlex request failed after {MAX_RETRIES} attempts: {last_error}",
+        status=status,
+        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
+        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
+    ) from last_error
 
 
 # Core search

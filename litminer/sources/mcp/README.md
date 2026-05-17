@@ -29,7 +29,31 @@ Smoke test:
 python -m litminer.sources.mcp.test_server
 ```
 
-## Tools
+## Primary Tools
+
+By default, `tools/list` uses `LITMINER_MCP_TOOL_PROFILE=workflow` and only
+advertises the workflow tools below. Set `LITMINER_MCP_TOOL_PROFILE=all` when
+you need lower-level source, stage, or debug tools.
+
+| Tool | Purpose |
+|------|---------|
+| `litminer_discover_api` | Run multi-query API discovery with candidate, trace, and report outputs. |
+| `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
+| `litminer_start_run` | Start a long workflow in the background and return a job ID. |
+| `litminer_run_status` | Poll background workflow status and read `agent_summary.json` when present. |
+| `litminer_resume_run` | Start a background workflow with resume enabled. |
+| `litminer_cancel_run` | Request cooperative cancellation for a background workflow. |
+| `litminer_semantic_triage` | Tag and rank rows with Agent-supplied concepts. |
+| `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
+| `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
+| `litminer_agent_summary` | Generate machine-readable run status, trust tiers, source strategy, artifacts, and next actions. |
+| `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
+| `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
+| `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
+
+## Stage-Specific And Debug Tools
+
+These are advertised only with `LITMINER_MCP_TOOL_PROFILE=all`.
 
 | Tool | Purpose |
 |------|---------|
@@ -43,25 +67,12 @@ python -m litminer.sources.mcp.test_server
 | `litminer_batch_crossref_title_search` | Search Crossref by multiple titles. |
 | `litminer_dedupe` | Deduplicate a candidate CSV by DOI, then title. |
 | `litminer_lookup_unpaywall` | Look up OA status and structured access links for one DOI. |
-| `litminer_discover_api` | Run multi-query API discovery with candidate, trace, and report outputs. |
-| `litminer_semantic_triage` | Tag and rank rows with Agent-supplied concepts. |
 | `litminer_filter_journal_metrics` | Annotate and filter candidates by verified local journal metrics. |
-| `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
 | `litminer_probe_publishers` | Resolve DOI landing pages and detect access/PDF/SI link status. |
 | `litminer_import_websearch` | Normalize WebSearch leads as unverified candidates. |
-| `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
-| `litminer_agent_summary` | Generate machine-readable run status, trust tiers, artifacts, and next actions. |
-| `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
-| `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
-| `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
-| `litminer_start_run` | Start a long workflow in the background and return a job ID. |
-| `litminer_run_status` | Poll background workflow status and read `agent_summary.json` when present. |
-| `litminer_resume_run` | Start a background workflow with resume enabled. |
-| `litminer_cancel_run` | Request cooperative cancellation for a background workflow. |
 | `litminer_validate_journal_metrics` | Validate metric CSV columns, source fields, numeric IF values, aliases, and ISSNs. |
 | `litminer_field_provenance` | Generate field-level source/trust provenance JSON for a CSV. |
 | `litminer_publisher_adapters` | List publisher inspection adapter capabilities and boundaries. |
-| `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
 
 ## Example: Run Workflow
 
@@ -97,16 +108,27 @@ to reuse completed stage CSVs. Resume is signature-checked against the prior
 query, concepts, year range, sources, and key workflow options. Use
 `provider_failure_threshold` to stop retrying a provider after repeated failures
 in one discovery run. Discovery trace rows include `status_class`,
-`retry_after_seconds`, and `next_action`; use
+`retry_after_seconds`, `cache_status`, and `next_action`; use
 `provider_rate_limit_cooldown_seconds` to avoid repeating calls to a
 rate-limited provider during the same run.
+`status_class=network` or `auth` points to environment/access setup rather than
+literature absence.
+The full workflow also uses a workspace-local cache for stable DOI metadata and
+short-lived transient provider failures. `skipped_cached_provider_failure`
+means a recent rate-limit/network/transient provider failure was reused to
+avoid an immediate repeated call; fix the environment and set
+`no_cache`/`cache_enabled=false`, or wait for the TTL. Auth and generic errors
+are not cached by default because they should be fixed and retried.
 
 For long runs, prefer `litminer_start_run` and poll with
 `litminer_run_status`. The workflow writes `query_plan.json`,
-`run_manifest.json`, `processing_report.md`, and `agent_summary.json` as it
-progresses. Use `time_budget_seconds`, `stop_after_stage`,
+`run_manifest.json`, `processing_report.md`, `agent_summary.json`, and
+`artifacts_index.json` as it progresses or finalizes. Use
+`time_budget_seconds`, `stop_after_stage`,
 `max_crossref_rows`, `max_unpaywall_rows`, and `max_publisher_probe_rows` to
 bound cost and latency.
+Inspect `query_plan.json.source_strategy` for missing recommended sources and
+retrieval risk flags before deciding whether to broaden a search.
 
 ## Workspace Diagnostics
 

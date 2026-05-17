@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from litminer.engine import api_discovery
 from litminer.engine import agent_summary
+from litminer.engine import artifacts
 from litminer.engine import bootstrap
 from litminer.engine import build_publisher_queue
 from litminer.engine import common
@@ -1088,19 +1089,22 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertIn("result", response)
             self.assertTrue((workspace / "out" / "deduped.csv").exists())
 
-    def test_mcp_lists_new_agent_summary_tools(self) -> None:
-        response = mcp_server.handle_request({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {},
-        })
+    def test_mcp_default_profile_lists_workflow_tools_only(self) -> None:
+        with patch.dict(os.environ, {"LITMINER_MCP_TOOL_PROFILE": "workflow"}):
+            response = mcp_server.handle_request({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {},
+            })
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertIn("litminer_batch_verify_crossref", names)
+        self.assertIn("litminer_run_lit_search", names)
         self.assertIn("litminer_agent_summary", names)
         self.assertIn("litminer_read_csv_summary", names)
         self.assertIn("litminer_workspace_doctor", names)
+        self.assertNotIn("litminer_batch_verify_crossref", names)
+        self.assertNotIn("litminer_search_openalex", names)
 
     def test_doctor_workspace_report_explains_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1412,6 +1416,304 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(report["workspace_root"], str(tmp_path.resolve()))
         self.assertTrue(any(row["name"] == "http_heuristic" for row in publisher_adapters.adapter_rows()))
 
+    def test_artifacts_index_groups_agent_primary_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "agent_summary.json").write_text("{}\n", encoding="utf-8")
+            (tmp_path / "processing_report.md").write_text("# Report\n", encoding="utf-8")
+            (tmp_path / "query_plan.json").write_text("{}\n", encoding="utf-8")
+
+            index_path = artifacts.write_index(tmp_path)
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+
+        self.assertIn("primary", index["by_tier"])
+        self.assertIn("agent_summary", index["by_tier"]["primary"])
+        self.assertTrue(any(item["name"] == "query_plan" and item["exists"] for item in index["artifacts"]))
+
+    def test_query_plan_includes_advisory_source_strategy(self) -> None:
+        plan = query_plan.build_plan(
+            queries=["clinical enzyme stability validation"],
+            year_from=2026,
+            required_concepts=["validation=external validation"],
+            discovery_sources=["openalex"],
+            controls={"max_results_per_query": 50, "semantic_query_limit": 1},
+            mode="fast",
+        )
+
+        strategy = plan["source_strategy"]
+        self.assertIn("biomedical", strategy["domain_tags"])
+        self.assertIn("europe_pmc", strategy["missing_recommended_sources"])
+        self.assertIn("semantic_scholar", strategy["missing_recommended_sources"])
+        self.assertIn("single_query_low_recall_risk", strategy["risk_flags"])
+        self.assertEqual(strategy["request_estimate"]["provider_calls"], 1)
+
+    def test_agent_summary_surfaces_source_strategy_and_primary_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            query_plan.write_plan(
+                tmp_path,
+                query_plan.build_plan(
+                    queries=["machine learning enzyme stability"],
+                    required_concepts=["validation=external validation"],
+                    discovery_sources=["openalex"],
+                    mode="fast",
+                ),
+            )
+
+            summary = agent_summary.build_summary(tmp_path)
+
+        self.assertIn("source_strategy", summary)
+        self.assertIn("primary_artifacts", summary)
+        self.assertIn("query_plan", summary["primary_artifacts"])
+        self.assertIn("query_plan", summary["artifacts"])
+        self.assertNotIn("artifacts_index", summary)
+        self.assertIn("missing_recommended_sources", summary["source_strategy"])
+
+    def test_api_discovery_classifies_network_provider_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            output = tmp_path / "candidates.csv"
+            trace = tmp_path / "trace.csv"
+            error = ProviderSearchError("certificate verify failed", status="network_error", transient=True)
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=error):
+                result = api_discovery.discover_api(
+                    ["query"],
+                    output,
+                    sources=["openalex"],
+                    trace_csv=trace,
+                )
+
+            self.assertEqual(result["provider_status_classes"]["network"], 1)
+            with trace.open(encoding="utf-8", newline="") as handle:
+                trace_rows = list(csv.DictReader(handle))
+            self.assertEqual(trace_rows[0]["status_class"], "network")
+            self.assertIn("network", trace_rows[0]["next_action"])
+
+    def test_api_discovery_uses_short_lived_provider_failure_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "cache"
+            first_trace = tmp_path / "trace1.csv"
+            second_trace = tmp_path / "trace2.csv"
+            error = ProviderSearchError("Too Many Requests", status="rate_limited", retry_after_seconds=30)
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=error) as provider:
+                api_discovery.discover_api(
+                    ["query"],
+                    tmp_path / "candidates1.csv",
+                    sources=["semantic_scholar"],
+                    trace_csv=first_trace,
+                    provider_failure_cache_dir=cache_dir,
+                    provider_failure_cache_ttl_seconds=300,
+                )
+                api_discovery.discover_api(
+                    ["query"],
+                    tmp_path / "candidates2.csv",
+                    sources=["semantic_scholar"],
+                    trace_csv=second_trace,
+                    provider_failure_cache_dir=cache_dir,
+                    provider_failure_cache_ttl_seconds=300,
+                )
+
+            self.assertEqual(provider.call_count, 1)
+            with second_trace.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["status"], "skipped_cached_provider_failure")
+            self.assertEqual(rows[0]["cache_status"], "hit")
+
+    def test_api_discovery_does_not_cache_auth_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "cache"
+            first_trace = tmp_path / "trace1.csv"
+            second_trace = tmp_path / "trace2.csv"
+            error = ProviderSearchError("Forbidden", status="auth_error", http_status=403, transient=False)
+
+            with patch("litminer.engine.api_discovery.run_provider", side_effect=error) as provider:
+                api_discovery.discover_api(
+                    ["query"],
+                    tmp_path / "candidates1.csv",
+                    sources=["openalex"],
+                    trace_csv=first_trace,
+                    provider_failure_cache_dir=cache_dir,
+                    provider_failure_cache_ttl_seconds=300,
+                )
+                api_discovery.discover_api(
+                    ["query"],
+                    tmp_path / "candidates2.csv",
+                    sources=["openalex"],
+                    trace_csv=second_trace,
+                    provider_failure_cache_dir=cache_dir,
+                    provider_failure_cache_ttl_seconds=300,
+                )
+
+            self.assertEqual(provider.call_count, 2)
+            with second_trace.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["status"], "auth_error")
+            self.assertEqual(rows[0]["cache_status"], "")
+
+    def test_unpaywall_missing_email_rows_are_not_reused_when_email_is_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "oa.csv"
+            input_csv.write_text(
+                "title,doi\nPaper,10.1234/a\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                unpaywall_lookup.annotate_csv(input_csv, output_csv, email=None, sleep_s=0)
+
+            fake_result = {
+                "status": "ok",
+                "error": "",
+                "data": {
+                    "is_oa": False,
+                    "oa_status": "closed",
+                    "oa_locations": [],
+                    "best_oa_location": None,
+                    "doi_url": "https://doi.org/10.1234/a",
+                },
+            }
+            with patch("litminer.sources.api.unpaywall_lookup.lookup_doi", return_value=fake_result) as lookup:
+                unpaywall_lookup.annotate_csv(input_csv, output_csv, email="agent@example.org", sleep_s=0)
+
+            self.assertEqual(lookup.call_count, 1)
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["unpaywall_status"], "ok")
+
+    def test_unpaywall_cache_reuses_stable_doi_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "oa.csv"
+            cache_dir = tmp_path / "cache"
+            input_csv.write_text("title,doi\nPaper,10.1234/a\n", encoding="utf-8")
+            fake_result = {
+                "status": "ok",
+                "error": "",
+                "data": {
+                    "is_oa": True,
+                    "oa_status": "green",
+                    "oa_locations": [{"url": "https://repo.example/item"}],
+                    "best_oa_location": {"url": "https://repo.example/item"},
+                    "doi_url": "https://doi.org/10.1234/a",
+                },
+            }
+
+            with patch("litminer.sources.api.unpaywall_lookup.lookup_doi", return_value=fake_result) as lookup:
+                first = unpaywall_lookup.annotate_csv(
+                    input_csv,
+                    output_csv,
+                    email="agent@example.org",
+                    sleep_s=0,
+                    cache_dir=cache_dir,
+                    cache_ttl_days=30,
+                )
+                second = unpaywall_lookup.annotate_csv(
+                    input_csv,
+                    output_csv.with_name("oa2.csv"),
+                    email=None,
+                    sleep_s=0,
+                    cache_dir=cache_dir,
+                    cache_ttl_days=30,
+                )
+
+            self.assertEqual(lookup.call_count, 1)
+            self.assertEqual(first["cache_store"], 1)
+            self.assertEqual(second["cache_hit"], 1)
+
+    def test_crossref_missing_doi_rows_are_retried_when_title_lookup_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "verified.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "Recoverable Paper,,2026,Journal A\n",
+                encoding="utf-8",
+            )
+            output_csv.write_text(
+                "title,doi,publication_year,journal,crossref_status,crossref_verified,crossref_mismatches\n"
+                "Recoverable Paper,,2026,Journal A,missing_doi,false,NO_DOI\n",
+                encoding="utf-8",
+            )
+            candidates = [{
+                "crossref_doi": "10.1234/recovered",
+                "crossref_title": "Recoverable Paper",
+                "crossref_container": "Journal A",
+                "crossref_year": "2026",
+            }]
+
+            with patch("litminer.sources.api.crossref_verify.search_by_title", return_value=candidates) as search:
+                crossref_verify.verify_csv(input_csv, output_csv, title_lookup=True, checkpoint_interval=0)
+
+            self.assertEqual(search.call_count, 1)
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["crossref_status"], "title_recovered")
+            self.assertEqual(rows[0]["doi"], "10.1234/recovered")
+
+    def test_crossref_batch_marks_network_errors_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "verified.csv"
+            input_csv.write_text(
+                "title,doi\nPaper,10.1234/a\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "litminer.sources.api.crossref_verify.verify_doi",
+                side_effect=crossref_verify.CrossrefRequestError("certificate failed", status="network_error"),
+            ):
+                counts = crossref_verify.verify_csv(input_csv, output_csv, checkpoint_interval=0)
+
+            self.assertEqual(counts["network_error"], 1)
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["crossref_status"], "network_error")
+            self.assertEqual(rows[0]["crossref_verified"], "false")
+
+    def test_crossref_cache_reuses_doi_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "verified.csv"
+            cache_dir = tmp_path / "cache"
+            input_csv.write_text("title,doi\nPaper,10.1234/a\n", encoding="utf-8")
+            meta = {
+                "crossref_doi": "10.1234/a",
+                "crossref_title": "Paper",
+                "crossref_container": "",
+                "crossref_year": "",
+            }
+
+            with patch("litminer.sources.api.crossref_verify.verify_doi", return_value=meta) as verify:
+                first = crossref_verify.verify_csv(
+                    input_csv,
+                    output_csv,
+                    checkpoint_interval=0,
+                    cache_dir=cache_dir,
+                    cache_ttl_days=30,
+                )
+                second = crossref_verify.verify_csv(
+                    input_csv,
+                    output_csv.with_name("verified2.csv"),
+                    checkpoint_interval=0,
+                    cache_dir=cache_dir,
+                    cache_ttl_days=30,
+                )
+
+            self.assertEqual(verify.call_count, 1)
+            self.assertEqual(first["cache_store"], 1)
+            self.assertEqual(second["cache_hit"], 1)
+
     def test_manifest_does_not_treat_json_as_csv_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1498,12 +1800,16 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(result["status"], "partial")
             self.assertTrue((out_dir / "query_plan.json").exists())
             self.assertTrue((out_dir / "triaged_candidates.csv").exists())
+            self.assertTrue((out_dir / "artifacts_index.json").exists())
+            self.assertEqual(result["artifacts_index"], str(out_dir / "artifacts_index.json"))
             manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["run_status"], "partial")
             self.assertIn("stop_reason", manifest)
+            self.assertTrue(manifest["cache"]["enabled"])
             summary = json.loads((out_dir / "agent_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["run_status"], "partial")
             self.assertTrue(summary["partial"])
+            self.assertIn("artifact_tiers", summary)
             self.assertIn("Resume the run", summary["next_actions"][0])
 
     def test_run_marks_rate_limited_discovery_as_partial_stage(self) -> None:
@@ -1707,13 +2013,14 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(unpaywall_rows[1]["unpaywall_status"], "skipped_budget")
             self.assertFalse(any("10.1234/b" in key for key in unpaywall_cached))
 
-    def test_mcp_lists_async_and_governance_tools(self) -> None:
-        response = mcp_server.handle_request({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/list",
-            "params": {},
-        })
+    def test_mcp_all_profile_lists_advanced_tools(self) -> None:
+        with patch.dict(os.environ, {"LITMINER_MCP_TOOL_PROFILE": "all"}):
+            response = mcp_server.handle_request({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {},
+            })
 
         names = {tool["name"] for tool in response["result"]["tools"]}
         for name in {
@@ -1725,6 +2032,8 @@ class LitminerCoreTests(unittest.TestCase):
             "litminer_validate_journal_metrics",
             "litminer_field_provenance",
             "litminer_publisher_adapters",
+            "litminer_search_openalex",
+            "litminer_batch_verify_crossref",
         }:
             self.assertIn(name, names)
 

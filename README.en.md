@@ -136,7 +136,7 @@ The config file is usually user-level `~/.codex/config.toml` or project-level `.
 command = "python"
 args = ["C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"]
 cwd = "D:/path/to/your/project"
-env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project" }
+env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project", LITMINER_MCP_TOOL_PROFILE = "workflow" }
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
@@ -152,6 +152,12 @@ Template files are available:
 
 - Codex MCP: [config/mcp.codex.example.toml](config/mcp.codex.example.toml)
 - Claude Code MCP: [config/mcp.claude.example.json](config/mcp.claude.example.json)
+
+MCP defaults to `LITMINER_MCP_TOOL_PROFILE=workflow`, so `tools/list` exposes
+only the workflow tools for environment checks, long runs, resume, discovery,
+triage, queueing, reports, summaries, and paginated CSV reading. Set
+`LITMINER_MCP_TOOL_PROFILE=all` only when an Agent needs lower-level source,
+stage, or debug tools. See [references/mcp-surface.md](references/mcp-surface.md).
 
 Official references:
 
@@ -287,6 +293,12 @@ The default runtime config is [config/default.json](config/default.json). Do not
     "default_output_dir": ".litminer/runs/litminer_run",
     "screenshot_root": ".litminer/screenshots"
   },
+  "cache": {
+    "enabled": true,
+    "cache_dir": ".litminer/cache",
+    "ttl_days": 30.0,
+    "provider_failure_ttl_seconds": 300.0
+  },
   "evidence": {
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",
@@ -342,6 +354,7 @@ Publisher-related settings:
 - `queue_strict_only` / `--queue-strict-only` / `--queue-all-metric-statuses`: with `--min-if`, Litminer defaults to queueing only metric-pass rows. Use queue-all mode when you want annotation without hard filtering.
 - `publisher_probe` / `--probe-publishers`: lightweight reachability and PDF/SI-link probing only. It does not parse PDFs or bypass paywalls.
 - `publisher_probe_limit` / `--probe-limit` and `publisher_probe_sleep` / `--probe-sleep`: control probe count and delay to avoid hitting publisher pages too aggressively.
+- `cache.enabled` / `--no-cache`: workspace-local cache for positive Crossref/Unpaywall DOI metadata and short-lived transient provider failures. Failed, not-found, mismatch, auth, and generic error rows are not treated as long-lived evidence. Cache is operational acceleration, not evidence.
 
 ## Quick Start
 
@@ -362,7 +375,7 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 
 `litminer.engine.run_lit_search` performs:
 
-1. Runtime query/source/concept planning.
+1. Runtime query/source/concept planning with advisory source strategy.
 2. API discovery, OpenAlex by default.
 3. DOI/title deduplication with complementary-field merging.
 4. Crossref verification and title-based DOI recovery.
@@ -370,7 +383,7 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 6. Unpaywall OA/access-link annotation.
 7. Optional verified journal metric annotation.
 8. Publisher-page evidence queue generation.
-9. Field-level provenance, feasibility, and processing reports.
+9. Field-level provenance, feasibility, processing reports, and artifact index.
 
 ## Main Outputs
 
@@ -389,11 +402,17 @@ The query and concepts are examples. In normal use, the Agent derives them from 
 | `publisher_queue_probed.csv` | Optional access/PDF/SI probe output. |
 | `feasibility_report.md` | Counts and blocking reasons. |
 | `processing_report.md` | Compact source, metadata, triage, access, and queue summary. |
-| `agent_summary.json` | Machine-readable trust tiers, stage status, artifact paths, and next actions. |
-| `query_plan.json` | Agent-derived queries, sources, concepts, and run controls. |
+| `agent_summary.json` | Machine-readable trust tiers, stage status, primary artifacts, source strategy, and next actions. |
+| `artifacts_index.json` | Primary/supporting/debug artifact map for Agent navigation. |
+| `query_plan.json` | Agent-derived queries, sources, concepts, run controls, and advisory source strategy. |
 | `field_provenance.json` | Field-level source and trust map for queued or probed rows. |
 | `publisher_adapters.json` | Built-in/external publisher inspection adapter boundaries. |
 | `run_manifest.json` | Stage status, resume metadata, row counts, fingerprints, and run signature. |
+
+`query_plan.json` includes `source_strategy` hints such as missing recommended
+sources, single-query recall risk, weak triage concepts, and metadata-lag risk.
+These hints do not automatically broaden retrieval; the Agent decides whether
+the user's task justifies another source pass.
 
 ## Boundaries
 
@@ -417,10 +436,12 @@ Use explicit run controls for long or uncertain tasks:
 - `--stop-after-stage STAGE`: write partial reports after a named stage.
 - `--max-crossref-rows N` / `--max-unpaywall-rows N`: mark overflow rows as `skipped_budget`.
 - `--max-publisher-probe-rows N`: cap publisher probing when `--probe-limit` is not set.
+- `--no-cache`: bypass local metadata/failure cache after fixing network, proxy, API key, or contact-email setup.
 
 Common cases:
 
-- API request failure or rate limit: reduce `max_results_per_query`, use fewer sources, and retry later; do not treat an empty failed source as final evidence.
+- API request failure or rate limit: inspect `api_discovery_trace.csv` fields `status_class`, `http_status`, `transient_error`, and `next_action`. `rate_limited` usually means resume later or reduce request volume; `network` / `auth` usually means Agent network permission, proxy/certificate, API key, or contact-email setup. Do not treat an empty failed source as final evidence.
+- `api_discovery_trace.csv` reports `skipped_cached_provider_failure`: a recent rate-limit, network, or explicitly transient provider failure was reused to avoid immediately repeating a failing call. Wait for the TTL or rerun with `--no-cache` after the environment is fixed. Auth and generic errors are not cached by default.
 - Unpaywall reports `skipped_missing_email`: set `UNPAYWALL_EMAIL` or `LITMINER_CONTACT_EMAIL`, then rerun.
 - Crossref reports `lookup_failed` or `mismatch`: keep the blocking status; do not fabricate DOI values. Broaden discovery or verify manually when needed.
 - Publisher pages are unreachable: lower `--probe-limit`, increase `--probe-sleep`, or skip probing and inspect `publisher_queue.csv` manually.

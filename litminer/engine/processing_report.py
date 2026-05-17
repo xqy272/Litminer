@@ -14,6 +14,8 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from litminer.engine import artifacts
+from litminer.engine import status_policy
 from litminer.engine.common import normalize_doi, read_csv_rows, write_text_atomic
 
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$", re.I)
@@ -75,6 +77,16 @@ def metadata_health(rows: list[dict[str, str]]) -> dict[str, int]:
 
 def read_manifest(output_dir: Path) -> dict:
     path = output_dir / "run_manifest.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_json_object(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
@@ -151,9 +163,12 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "field_provenance": output_dir / "field_provenance.json",
         "publisher_adapters": output_dir / "publisher_adapters.json",
         "agent_summary": output_dir / "agent_summary.json",
+        "artifacts_index": output_dir / artifacts.INDEX_NAME,
     }
     rows = {name: read_rows(path) if path.suffix == ".csv" else [] for name, path in paths.items()}
     manifest = read_manifest(output_dir)
+    query_plan = read_json_object(paths["query_plan"])
+    source_strategy = query_plan.get("source_strategy") if isinstance(query_plan.get("source_strategy"), dict) else {}
 
     candidate_rows = (
         rows["oa"] or rows["verified"] or rows["selected"] or
@@ -172,6 +187,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "api", "api_trace", "deduped", "triaged", "selected", "verified",
         "oa", "metrics", "queue", "probed", "query_plan", "field_provenance",
         "publisher_adapters", "agent_summary",
+        "artifacts_index",
     ]:
         path = paths[name]
         if path.exists():
@@ -181,6 +197,33 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
                 lines.append(f"- {path.name}: present")
     if manifest:
         lines.append(f"- run_manifest.json: {len(manifest.get('stages', []))} stage records")
+        cache_config = manifest.get("cache") if isinstance(manifest.get("cache"), dict) else {}
+        stages = manifest.get("stages") if isinstance(manifest.get("stages"), list) else []
+        if stages:
+            lines.extend(["", "## Stage Recovery Semantics", ""])
+            for stage in stages[-12:]:
+                if not isinstance(stage, dict):
+                    continue
+                name = str(stage.get("name") or "")
+                status = str(stage.get("status") or "")
+                if not name:
+                    continue
+                lines.append(
+                    f"- {name}: {status} "
+                    f"({status_policy.classify_status(status)}; {status_policy.next_action(status)})"
+                )
+            lines.append("")
+        if cache_config:
+            lines.extend([
+                "## Cache And Recovery",
+                "",
+                f"- enabled: {cache_config.get('enabled')}",
+                f"- cache_dir: `{cache_config.get('cache_dir', '')}`",
+                f"- ttl_days: {cache_config.get('ttl_days')}",
+                f"- provider_failure_ttl_seconds: {cache_config.get('provider_failure_ttl_seconds')}",
+                "- Cache entries are local retrieval hints; they are not evidence and do not replace run artifacts.",
+                "",
+            ])
     if len(rows["api"]) and len(rows["deduped"]):
         lines.append(f"- duplicates_or_removed_before_dedupe: {max(0, len(rows['api']) - len(rows['deduped']))}")
 
@@ -195,7 +238,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
 
     if rows["api_trace"]:
         lines.extend(["## Discovery Trace Health", ""])
-        for field in ["provider", "status", "status_class", "next_action"]:
+        for field in ["provider", "status", "status_class", "http_status", "transient_error", "cache_status", "next_action"]:
             lines.extend([f"### `{field}`", "", *table(count_values(rows["api_trace"], field)), ""])
         problem_rows = [
             row for row in rows["api_trace"]
@@ -219,7 +262,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         crossref_rows = rows["verified"]
         if crossref_rows:
             lines.extend(["## Crossref Verification", ""])
-            for field in ["crossref_status", "crossref_verified", "crossref_lookup_method"]:
+            for field in ["crossref_status", "crossref_verified", "crossref_lookup_method", "crossref_cache_status"]:
                 lines.extend([f"### `{field}`", "", *table(count_values(crossref_rows, field)), ""])
 
     if rows["triaged"]:
@@ -230,7 +273,10 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
     access_rows = rows["probed"] or rows["queue"] or rows["oa"]
     if access_rows:
         lines.extend(["## Access And OA Hints", ""])
-        for field in ["unpaywall_status", "is_oa", "oa_status", "access_status", "html_status", "pdf_status", "si_status"]:
+        for field in [
+            "unpaywall_status", "unpaywall_cache_status", "is_oa", "oa_status",
+            "access_status", "html_status", "pdf_status", "si_status",
+        ]:
             counter = count_values(access_rows, field)
             if counter:
                 lines.extend([f"### `{field}`", "", *table(counter), ""])
@@ -240,14 +286,46 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         lines.extend(table(count_values(rows["queue"], "next_action"), limit=8))
         lines.append("")
 
-    if paths["query_plan"].exists() or paths["field_provenance"].exists() or paths["publisher_adapters"].exists():
+    artifact_index = artifacts.build_index(output_dir)
+    if artifact_index.get("by_tier"):
+        lines.extend(["## Artifact Tiers", ""])
+        for tier in ("primary", "supporting", "debug"):
+            names = artifact_index.get("by_tier", {}).get(tier, [])
+            if names:
+                lines.append(f"- {tier}: {', '.join(str(name) for name in names)}")
+        lines.append("")
+
+    if (
+        paths["query_plan"].exists()
+        or paths["field_provenance"].exists()
+        or paths["publisher_adapters"].exists()
+        or paths["artifacts_index"].exists()
+    ):
         lines.extend(["## Agent Control Artifacts", ""])
+        if paths["artifacts_index"].exists():
+            lines.append("- `artifacts_index.json`: compact map of primary, supporting, and debug artifacts.")
         if paths["query_plan"].exists():
             lines.append("- `query_plan.json`: runtime query/source/concept plan derived by the Agent.")
         if paths["field_provenance"].exists():
             lines.append("- `field_provenance.json`: field-level source/trust map for queued or probed rows.")
         if paths["publisher_adapters"].exists():
             lines.append("- `publisher_adapters.json`: built-in and external publisher-inspection adapter boundary.")
+        lines.append("")
+
+    if source_strategy:
+        lines.extend(["## Source Strategy", ""])
+        selected = source_strategy.get("selected_sources") or []
+        recommended = source_strategy.get("recommended_sources") or []
+        missing = source_strategy.get("missing_recommended_sources") or []
+        risk_flags = source_strategy.get("risk_flags") or []
+        if selected:
+            lines.append(f"- selected_sources: {', '.join(str(item) for item in selected)}")
+        if recommended:
+            lines.append(f"- recommended_sources: {', '.join(str(item) for item in recommended)}")
+        if missing:
+            lines.append(f"- missing_recommended_sources: {', '.join(str(item) for item in missing)}")
+        if risk_flags:
+            lines.append(f"- risk_flags: {', '.join(str(item) for item in risk_flags)}")
         lines.append("")
 
     lines.extend([

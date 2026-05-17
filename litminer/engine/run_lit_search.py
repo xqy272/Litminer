@@ -31,7 +31,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from litminer.engine import api_discovery
 from litminer.engine import agent_summary
+from litminer.engine import artifacts
 from litminer.engine import build_publisher_queue
+from litminer.engine import cache as cache_helpers
 from litminer.engine import dedupe_papers
 from litminer.engine import journal_metrics
 from litminer.engine import merge_csv
@@ -85,6 +87,12 @@ RUNTIME_DEFAULTS = {
     "outputs": {
         "default_output_dir": workspace.DEFAULT_RUN_DIR,
         "screenshot_root": workspace.DEFAULT_SCREENSHOT_ROOT,
+    },
+    "cache": {
+        "enabled": True,
+        "cache_dir": cache_helpers.DEFAULT_CACHE_DIR,
+        "ttl_days": cache_helpers.DEFAULT_TTL_DAYS,
+        "provider_failure_ttl_seconds": cache_helpers.DEFAULT_PROVIDER_FAILURE_TTL_SECONDS,
     },
     "evidence": {
         "require_doi_for_queue": True,
@@ -186,6 +194,7 @@ class RuntimeConfig:
     outputs: dict[str, Any] = field(default_factory=dict)
     evidence: dict[str, Any] = field(default_factory=dict)
     api: dict[str, Any] = field(default_factory=dict)
+    cache: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_path(cls, path: Path | None = None, mode: str | None = None) -> "RuntimeConfig":
@@ -201,6 +210,7 @@ class RuntimeConfig:
             outputs=dict(raw.get("outputs", {})),
             evidence=dict(raw.get("evidence", {})),
             api=dict(raw.get("api", {})),
+            cache=dict(raw.get("cache", {})),
         )
 
     def output_path(self, key: str, default: str) -> Path:
@@ -242,6 +252,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     limits = config.limits
     evidence = config.evidence
     api = config.api
+    cache_config = config.cache
 
     if getattr(args, "output_dir", None) is None:
         args.output_dir = config.output_path("default_output_dir", workspace.DEFAULT_RUN_DIR)
@@ -314,6 +325,21 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.provider_failure_threshold = limits.get("provider_failure_threshold")
     if getattr(args, "provider_rate_limit_cooldown_seconds", None) is None:
         args.provider_rate_limit_cooldown_seconds = float(limits.get("provider_rate_limit_cooldown_seconds", 60.0))
+    if getattr(args, "cache_enabled", None) is None:
+        args.cache_enabled = bool(cache_config.get("enabled", True))
+    if getattr(args, "cache_dir", None) is None:
+        args.cache_dir = workspace.resolve_workspace_path(
+            cache_config.get("cache_dir") or cache_helpers.DEFAULT_CACHE_DIR
+        )
+    if getattr(args, "cache_ttl_days", None) is None:
+        args.cache_ttl_days = float(cache_config.get("ttl_days", cache_helpers.DEFAULT_TTL_DAYS))
+    if getattr(args, "provider_failure_cache_ttl_seconds", None) is None:
+        args.provider_failure_cache_ttl_seconds = float(
+            cache_config.get(
+                "provider_failure_ttl_seconds",
+                cache_helpers.DEFAULT_PROVIDER_FAILURE_TTL_SECONDS,
+            )
+        )
 
     if getattr(args, "queue_priorities", None) is None:
         args.queue_priorities = evidence.get("queue_priorities") or "high,medium,needs_review"
@@ -522,6 +548,9 @@ def discover(args: argparse.Namespace, out_dir: Path,
         provider_workers=args.provider_workers,
         provider_failure_threshold=args.provider_failure_threshold,
         provider_rate_limit_cooldown_seconds=args.provider_rate_limit_cooldown_seconds,
+        provider_failure_cache_dir=args.cache_dir,
+        provider_failure_cache_enabled=args.cache_enabled,
+        provider_failure_cache_ttl_seconds=args.provider_failure_cache_ttl_seconds,
         trace_csv=out_dir / "api_discovery_trace.csv",
         report_md=out_dir / "api_discovery_report.md",
         run_id=manifest.get("run_id") if manifest else None,
@@ -531,7 +560,11 @@ def discover(args: argparse.Namespace, out_dir: Path,
         discovery_status = "partial_rate_limited"
         discovery_message = "One or more discovery providers were rate limited; resume later with the same output_dir."
     elif isinstance(status_classes, dict) and (
-        status_classes.get("error") or status_classes.get("partial") or status_classes.get("skipped")
+        status_classes.get("auth")
+        or status_classes.get("network")
+        or status_classes.get("error")
+        or status_classes.get("partial")
+        or status_classes.get("skipped")
     ):
         discovery_status = "partial_source_failure"
         discovery_message = "One or more discovery providers failed or were skipped; inspect api_discovery_trace.csv."
@@ -714,11 +747,20 @@ def write_query_plan_artifact(
         discovery_sources=sources,
         mode=getattr(args, "mode", None) or "custom/default",
         controls={
+            "max_results_per_query": getattr(args, "max_results_per_query", None),
+            "semantic_query_limit": getattr(args, "semantic_query_limit", None),
+            "semantic_max_results": getattr(args, "semantic_max_results", None),
+            "parallel_providers": getattr(args, "parallel_providers", None),
+            "provider_failure_threshold": getattr(args, "provider_failure_threshold", None),
+            "provider_rate_limit_cooldown_seconds": getattr(args, "provider_rate_limit_cooldown_seconds", None),
             "time_budget_seconds": getattr(args, "time_budget_seconds", None),
             "stop_after_stage": getattr(args, "stop_after_stage", None),
             "max_crossref_rows": getattr(args, "max_crossref_rows", None),
             "max_unpaywall_rows": getattr(args, "max_unpaywall_rows", None),
             "max_publisher_probe_rows": getattr(args, "max_publisher_probe_rows", None),
+            "cache_enabled": getattr(args, "cache_enabled", None),
+            "cache_ttl_days": getattr(args, "cache_ttl_days", None),
+            "provider_failure_cache_ttl_seconds": getattr(args, "provider_failure_cache_ttl_seconds", None),
         },
     )
     path = query_plan.write_plan(out_dir, plan)
@@ -792,7 +834,9 @@ def finalize_run(
         manifest["stop_reason"] = stop_reason
     manifest["completed_at"] = workflow_state.utc_now()
     workflow_state.write_manifest(out_dir, manifest)
+    artifact_index_path = artifacts.write_index(out_dir)
     refresh_processing_report(out_dir, warnings=warnings)
+    artifact_index_path = artifacts.write_index(out_dir)
     return {
         "status": run_status,
         "output_dir": str(out_dir),
@@ -805,6 +849,7 @@ def finalize_run(
         "publisher_adapters": str(out_dir / "publisher_adapters.json"),
         "publisher_queue": str(publisher_queue or out_dir / "publisher_queue.csv"),
         "run_manifest": str(workflow_state.manifest_path(out_dir)),
+        "artifacts_index": str(artifact_index_path),
     }
 
 
@@ -954,6 +999,9 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
         counts["crossref_title_lookup_failed"] = status_counts.get("title_lookup_failed", 0)
         counts["crossref_rate_limited"] = status_counts.get("rate_limited", 0)
         counts["crossref_skipped_budget"] = status_counts.get("skipped_budget", 0)
+        cache_counts = count_field_values(output_path, "crossref_cache_status")
+        counts["crossref_cache_hit"] = cache_counts.get("hit", 0)
+        counts["crossref_cache_store"] = cache_counts.get("store", 0)
         record_manifest_stage(
             out_dir,
             manifest,
@@ -972,6 +1020,9 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
         title_lookup=True,
         checkpoint_interval=args.crossref_checkpoint_interval,
         max_rows=getattr(args, "max_crossref_rows", None),
+        cache_dir=args.cache_dir,
+        cache_ttl_days=args.cache_ttl_days,
+        cache_enabled=args.cache_enabled,
     )
     counts["crossref_verified"] = crossref_counts.get("verified", 0)
     counts["crossref_title_recovered"] = crossref_counts.get("title_recovered", 0)
@@ -981,6 +1032,8 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
     counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
     counts["crossref_rate_limited"] = crossref_counts.get("rate_limited", 0)
     counts["crossref_skipped_budget"] = crossref_counts.get("skipped_budget", 0)
+    counts["crossref_cache_hit"] = crossref_counts.get("cache_hit", 0)
+    counts["crossref_cache_store"] = crossref_counts.get("cache_store", 0)
     if counts["crossref_skipped_budget"]:
         crossref_stage_status = "partial_budget"
         crossref_message = "Rows beyond --max-crossref-rows were marked skipped_budget"
@@ -1098,6 +1151,9 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
         counts["unpaywall_rate_limited"] = status_counts.get("rate_limited", 0)
         counts["unpaywall_error"] = status_counts.get("error", 0)
         counts["unpaywall_skipped_budget"] = status_counts.get("skipped_budget", 0)
+        cache_counts = count_field_values(output_path, "unpaywall_cache_status")
+        counts["unpaywall_cache_hit"] = cache_counts.get("hit", 0)
+        counts["unpaywall_cache_store"] = cache_counts.get("store", 0)
         record_manifest_stage(
             out_dir,
             manifest,
@@ -1116,6 +1172,9 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
         sleep_s=args.unpaywall_sleep,
         checkpoint_interval=args.unpaywall_checkpoint_interval,
         max_rows=getattr(args, "max_unpaywall_rows", None),
+        cache_dir=args.cache_dir,
+        cache_ttl_days=args.cache_ttl_days,
+        cache_enabled=args.cache_enabled,
     )
     counts["unpaywall_ok"] = unpaywall_counts.get("ok", 0)
     counts["unpaywall_skipped_missing_email"] = unpaywall_counts.get("skipped_missing_email", 0)
@@ -1124,6 +1183,8 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
     counts["unpaywall_rate_limited"] = unpaywall_counts.get("rate_limited", 0)
     counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
     counts["unpaywall_skipped_budget"] = unpaywall_counts.get("skipped_budget", 0)
+    counts["unpaywall_cache_hit"] = unpaywall_counts.get("cache_hit", 0)
+    counts["unpaywall_cache_store"] = unpaywall_counts.get("cache_store", 0)
     if counts["unpaywall_skipped_budget"]:
         unpaywall_stage_status = "partial_budget"
         unpaywall_message = "Rows beyond --max-unpaywall-rows were marked skipped_budget"
@@ -1341,6 +1402,13 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         signature=signature,
         signature_payload=signature_payload,
     )
+    manifest["cache"] = {
+        "enabled": bool(getattr(args, "cache_enabled", True)),
+        "cache_dir": str(getattr(args, "cache_dir", "")),
+        "ttl_days": getattr(args, "cache_ttl_days", None),
+        "provider_failure_ttl_seconds": getattr(args, "provider_failure_cache_ttl_seconds", None),
+        "scope": "workspace_local_metadata_and_short_lived_provider_failures",
+    }
     if getattr(args, "resume_allow_mismatch", False):
         manifest["resume_mismatch_allowed"] = True
         manifest["resume_mismatch_reason"] = str(getattr(args, "resume_mismatch_reason", "") or "").strip()
@@ -1750,6 +1818,16 @@ def main() -> None:
                         help="Skip remaining calls for a provider after this many failed calls in one discovery run")
     parser.add_argument("--provider-rate-limit-cooldown-seconds", type=float, default=None,
                         help="Default cooldown for repeated calls to a rate-limited discovery provider")
+    parser.add_argument("--cache-dir", type=Path, default=None,
+                        help="Workspace-local JSON cache directory for metadata and short-lived provider failure state")
+    parser.add_argument("--cache-ttl-days", type=float, default=None,
+                        help="TTL in days for Crossref/Unpaywall metadata cache")
+    parser.add_argument("--provider-failure-cache-ttl-seconds", type=float, default=None,
+                        help="TTL in seconds for discovery provider failure cache")
+    parser.add_argument("--no-cache", dest="cache_enabled", action="store_false", default=None,
+                        help="Disable Litminer cache for this run")
+    parser.add_argument("--cache", dest="cache_enabled", action="store_true",
+                        help="Enable Litminer cache for this run")
     parser.add_argument("--enrich-unpaywall", action="store_true", default=None,
                         help="Annotate verified DOI rows with Unpaywall OA links")
     parser.add_argument("--skip-unpaywall", action="store_true", default=None,
@@ -1798,6 +1876,7 @@ def main() -> None:
     print(f"Query plan: {result['query_plan']}", file=sys.stderr)
     print(f"Field provenance: {result['field_provenance']}", file=sys.stderr)
     print(f"Run manifest: {result['run_manifest']}", file=sys.stderr)
+    print(f"Artifacts index: {result['artifacts_index']}", file=sys.stderr)
 
 
 if __name__ == "__main__":

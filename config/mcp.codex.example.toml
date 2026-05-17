@@ -2,7 +2,7 @@
 command = "python"
 args = ["C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"]
 cwd = "D:/path/to/your/project"
-env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project" }
+env = { LITMINER_WORKSPACE_ROOT = "D:/path/to/your/project", LITMINER_MCP_TOOL_PROFILE = "workflow" }
 env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
