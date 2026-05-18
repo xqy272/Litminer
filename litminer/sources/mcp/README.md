@@ -40,7 +40,7 @@ you need lower-level source, stage, or debug tools.
 | `litminer_discover_api` | Run multi-query API discovery with candidate, trace, and report outputs. |
 | `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
 | `litminer_start_run` | Start a long workflow in the background and return a job ID. |
-| `litminer_run_status` | Poll background workflow status and read `agent_summary.json` when present. |
+| `litminer_run_status` | Poll background workflow status, `next_actions`, and `agent_summary.json` when present. |
 | `litminer_resume_run` | Start a background workflow with resume enabled. |
 | `litminer_cancel_run` | Request cooperative cancellation for a background workflow. |
 | `litminer_semantic_triage` | Tag and rank rows with Agent-supplied concepts. |
@@ -129,6 +129,9 @@ For long runs, prefer `litminer_start_run` and poll with
 bound cost and latency.
 Inspect `query_plan.json.source_strategy` for missing recommended sources and
 retrieval risk flags before deciding whether to broaden a search.
+Follow `next_actions` returned by `litminer_run_lit_search` and
+`litminer_run_status` before retrying, broadening sources, or scanning large
+CSV files.
 
 ## Workspace Diagnostics
 

@@ -151,10 +151,16 @@ Litminer 不做这些事：
 ## 更多文档
 
 - [用户指南](references/user-guide.md)：安装细节、配置、MCP、运行和排错。
+- [Artifact 契约](references/artifact-contracts.md)：Agent 可依赖的稳定输出契约。
+- [CSV 字段字典](references/csv-fields.md)：字段含义、生成阶段和信任等级。
+- [Agent 安全规则](references/agent-safety.md)：外部页面和 prompt injection 防误用规则。
 - [Agent 工作流](references/agent-workflow.md)：Agent 应如何规划查询、选择来源和交付结果。
 - [运行与恢复](references/runtime-recovery.md)：resume、budget、cache 和 provider 失败语义。
 - [质量与证据规则](references/quality-and-evidence.md)：Trust Tiers、语义初筛和证据边界。
 - [MCP 工具面](references/mcp-surface.md)：工具 profile、workspace 规则和 JSON-RPC 示例。
+- [发布 checklist](references/release-checklist.md)：轻量 release tag 发布流程。
+- [最小示例](examples/README.md)：本地 CSV 端到端示例。
+- [Agent evals](evals/README.md)：小型 Agent 行为检查。
 - [SKILL.md](SKILL.md)：Agent 读取的 skill 入口。
 - [CLAUDE.md](CLAUDE.md)：更详细的 Agent 操作指南。
 
@@ -168,6 +174,8 @@ Litminer/
 |-- config/
 |-- litminer/
 |-- references/
+|-- examples/
+|-- evals/
 `-- test/
 ```
 

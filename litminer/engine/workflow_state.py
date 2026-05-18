@@ -69,10 +69,12 @@ def new_manifest(
     prior = existing or {}
     run_id = prior.get("run_id") or datetime.now(timezone.utc).strftime("workflow_%Y%m%dT%H%M%SZ")
     mode = getattr(args, "mode", None) or "custom/default"
+    started_at = prior.get("started_at") or prior.get("created_at") or utc_now()
     return {
         "schema_version": 1,
         "run_id": run_id,
-        "created_at": prior.get("created_at") or utc_now(),
+        "created_at": prior.get("created_at") or started_at,
+        "started_at": started_at,
         "updated_at": utc_now(),
         "mode": mode,
         "resume_enabled": bool(getattr(args, "resume", False)),
@@ -135,6 +137,8 @@ def record_stage(
         "status": status,
         "input": _path_text(input_path),
         "output": _path_text(output_path),
+        "input_path": _path_text(input_path),
+        "output_path": _path_text(output_path),
         "input_sha256": file_sha256(input_path),
         "output_sha256": file_sha256(output_path),
         "output_fields": csv_fieldnames(output_path),

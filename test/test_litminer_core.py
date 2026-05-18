@@ -34,6 +34,7 @@ from litminer.engine import query_plan
 from litminer.engine import processing_report
 from litminer.engine import run_lit_search
 from litminer.engine import semantic_triage
+from litminer.engine import source_strategy
 from litminer.engine import websearch_import
 from litminer.engine import workspace
 from litminer.engine import workflow_state
@@ -685,8 +686,8 @@ class LitminerCoreTests(unittest.TestCase):
             workspace_root = Path(tmp)
             input_csv = workspace_root / "input.csv"
             input_csv.write_text(
-                "title,doi,publication_year,journal,abstract\n"
-                "Paper,,2026,Journal A,Reports external validation.\n",
+                "title,doi,publication_year,journal,abstract,landing_page_url\n"
+                "Paper,,2026,Journal A,Reports external validation,https://example.org/paper\n",
                 encoding="utf-8",
             )
             config_path = workspace_root / "config.json"
@@ -717,11 +718,20 @@ class LitminerCoreTests(unittest.TestCase):
                     "allow_missing_doi": True,
                     "skip_crossref": True,
                     "skip_unpaywall": True,
+                    "include_semantic_scholar": True,
                 })
 
             self.assertEqual(Path(result["output_dir"]), configured_run)
+            self.assertEqual(result["run_status"], "completed")
+            self.assertIn("next_actions", result)
+            self.assertIn("read_agent_summary_json", result["next_actions"])
+            self.assertNotIn("use_as_verified_for_this_stage", result["next_actions"])
             self.assertTrue((configured_run / "processing_report.md").exists())
             self.assertTrue((configured_run / "run_manifest.json").exists())
+            plan = json.loads((configured_run / "query_plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["discovery_sources"], [])
+            self.assertEqual(plan["source_strategy"]["source_selection"]["selection_origin"], "input_csv")
+            self.assertEqual(plan["source_strategy"]["source_selection"]["configured_sources"], [])
 
     def test_run_resume_reuses_existing_stage_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1474,7 +1484,12 @@ class LitminerCoreTests(unittest.TestCase):
             year_from=2026,
             required_concepts=["validation=external validation"],
             discovery_sources=["openalex"],
-            controls={"max_results_per_query": 50, "semantic_query_limit": 1},
+            controls={
+                "max_results_per_query": 50,
+                "semantic_query_limit": 1,
+                "discovery_sources_origin": "explicit",
+                "configured_discovery_sources": "openalex",
+            },
             mode="fast",
         )
 
@@ -1484,6 +1499,29 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIn("semantic_scholar", strategy["missing_recommended_sources"])
         self.assertIn("single_query_low_recall_risk", strategy["risk_flags"])
         self.assertEqual(strategy["request_estimate"]["provider_calls"], 1)
+        self.assertEqual(strategy["source_selection"]["selection_origin"], "explicit")
+        self.assertFalse(strategy["source_selection"]["automatic_expansion"])
+        self.assertIn("europe_pmc", strategy["source_selection"]["not_enabled_reasons"])
+
+    def test_source_strategy_configured_sources_include_flags(self) -> None:
+        strategy = source_strategy.build_strategy(
+            queries=["clinical validation llm"],
+            selected_sources=["semantic_scholar"],
+            required_concepts=["validation=external validation"],
+            controls={
+                "discovery_sources_origin": "explicit",
+                "configured_discovery_sources": "openalex",
+                "skip_openalex": True,
+                "include_semantic_scholar": True,
+            },
+            mode="fast",
+        )
+
+        selection = strategy["source_selection"]
+        self.assertEqual(selection["raw_configured_sources"], ["openalex"])
+        self.assertEqual(selection["configured_sources"], ["semantic_scholar"])
+        self.assertIn("openalex", selection["recommended_not_selected"])
+        self.assertEqual(selection["not_enabled_reasons"]["openalex"], "disabled by skip_openalex")
 
     def test_agent_summary_surfaces_source_strategy_and_primary_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1762,6 +1800,8 @@ class LitminerCoreTests(unittest.TestCase):
             workflow_state.record_stage(manifest, "query_plan", "completed", output_path=output)
 
             self.assertEqual(manifest["stages"][0]["output_fields"], [])
+            self.assertIn("output_path", manifest["stages"][0])
+            self.assertEqual(manifest["stages"][0]["output"], manifest["stages"][0]["output_path"])
 
     def test_json_cache_read_modify_write_preserves_other_writers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1856,7 +1896,9 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(result["artifacts_index"], str(out_dir / "artifacts_index.json"))
             manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["run_status"], "partial")
+            self.assertIn("started_at", manifest)
             self.assertIn("stop_reason", manifest)
+            self.assertIn("output_path", manifest["stages"][0])
             self.assertTrue(manifest["cache"]["enabled"])
             summary = json.loads((out_dir / "agent_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["run_status"], "partial")
@@ -2177,6 +2219,7 @@ class LitminerCoreTests(unittest.TestCase):
                     "mode": "fast",
                     "stop_after_stage": "dedupe",
                 })
+                self.assertIn("poll_litminer_run_status", start["next_actions"])
                 for _ in range(50):
                     status = mcp_server.tool_run_status({"job_id": start["job_id"]})
                     if status["status"] in {"completed", "partial", "failed"}:
@@ -2184,6 +2227,9 @@ class LitminerCoreTests(unittest.TestCase):
                     time.sleep(0.05)
 
                 self.assertEqual(status["status"], "partial")
+                self.assertIn("read_agent_summary_json", status["next_actions"])
+                self.assertIn("inspect_agent_summary_next_actions_before_resume", status["next_actions"])
+                self.assertNotIn("use_as_verified_for_this_stage", status["next_actions"])
                 self.assertTrue((root / "run" / "query_plan.json").exists())
 
                 with mcp_server._jobs_lock:

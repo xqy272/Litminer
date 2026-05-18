@@ -72,6 +72,10 @@ must be verified before promotion.
 Inspect `query_plan.json.source_strategy` after each run. Treat
 `missing_recommended_sources` and `risk_flags` as advisory retrieval-gap hints,
 not automatic source changes.
+Use `source_strategy.source_selection` to distinguish sources selected for the
+current run from advisory recommendations. Litminer does not silently expand
+sources; `automatic_expansion` should remain false unless a future release
+explicitly changes that behavior.
 
 ## Stage Interpretation
 
@@ -100,6 +104,9 @@ full-text dataset.
 
 Read `agent_summary.json` first. It gives run status, trust tiers, artifact
 read order, provider health, cache state, and next actions.
+
+For stable machine-readable contracts, see `artifact-contracts.md` and
+`csv-fields.md`.
 
 Read `processing_report.md` second for human-readable status and counts.
 

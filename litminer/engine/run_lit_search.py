@@ -280,6 +280,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         if channels.get("europe_pmc", False):
             sources.append("europe_pmc")
         args.discovery_sources = ",".join(sources) or "openalex"
+    args.discovery_sources_origin = "config" if discovery_sources_from_config else "explicit"
     if getattr(args, "include_semantic_scholar", None) is None:
         args.include_semantic_scholar = bool(channels.get("semantic_scholar", False)) if discovery_sources_from_config else False
     if getattr(args, "include_arxiv", None) is None:
@@ -777,6 +778,12 @@ def write_query_plan_artifact(
     sources: list[str],
     manifest: dict[str, Any] | None = None,
 ) -> Path:
+    from_input_csv = bool(getattr(args, "input_csv", None))
+    discovery_sources_origin = (
+        "input_csv"
+        if from_input_csv
+        else getattr(args, "discovery_sources_origin", "unknown")
+    )
     plan = query_plan.build_plan(
         queries=queries,
         year_from=args.year_from,
@@ -801,6 +808,13 @@ def write_query_plan_artifact(
             "cache_enabled": getattr(args, "cache_enabled", None),
             "cache_ttl_days": getattr(args, "cache_ttl_days", None),
             "provider_failure_cache_ttl_seconds": getattr(args, "provider_failure_cache_ttl_seconds", None),
+            "discovery_sources_origin": discovery_sources_origin,
+            "configured_discovery_sources": None if from_input_csv else getattr(args, "discovery_sources", None),
+            "input_csv": str(getattr(args, "input_csv", "") or ""),
+            "skip_openalex": getattr(args, "skip_openalex", None),
+            "include_semantic_scholar": getattr(args, "include_semantic_scholar", None),
+            "include_arxiv": getattr(args, "include_arxiv", None),
+            "include_europe_pmc": getattr(args, "include_europe_pmc", None),
         },
     )
     path = query_plan.write_plan(out_dir, plan)
@@ -1512,10 +1526,13 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     strict_path: Path | None = None
     backup_path: Path | None = None
 
-    try:
-        sources = selected_discovery_sources(args)
-    except SystemExit:
+    if args.input_csv:
         sources = []
+    else:
+        try:
+            sources = selected_discovery_sources(args)
+        except SystemExit:
+            sources = []
     write_query_plan_artifact(out_dir, args, queries, sources, manifest=manifest)
     should_stop, stop_reason = should_stop_after(args, "query_plan", started_at)
     if should_stop:

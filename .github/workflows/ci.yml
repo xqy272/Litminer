@@ -26,6 +26,8 @@ jobs:
         run: python -m mypy litminer
       - name: Test
         run: python -m unittest discover -s test -p "test_*.py"
+      - name: MCP self-test
+        run: python -m litminer.sources.mcp.test_server
       - name: Doctor
         run: python -m litminer.engine.doctor --config config/example.user.json
       - name: Offline Smoke

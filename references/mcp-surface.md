@@ -42,8 +42,8 @@ Listed by default:
 | `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
 | `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
 | `litminer_run_lit_search` | Run the full workflow synchronously. |
-| `litminer_start_run` | Start the full workflow as a background job. |
-| `litminer_run_status` | Poll background job state and read summaries when present. |
+| `litminer_start_run` | Start the full workflow as a background job and return `next_actions`. |
+| `litminer_run_status` | Poll background job state, `next_actions`, and summaries when present. |
 | `litminer_resume_run` | Start a background run with resume enabled. |
 | `litminer_cancel_run` | Request cooperative job cancellation. |
 | `litminer_discover_api` | Run multi-query API discovery with trace/report outputs. |
@@ -55,6 +55,8 @@ Listed by default:
 
 Prefer `litminer_start_run` plus `litminer_run_status` for long retrieval.
 Use `litminer_run_lit_search` only when synchronous execution is acceptable.
+Follow returned `next_actions` before retrying, broadening sources, or loading
+large CSV files.
 
 ## Advanced Tools
 

@@ -167,6 +167,53 @@ def _risk_flags(
     return flags
 
 
+def _source_selection(
+    *,
+    selected_sources: list[str],
+    recommended: list[str],
+    controls: dict[str, Any],
+) -> dict[str, Any]:
+    missing = [source for source in recommended if source not in selected_sources]
+    origin = str(controls.get("discovery_sources_origin") or "unknown")
+    raw_configured = _normalize_sources(controls.get("configured_discovery_sources") or selected_sources)
+    effective_configured = list(raw_configured)
+    if origin != "input_csv":
+        if controls.get("skip_openalex"):
+            effective_configured = [source for source in effective_configured if source != "openalex"]
+        include_flags = {
+            "semantic_scholar": controls.get("include_semantic_scholar"),
+            "arxiv": controls.get("include_arxiv"),
+            "europe_pmc": controls.get("include_europe_pmc"),
+        }
+        for source, enabled in include_flags.items():
+            if enabled and source not in effective_configured:
+                effective_configured.append(source)
+    not_enabled_reasons: dict[str, str] = {}
+    for source in missing:
+        if origin == "input_csv":
+            reason = "API discovery was skipped because the workflow started from input_csv"
+        elif source == "openalex" and controls.get("skip_openalex"):
+            reason = "disabled by skip_openalex"
+        elif origin == "explicit":
+            reason = "not included in caller-selected discovery_sources or include flags"
+        elif origin == "config":
+            reason = "not enabled by runtime config channels"
+        else:
+            reason = "not selected for this run"
+        not_enabled_reasons[source] = reason
+    return {
+        "selected_sources": selected_sources,
+        "selection_origin": origin,
+        "configured_sources": effective_configured,
+        "raw_configured_sources": raw_configured,
+        "effective_configured_sources": effective_configured,
+        "recommended_sources": recommended,
+        "recommended_not_selected": missing,
+        "not_enabled_reasons": not_enabled_reasons,
+        "automatic_expansion": False,
+    }
+
+
 def estimate_discovery_calls(
     queries: list[str],
     selected_sources: list[str],
@@ -225,6 +272,11 @@ def build_strategy(
         "selected_sources": normalized_sources,
         "recommended_sources": recommended,
         "missing_recommended_sources": missing,
+        "source_selection": _source_selection(
+            selected_sources=normalized_sources,
+            recommended=recommended,
+            controls=controls,
+        ),
         "provider_roles": {
             source: PROVIDER_ROLES.get(source, {
                 "role": "caller_selected_source",

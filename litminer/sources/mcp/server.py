@@ -122,6 +122,39 @@ def _load_persisted_job(job_id: str) -> dict[str, Any]:
     return data
 
 
+def _mcp_next_actions(job: dict[str, Any]) -> list[str]:
+    status = str(job.get("status") or "")
+    actions: list[str] = []
+    if status in {"queued", "running", "cancelling"}:
+        actions.append("poll_litminer_run_status")
+    if status == "queued":
+        actions.append("wait_for_background_worker_to_start")
+    elif status == "running":
+        actions.append("wait_for_stage_boundary_or_cancel_if_needed")
+    elif status == "cancelling":
+        actions.append("wait_for_stage_boundary_cancellation")
+    elif status == "failed":
+        actions.append("inspect_error_and_traceback_if_debug_enabled")
+    elif status == "interrupted":
+        actions.append("start_resume_run_with_same_output_dir")
+
+    summary = job.get("agent_summary")
+    if isinstance(summary, dict):
+        for item in summary.get("next_actions") or []:
+            text = str(item).strip()
+            if text and text not in actions:
+                actions.append(text)
+    elif job.get("agent_summary_path"):
+        actions.append("read_agent_summary_when_available")
+
+    if status in {"completed", "partial"}:
+        actions.append("read_agent_summary_json")
+        actions.append("read_processing_report_md")
+    if status == "partial" and "inspect_agent_summary_next_actions_before_resume" not in actions:
+        actions.append("inspect_agent_summary_next_actions_before_resume")
+    return actions
+
+
 def _lazy_import(module_path: str):
     """Return a thread-safe getter that imports a module on first use."""
     module: Any | None = None
@@ -838,7 +871,19 @@ def tool_run_lit_search(args: dict) -> dict:
     ns = _run_namespace(args)
     result = mod.run(ns)
     run_status = result.pop("status", "completed")
-    return {"status": "ok", "run_status": run_status, **result}
+    summary_path = Path(str(result.get("output_dir") or "")) / "agent_summary.json"
+    summary: dict[str, Any] = {}
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            summary = {}
+    next_actions = _mcp_next_actions({
+        "status": run_status,
+        "agent_summary": summary,
+        "agent_summary_path": str(summary_path),
+    })
+    return {"status": "ok", "run_status": run_status, "next_actions": next_actions, **result}
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any]:
@@ -859,6 +904,7 @@ def _job_snapshot(job_id: str) -> dict[str, Any]:
                 job["agent_summary_path"] = str(summary_path)
         else:
             job["agent_summary_path"] = str(summary_path)
+    job["next_actions"] = _mcp_next_actions(job)
     return job
 
 
@@ -911,6 +957,7 @@ def tool_start_run(args: dict) -> dict:
         "job_id": job_id,
         "output_dir": str(getattr(ns, "output_dir", "") or ""),
         "status_tool": "litminer_run_status",
+        "next_actions": ["poll_litminer_run_status"],
     }
 
 
