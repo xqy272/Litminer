@@ -9,6 +9,8 @@
 > `litminer_start_run` / `litminer_run_status` 这类后台任务工具，适合长检索。
 > 首次或 Windows 环境不确定时，先运行 `python -m litminer.engine.bootstrap`。
 
+当前分发方式很简单：完整仓库就是 skill 包。建议从 GitHub clone 使用，稳定版本看 [CHANGELOG.md](CHANGELOG.md) 并固定到 release tag；`pip install -e .` 只作为开发和命令行入口的可选方式。
+
 Litminer 是一个面向 AI Agent 的科研文献信息获取 skill。它不是综述生成器，也不是 PDF 阅读器；它提供的是一套可复用、可追踪、可验证的文献发现和处理操作契约，让 Claude Code、Codex 等 Agent 不必只依赖通用 WebSearch/WebFetch 来处理科研检索任务。
 
 一句话定位：Litminer 负责把“什么时候检索、怎么检索、如何核验、怎样记录失败、交付哪些证据文件”变成 Agent 可执行的 skill；最终科学判断仍由 Agent 和用户完成。
@@ -49,6 +51,30 @@ Litminer 首先是 skill，而不是单纯的命令行工具或 Python 包。项
 ## 先接入 Skill
 
 Litminer 的根目录已经包含 `SKILL.md`，因此整个项目目录就是 skill 目录。最小安装就是把仓库 clone 到 Agent 会扫描的 skills 目录；这个步骤只会写入该目录下的项目文件，不会执行 `pip install`，也不会修改全局 Python 环境。只有当 Agent 真正运行 Litminer 脚本或 MCP 服务时，才需要本机有 Python 3.10+。
+
+### 版本选择与更新
+
+如果你想跟随最新开发版，直接 clone 默认分支：
+
+```bash
+git clone https://github.com/xqy272/Litminer.git ~/.agents/skills/litminer
+```
+
+如果你想使用稳定版本，优先选择 GitHub release tag。发布 `v0.1.0` 后，可以这样固定版本：
+
+```bash
+git clone --branch v0.1.0 --depth 1 https://github.com/xqy272/Litminer.git ~/.agents/skills/litminer
+```
+
+已安装用户更新时，在 Litminer 目录内运行：
+
+```bash
+git pull --ff-only
+python -m litminer.engine.bootstrap
+python -m litminer.engine.offline_smoke
+```
+
+跨版本更新前先看 [CHANGELOG.md](CHANGELOG.md)。如果你把 Litminer 安装在项目级 `.agents/skills/` 或 `.claude/skills/` 下，也建议把该目录按普通 Git 仓库管理，而不是手工复制文件。
 
 ### 接入 Claude Code
 
@@ -116,7 +142,7 @@ git clone https://github.com/xqy272/Litminer.git .agents/skills/litminer
 用 Litminer 查找某主题的近年论文，要求验证 DOI、标注 OA 链接，并输出 publisher queue。
 ```
 
-Codex 也提供 `$skill-installer`，可以从其他仓库下载 skill；但本项目文档推荐直接 `git clone`，因为路径明确、便于审查和更新。`[[skills.config]]` 主要用于对已发现的 skill 做启用/禁用覆盖，不是安装 Litminer 的必要步骤。后续如果希望提供真正的一键安装、MCP 配置打包或更完整的分发元数据，应把 Litminer 进一步打包为 Codex plugin。
+Codex 也提供 `$skill-installer`，可以从其他仓库下载 skill；但本项目文档推荐直接 `git clone`，因为路径明确、便于审查和更新。`[[skills.config]]` 主要用于对已发现的 skill 做启用/禁用覆盖，不是安装 Litminer 的必要步骤。
 
 ### 安装后配置与检查
 
@@ -267,7 +293,13 @@ Litminer 把“安装目录”和“运行工作区”分开处理：
 - MCP 模式下，所有文件参数都必须位于 `LITMINER_WORKSPACE_ROOT` 内；未设置时必须位于 MCP 进程 `cwd` 内。路径逃逸会被拒绝。
 - 用户显式传入 `--output-dir`、`--output`、MCP 工具参数或绝对路径时，Litminer 会尊重该显式选择；这类情况不属于默认落点承诺。
 
-因此，推荐把 MCP 的 `LITMINER_WORKSPACE_ROOT` 指向目标项目根目录，并把目标项目的 `.litminer/` 加入 `.gitignore`。不建议把检索结果默认写进 skill 安装目录，否则多项目结果会和代码混在一起。
+因此，推荐把 MCP 的 `LITMINER_WORKSPACE_ROOT` 指向目标项目根目录，并把目标项目的 `.litminer/` 加入 `.gitignore`：
+
+```gitignore
+.litminer/
+```
+
+不建议把检索结果默认写进 skill 安装目录，否则多项目结果会和代码混在一起。
 
 ## Python 环境与污染控制
 
@@ -323,9 +355,9 @@ python -m pip install -e ".[dev]"
 
 `.venv/` 已在 `.gitignore` 中忽略。如果你配置 MCP，也可以把 MCP 的 `command` 指向 `.venv` 里的 Python，以保证运行环境稳定，例如 Windows 的 `.venv/Scripts/python.exe` 或 macOS/Linux 的 `.venv/bin/python`。
 
-当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`litminer/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。如果后续要做更干净的用户侧安装体验，应提供独立 release 包或 plugin，而不是依赖用户手工挑选文件。
+当前推荐 clone 完整仓库，而不是让用户手工只复制部分文件。Litminer 至少需要 `SKILL.md`、`litminer/`、`config/` 等文件共同工作；完整仓库也便于用户审查源码、运行测试和拉取更新。
 
-当前发布边界是“clone-as-skill 优先”。`pip install -e .` 适合本地开发和 console scripts，但普通 wheel 安装还不等同于完整 skill 安装，因为 Agent 发现仍需要 `SKILL.md`、配置模板和文档目录。除非后续发布独立 plugin/release 包，否则不要把 wheel 安装描述为完整的 Agent 接入方式。
+当前发布边界是“clone-as-skill 优先”。`pip install -e .` 适合本地开发和 console scripts，但普通 wheel 安装还不等同于完整 skill 安装，因为 Agent 发现仍需要 `SKILL.md`、配置模板和文档目录。
 
 ## API、来源与出版社配置
 
@@ -513,6 +545,8 @@ pipeline.bat "machine learning enzyme stability external validation" 2026
 
 上面的 query 和 concept 只是示例。实际使用时，Agent 应根据当前用户请求生成检索式和语义概念。
 
+`re:` 正则概念默认关闭；只有在使用已审查的可信 profile 时，才通过 `--enable-regex-concepts` 或 MCP 的 `enable_regex_concepts` 显式开启。
+
 首次建议先用 `--mode fast` 跑通路径和语义概念；确认候选方向正确后，再用 `--mode balanced` 或 `--mode expanded`（`full` 作为兼容别名）扩大验证与召回。需要 arXiv 或 Europe PMC 时由 Agent 按领域显式加 `--include-arxiv` 或 `--include-europe-pmc`。也可以从已有候选续跑：
 
 ```bash
@@ -596,6 +630,8 @@ python -m litminer.engine.semantic_triage \
   --year-from 2026 \
   --require-doi
 ```
+
+如果 concept 或 profile 中确实需要 `re:` 正则表达式，必须额外传入 `--enable-regex-concepts`；默认行为会把 `re:` 当作不可信输入拒绝。
 
 构建出版社页面证据队列：
 

@@ -28,6 +28,8 @@ def classify_status(status: str) -> str:
         return "empty_or_missing"
     if normalized in BUDGET_STATUSES:
         return "budget_limited"
+    if normalized in {"missing_email", "skipped_missing_email"} or "missing_email" in normalized:
+        return "auth"
     if normalized.startswith("skipped"):
         return "skipped"
     if (

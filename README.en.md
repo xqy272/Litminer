@@ -13,9 +13,42 @@ Litminer is not a review writer, a domain knowledge base, or a PDF reader. It di
 `litminer_start_run` / `litminer_run_status`. On a new or Windows-heavy
 environment, start with `python -m litminer.engine.bootstrap`.
 
+Distribution is intentionally simple: the full repository is the skill bundle.
+Clone it from GitHub, use release tags for stable versions, and check
+[CHANGELOG.md](CHANGELOG.md) before upgrading. `pip install -e .` is only an
+optional developer and console-script path.
+
 ## Connect The Skill First
 
 The repository root contains `SKILL.md`, so the repository directory itself is the skill folder. The minimum installation is cloning this repository into a skills directory that your Agent scans. That clone writes only the repository files into that directory; it does not run `pip install` and does not modify the global Python environment. Python 3.10+ is only needed when the Agent actually runs Litminer scripts or the optional MCP server.
+
+### Version Choice And Updates
+
+To follow the latest development version, clone the default branch:
+
+```bash
+git clone https://github.com/xqy272/Litminer.git ~/.agents/skills/litminer
+```
+
+For stable use, prefer GitHub release tags. After `v0.1.0` is published, pin it
+like this:
+
+```bash
+git clone --branch v0.1.0 --depth 1 https://github.com/xqy272/Litminer.git ~/.agents/skills/litminer
+```
+
+To update an existing install, run this from the Litminer directory:
+
+```bash
+git pull --ff-only
+python -m litminer.engine.bootstrap
+python -m litminer.engine.offline_smoke
+```
+
+Read [CHANGELOG.md](CHANGELOG.md) before crossing versions. If Litminer is
+installed under a project-level `.agents/skills/` or `.claude/skills/`
+directory, keep that folder as a normal Git checkout instead of copying files
+by hand.
 
 ### Claude Code
 
@@ -78,7 +111,7 @@ Restart or reload Codex skills after cloning, then invoke it naturally:
 Use Litminer to find recent papers, verify DOI metadata, annotate OA links, and build a publisher queue.
 ```
 
-Codex also provides `$skill-installer` for downloading skills from other repositories. This README documents direct `git clone` because it is explicit, auditable, and easy to update. `[[skills.config]]` is mainly for enable/disable overrides on discovered skills, not a required Litminer installation step. If Litminer later needs one-click installation, bundled MCP config, or richer distribution metadata, package it as a Codex plugin.
+Codex also provides `$skill-installer` for downloading skills from other repositories. This README documents direct `git clone` because it is explicit, auditable, and easy to update. `[[skills.config]]` is mainly for enable/disable overrides on discovered skills, not a required Litminer installation step.
 
 ### Post-Install Configuration And Check
 
@@ -96,6 +129,7 @@ Then restart or reload Claude Code / Codex skills and ask the Agent to use Litmi
 After installation, run a local check and offline smoke test from the Litminer directory:
 
 ```bash
+python -m litminer.engine.bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
 ```
@@ -177,7 +211,15 @@ Litminer separates the install directory from the runtime workspace:
 - In MCP mode, all file arguments must stay under `LITMINER_WORKSPACE_ROOT`; if unset, they must stay under the MCP process `cwd`. Path escapes are rejected.
 - Explicit `--output-dir`, `--output`, MCP tool arguments, and absolute paths are treated as explicit user choices and are outside the default-location guarantee.
 
-Recommended setup: point MCP `LITMINER_WORKSPACE_ROOT` at the target project root and add the target project's `.litminer/` to `.gitignore`. Avoid writing search outputs into the skill install directory by default, because multi-project outputs should not be mixed with code.
+Recommended setup: point MCP `LITMINER_WORKSPACE_ROOT` at the target project
+root and add the target project's `.litminer/` to `.gitignore`:
+
+```gitignore
+.litminer/
+```
+
+Avoid writing search outputs into the skill install directory by default,
+because multi-project outputs should not be mixed with code.
 
 ## Python Environment And Isolation
 
@@ -216,9 +258,9 @@ python -m pip install -e ".[dev]"
 
 `.venv/` is ignored by Git. If you configure MCP, you may point the MCP `command` at the virtualenv Python for stable execution, for example `.venv/Scripts/python.exe` on Windows or `.venv/bin/python` on macOS/Linux.
 
-The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `litminer/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward. If a cleaner user-side installation is needed later, publish a dedicated release package or plugin rather than relying on manual file selection.
+The current recommendation is to clone the full repository instead of asking users to copy a subset of files manually. Litminer needs `SKILL.md`, `litminer/`, `config/`, and related files to work reliably; the full repository also keeps source review, tests, and updates straightforward.
 
-The current distribution boundary is clone-as-skill first. `pip install -e .` is appropriate for local development and console scripts, but a regular wheel install is not yet a complete skill installation because Agent discovery still depends on `SKILL.md`, config templates, and documentation folders. Until a dedicated plugin or release bundle exists, do not present wheel installation as the full Agent onboarding path.
+The current distribution boundary is clone-as-skill first. `pip install -e .` is appropriate for local development and console scripts, but a regular wheel install is not yet a complete skill installation because Agent discovery still depends on `SKILL.md`, config templates, and documentation folders.
 
 ## API, Source, And Publisher Configuration
 
@@ -370,6 +412,10 @@ python -m litminer.engine.run_lit_search \
 ```
 
 The query and concepts are examples. In normal use, the Agent derives them from the user's request.
+
+`re:` regex concepts are disabled by default. Enable them only for reviewed
+trusted profiles with `--enable-regex-concepts` or the MCP
+`enable_regex_concepts` parameter.
 
 ## Workflow
 

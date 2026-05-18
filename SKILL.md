@@ -115,6 +115,10 @@ Use concept arguments as triage signals, not final deletion rules:
 For fragile semantics, use a JSON triage profile with expression operators such
 as `all_of`, `any_of`, `not`, `near`, and `not_near`.
 
+Caller-supplied `re:` regex concepts are disabled by default. Enable them only
+for reviewed trusted profiles with `--enable-regex-concepts` or the MCP
+`enable_regex_concepts` parameter.
+
 ## Primary Artifacts
 
 Read outputs in this order:

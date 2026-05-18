@@ -41,6 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from litminer import __version__
 from litminer.engine import workspace
+from litminer.engine.common import write_text_atomic
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION, "2024-11-05"}
@@ -66,6 +67,59 @@ WORKFLOW_TOOL_NAMES = [
 _import_lock = threading.Lock()
 _jobs_lock = threading.Lock()
 JOBS: dict[str, dict[str, Any]] = {}
+
+
+def _safe_job_id(job_id: str) -> str:
+    if not job_id or not all(ch.isalnum() or ch in "-_" for ch in job_id):
+        raise ValueError(f"invalid Litminer job_id: {job_id!r}")
+    return job_id
+
+
+def _job_record_path(job_id: str) -> Path:
+    return _workspace_root() / ".litminer" / "jobs" / f"{_safe_job_id(job_id)}.json"
+
+
+def _public_job_record(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"cancel_event", "thread"} and not key.startswith("_")
+    }
+
+
+def _persist_job_unlocked(job: dict[str, Any]) -> None:
+    job_id = str(job.get("job_id") or "")
+    if not job_id:
+        return
+    path = _job_record_path(job_id)
+    write_text_atomic(path, json.dumps(_public_job_record(job), indent=2, ensure_ascii=False) + "\n")
+
+
+def _update_job(job_id: str, **fields: Any) -> None:
+    with _jobs_lock:
+        if job_id not in JOBS:
+            raise ValueError(f"unknown Litminer job_id: {job_id}")
+        JOBS[job_id].update(fields)
+        _persist_job_unlocked(JOBS[job_id])
+
+
+def _load_persisted_job(job_id: str) -> dict[str, Any]:
+    path = _job_record_path(job_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if data.get("status") in {"queued", "running", "cancelling"}:
+        data = {
+            **data,
+            "status": "interrupted",
+            "note": "This job record was loaded from disk, but no live MCP worker owns it.",
+        }
+    return data
 
 
 def _lazy_import(module_path: str):
@@ -482,7 +536,8 @@ def tool_semantic_triage(args: dict) -> dict:
         year_to=args.get("year_to"),
         require_doi=args.get("require_doi", False),
         exclude_article_types=args.get("exclude_article_types") or [],
-        allow_regex=not args.get("disable_regex_concepts", False),
+        allow_regex=bool(args.get("enable_regex_concepts") or args.get("allow_regex_concepts", False))
+        and not bool(args.get("disable_regex_concepts", False)),
     )
     return {"status": "ok", "output": args["output_csv"], "counts": counts}
 
@@ -693,8 +748,9 @@ def tool_workspace_doctor(args: dict) -> dict:
         paths = [item.strip() for item in raw_paths.replace(";", ",").split(",") if item.strip()]
     else:
         paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    workspace_root = _optional_workspace_path(args.get("workspace_root"), "workspace_root")
     report = mod.workspace_report(
-        workspace=Path(args["workspace_root"]) if args.get("workspace_root") else None,
+        workspace=workspace_root,
         explain_paths=paths,
         create=bool(args.get("create_workspace", False)),
     )
@@ -729,6 +785,8 @@ def _run_namespace(args: dict):
         required_concept=args.get("required_concepts") or [],
         optional_concept=args.get("optional_concepts") or [],
         negative_concept=args.get("negative_concepts") or [],
+        allow_regex_concepts=bool(args.get("enable_regex_concepts") or args.get("allow_regex_concepts", False))
+        and not bool(args.get("disable_regex_concepts", False)),
         exclude_article_type=args.get("exclude_article_types") or [],
         queue_priorities=args.get("queue_priorities"),
         include_metadata_blocked=args.get("include_metadata_blocked"),
@@ -784,8 +842,11 @@ def tool_run_lit_search(args: dict) -> dict:
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any]:
+    job_id = _safe_job_id(str(job_id or ""))
     with _jobs_lock:
-        job = dict(JOBS.get(job_id) or {})
+        job = _public_job_record(JOBS.get(job_id) or {})
+    if not job:
+        job = _load_persisted_job(job_id)
     if not job:
         raise ValueError(f"unknown Litminer job_id: {job_id}")
     output_dir = job.get("output_dir")
@@ -803,22 +864,24 @@ def _job_snapshot(job_id: str) -> dict[str, Any]:
 
 def _run_job(job_id: str, ns: Any) -> None:
     mod = _get_engine_run_lit_search()
-    with _jobs_lock:
-        JOBS[job_id]["status"] = "running"
-        JOBS[job_id]["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _update_job(job_id, status="running", started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     try:
         result = mod.run(ns)
-        with _jobs_lock:
-            JOBS[job_id]["status"] = result.get("status", "completed")
-            JOBS[job_id]["result"] = result
-            JOBS[job_id]["output_dir"] = result.get("output_dir", JOBS[job_id].get("output_dir", ""))
-            JOBS[job_id]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _update_job(
+            job_id,
+            status=result.get("status", "completed"),
+            result=result,
+            output_dir=result.get("output_dir", _job_snapshot(job_id).get("output_dir", "")),
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
     except Exception as exc:
-        with _jobs_lock:
-            JOBS[job_id]["status"] = "failed"
-            JOBS[job_id]["error"] = str(exc)
-            JOBS[job_id]["traceback"] = traceback.format_exc() if os.environ.get("LITMINER_MCP_DEBUG_ERRORS") else ""
-            JOBS[job_id]["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _update_job(
+            job_id,
+            status="failed",
+            error=str(exc),
+            traceback=traceback.format_exc() if os.environ.get("LITMINER_MCP_DEBUG_ERRORS") else "",
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
 
 
 def tool_start_run(args: dict) -> dict:
@@ -827,15 +890,21 @@ def tool_start_run(args: dict) -> dict:
     if getattr(ns, "output_dir", None) is None:
         ns = _get_engine_run_lit_search().normalize_args(ns)
     job_id = str(uuid.uuid4())
+    cancel_event = threading.Event()
+    ns.cancel_check = cancel_event.is_set
     with _jobs_lock:
         JOBS[job_id] = {
             "job_id": job_id,
             "status": "queued",
             "output_dir": str(getattr(ns, "output_dir", "") or ""),
             "cancel_requested": False,
+            "cancel_event": cancel_event,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-    thread = threading.Thread(target=_run_job, args=(job_id, ns), daemon=True)
+        _persist_job_unlocked(JOBS[job_id])
+    thread = threading.Thread(target=_run_job, args=(job_id, ns), daemon=False)
+    with _jobs_lock:
+        JOBS[job_id]["thread"] = thread
     thread.start()
     return {
         "status": "queued",
@@ -867,8 +936,14 @@ def tool_cancel_run(args: dict) -> dict:
     with _jobs_lock:
         if job_id not in JOBS:
             raise ValueError(f"unknown Litminer job_id: {job_id}")
+        cancel_event = JOBS[job_id].get("cancel_event")
+        if isinstance(cancel_event, threading.Event):
+            cancel_event.set()
         JOBS[job_id]["cancel_requested"] = True
-    return {"status": "cancel_requested", "job_id": job_id, "note": "Engine stages are not interrupted mid-call."}
+        if JOBS[job_id].get("status") in {"queued", "running"}:
+            JOBS[job_id]["status"] = "cancelling"
+        _persist_job_unlocked(JOBS[job_id])
+    return {"status": "cancel_requested", "job_id": job_id, "note": "Engine will stop at the next stage boundary."}
 
 
 def tool_bootstrap(args: dict) -> dict:
@@ -1035,6 +1110,7 @@ TOOLS: dict[str, dict] = {
             "year_to": {"type": "integer", "required": False, "description": "Maximum publication year metadata flag"},
             "require_doi": {"type": "boolean", "required": False, "description": "Mark missing DOI as metadata-blocking"},
             "exclude_article_types": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Metadata article types to mark blocked"},
+            "enable_regex_concepts": {"type": "boolean", "required": False, "description": "Allow re: semantic concepts; disabled by default"},
             "disable_regex_concepts": {"type": "boolean", "required": False, "description": "Reject re: concepts instead of compiling caller regex"},
         },
     },
@@ -1203,6 +1279,7 @@ TOOLS: dict[str, dict] = {
             "required_concepts": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Required semantic concepts"},
             "optional_concepts": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Optional semantic concepts"},
             "negative_concepts": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Negative semantic tags"},
+            "enable_regex_concepts": {"type": "boolean", "required": False, "description": "Allow re: semantic concepts; disabled by default"},
             "exclude_article_types": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Metadata article types to mark blocked"},
             "queue_priorities": {"type": "string", "required": False, "description": "Comma-separated triage priorities"},
             "include_metadata_blocked": {"type": "boolean", "required": False, "description": "Also verify/queue metadata_status=blocked rows"},

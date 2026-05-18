@@ -35,6 +35,7 @@ from litminer.engine import artifacts
 from litminer.engine import build_publisher_queue
 from litminer.engine import cache as cache_helpers
 from litminer.engine import dedupe_papers
+from litminer.engine import doctor
 from litminer.engine import journal_metrics
 from litminer.engine import merge_csv
 from litminer.engine import publisher_probe
@@ -43,6 +44,7 @@ from litminer.engine import provenance
 from litminer.engine import publisher_adapters
 from litminer.engine import semantic_triage
 from litminer.engine import query_plan
+from litminer.engine import status_policy
 from litminer.engine import validate_stage
 from litminer.engine import workspace
 from litminer.engine import workflow_state
@@ -237,12 +239,20 @@ def deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
+def load_checked_runtime_config(path: Path) -> dict:
+    checks = doctor.validate_config(path)
+    errors = [check.message for check in checks if check.status == "error"]
+    if errors:
+        raise SystemExit(f"Runtime config validation failed for {path}: {'; '.join(errors)}")
+    return doctor.load_json(path)
+
+
 def load_runtime_config(path: Path | None = None) -> dict:
     config = dict(RUNTIME_DEFAULTS)
     if DEFAULT_CONFIG.exists():
-        config = deep_merge(config, json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8")))
+        config = deep_merge(config, load_checked_runtime_config(DEFAULT_CONFIG))
     if path:
-        config = deep_merge(config, json.loads(path.read_text(encoding="utf-8")))
+        config = deep_merge(config, load_checked_runtime_config(path))
     return config
 
 
@@ -352,6 +362,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.queue_strict_only = bool(
             min_if is not None and evidence.get("queue_strict_only", True)
         )
+    if getattr(args, "allow_regex_concepts", None) is None:
+        args.allow_regex_concepts = False
 
     if getattr(args, "openalex_api_key", None) is None:
         key_env = api.get("openalex_api_key_env") or "OPENALEX_API_KEY"
@@ -441,6 +453,7 @@ def run_signature_payload(args: argparse.Namespace, queries: list[str]) -> dict[
         "negative_concept": args.negative_concept or [],
         "exclude_article_type": args.exclude_article_type or [],
         "triage_profile": str(args.triage_profile.resolve(strict=False)) if args.triage_profile else "",
+        "allow_regex_concepts": bool(getattr(args, "allow_regex_concepts", False)),
     }
 
 
@@ -720,7 +733,16 @@ def budget_exceeded(args: argparse.Namespace, started_at: float) -> bool:
     return budget is not None and (time.monotonic() - started_at) >= budget
 
 
+def cancellation_requested(args: argparse.Namespace) -> bool:
+    cancel_check = getattr(args, "cancel_check", None)
+    if callable(cancel_check):
+        return bool(cancel_check())
+    return bool(getattr(args, "cancel_requested", False))
+
+
 def should_stop_after(args: argparse.Namespace, stage_name: str, started_at: float) -> tuple[bool, str]:
+    if cancellation_requested(args):
+        return True, f"Cancelled by background job request after stage: {stage_name}"
     requested = (getattr(args, "stop_after_stage", None) or "").strip()
     if requested and requested == stage_name:
         return True, f"Stopped after requested stage: {stage_name}"
@@ -728,6 +750,24 @@ def should_stop_after(args: argparse.Namespace, stage_name: str, started_at: flo
         budget = budget_seconds(args)
         return True, f"Stopped after stage {stage_name}: time budget {budget:g}s exhausted"
     return False, ""
+
+
+PARTIAL_RUN_STATUS_CLASSES = {"auth", "budget_limited", "error", "network", "partial", "rate_limited"}
+
+
+def aggregate_run_status(manifest: dict[str, Any], requested_status: str) -> str:
+    if requested_status != "completed":
+        return requested_status
+    stages = manifest.get("stages", [])
+    if not isinstance(stages, list):
+        return requested_status
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        status_class = status_policy.classify_status(str(stage.get("status") or ""))
+        if status_class in PARTIAL_RUN_STATUS_CLASSES:
+            return "partial"
+    return requested_status
 
 
 def write_query_plan_artifact(
@@ -827,9 +867,12 @@ def finalize_run(
             "stopped",
             message=stop_reason,
         )
+    final_status = aggregate_run_status(manifest, run_status)
+    if final_status == "partial" and run_status == "completed":
+        warnings = [*warnings, "One or more stages completed with partial, rate-limit, budget, or error status."]
     make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities, warnings=warnings)
     write_publisher_adapters_artifact(out_dir)
-    manifest["run_status"] = run_status
+    manifest["run_status"] = final_status
     if stop_reason:
         manifest["stop_reason"] = stop_reason
     manifest["completed_at"] = workflow_state.utc_now()
@@ -838,7 +881,7 @@ def finalize_run(
     refresh_processing_report(out_dir, warnings=warnings)
     artifact_index_path = artifacts.write_index(out_dir)
     return {
-        "status": run_status,
+        "status": final_status,
         "output_dir": str(out_dir),
         "triaged_candidates": str(triaged or out_dir / "triaged_candidates.csv"),
         "feasibility_report": str(out_dir / "feasibility_report.md"),
@@ -904,6 +947,10 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "crossref_missing_doi",
         "crossref_title_lookup_failed",
         "crossref_rate_limited",
+        "crossref_network_error",
+        "crossref_auth_error",
+        "crossref_response_parse_error",
+        "crossref_provider_error",
         "crossref_skipped_budget",
         "triaged",
         "triage_high",
@@ -919,6 +966,8 @@ def make_report(out_dir: Path, counts: dict[str, int],
         "unpaywall_missing_doi",
         "unpaywall_not_found",
         "unpaywall_rate_limited",
+        "unpaywall_network_error",
+        "unpaywall_response_parse_error",
         "unpaywall_error",
         "unpaywall_skipped_budget",
         "metric_pass",
@@ -998,6 +1047,10 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
         counts["crossref_missing_doi"] = status_counts.get("missing_doi", 0)
         counts["crossref_title_lookup_failed"] = status_counts.get("title_lookup_failed", 0)
         counts["crossref_rate_limited"] = status_counts.get("rate_limited", 0)
+        counts["crossref_network_error"] = status_counts.get("network_error", 0)
+        counts["crossref_auth_error"] = status_counts.get("auth_error", 0)
+        counts["crossref_response_parse_error"] = status_counts.get("response_parse_error", 0)
+        counts["crossref_provider_error"] = status_counts.get("provider_error", 0)
         counts["crossref_skipped_budget"] = status_counts.get("skipped_budget", 0)
         cache_counts = count_field_values(output_path, "crossref_cache_status")
         counts["crossref_cache_hit"] = cache_counts.get("hit", 0)
@@ -1031,6 +1084,10 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
     counts["crossref_missing_doi"] = crossref_counts.get("missing_doi", 0)
     counts["crossref_title_lookup_failed"] = crossref_counts.get("title_lookup_failed", 0)
     counts["crossref_rate_limited"] = crossref_counts.get("rate_limited", 0)
+    counts["crossref_network_error"] = crossref_counts.get("network_error", 0)
+    counts["crossref_auth_error"] = crossref_counts.get("auth_error", 0)
+    counts["crossref_response_parse_error"] = crossref_counts.get("response_parse_error", 0)
+    counts["crossref_provider_error"] = crossref_counts.get("provider_error", 0)
     counts["crossref_skipped_budget"] = crossref_counts.get("skipped_budget", 0)
     counts["crossref_cache_hit"] = crossref_counts.get("cache_hit", 0)
     counts["crossref_cache_store"] = crossref_counts.get("cache_store", 0)
@@ -1040,6 +1097,15 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
     elif counts["crossref_rate_limited"]:
         crossref_stage_status = "partial_rate_limited"
         crossref_message = "One or more Crossref rows were rate limited; rerun with --resume later."
+    elif counts["crossref_auth_error"]:
+        crossref_stage_status = "partial_auth"
+        crossref_message = "One or more Crossref rows failed with an auth or access-policy error."
+    elif counts["crossref_network_error"]:
+        crossref_stage_status = "partial_network"
+        crossref_message = "One or more Crossref rows failed with a network error; inspect verified_candidates.csv."
+    elif counts["crossref_response_parse_error"] or counts["crossref_provider_error"]:
+        crossref_stage_status = "partial_provider_error"
+        crossref_message = "One or more Crossref rows failed with provider or response parsing errors."
     else:
         crossref_stage_status = "completed"
         crossref_message = ""
@@ -1097,6 +1163,7 @@ def run_triage_stage(input_path: Path, out_dir: Path,
         year_to=args.year_to,
         require_doi=not args.allow_missing_doi,
         exclude_article_types=args.exclude_article_type,
+        allow_regex=bool(getattr(args, "allow_regex_concepts", False)),
     )
     counts["triaged"] = triage_counts["rows"]
     counts["triage_high"] = triage_counts["high"]
@@ -1104,19 +1171,23 @@ def run_triage_stage(input_path: Path, out_dir: Path,
     counts["triage_needs_review"] = triage_counts["needs_review"]
     counts["triage_low"] = triage_counts["low"]
     counts["metadata_blocked"] = triage_counts["metadata_blocked"]
-    validate_stage.validate_stage(
+    validation_failures = validate_stage.validate_stage(
         output_path,
         out_dir / "triage_validation.md",
         "triage",
     )
+    stage_status = "partial_validation_failed" if validation_failures else "completed"
     record_manifest_stage(
         out_dir,
         manifest,
         "triage",
-        "completed",
+        stage_status,
         input_path=input_path,
         output_path=output_path,
         row_count_value=counts["triaged"],
+        message=f"Stage validation failed with {validation_failures} failure(s)"
+        if validation_failures
+        else "",
     )
     return output_path
 
@@ -1149,6 +1220,8 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
         counts["unpaywall_missing_doi"] = status_counts.get("missing_doi", 0)
         counts["unpaywall_not_found"] = status_counts.get("not_found", 0)
         counts["unpaywall_rate_limited"] = status_counts.get("rate_limited", 0)
+        counts["unpaywall_network_error"] = status_counts.get("network_error", 0)
+        counts["unpaywall_response_parse_error"] = status_counts.get("response_parse_error", 0)
         counts["unpaywall_error"] = status_counts.get("error", 0)
         counts["unpaywall_skipped_budget"] = status_counts.get("skipped_budget", 0)
         cache_counts = count_field_values(output_path, "unpaywall_cache_status")
@@ -1181,6 +1254,8 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
     counts["unpaywall_missing_doi"] = unpaywall_counts.get("missing_doi", 0)
     counts["unpaywall_not_found"] = unpaywall_counts.get("not_found", 0)
     counts["unpaywall_rate_limited"] = unpaywall_counts.get("rate_limited", 0)
+    counts["unpaywall_network_error"] = unpaywall_counts.get("network_error", 0)
+    counts["unpaywall_response_parse_error"] = unpaywall_counts.get("response_parse_error", 0)
     counts["unpaywall_error"] = unpaywall_counts.get("error", 0)
     counts["unpaywall_skipped_budget"] = unpaywall_counts.get("skipped_budget", 0)
     counts["unpaywall_cache_hit"] = unpaywall_counts.get("cache_hit", 0)
@@ -1191,6 +1266,18 @@ def run_unpaywall_stage(input_path: Path, out_dir: Path,
     elif counts["unpaywall_rate_limited"]:
         unpaywall_stage_status = "partial_rate_limited"
         unpaywall_message = "One or more Unpaywall rows were rate limited; rerun with --resume later."
+    elif counts["unpaywall_skipped_missing_email"]:
+        unpaywall_stage_status = "partial_auth"
+        unpaywall_message = "Unpaywall was enabled but no contact email was available; rows were skipped."
+    elif counts["unpaywall_network_error"]:
+        unpaywall_stage_status = "partial_network"
+        unpaywall_message = (
+            "One or more Unpaywall rows failed with a network error; "
+            "inspect oa_annotated_candidates.csv."
+        )
+    elif counts["unpaywall_response_parse_error"] or counts["unpaywall_error"]:
+        unpaywall_stage_status = "partial_provider_error"
+        unpaywall_message = "One or more Unpaywall rows failed with provider or response parsing errors."
     else:
         unpaywall_stage_status = "completed"
         unpaywall_message = ""
@@ -1309,19 +1396,25 @@ def run_queue_stage(input_path: Path, out_dir: Path,
         page_required_fields=args.page_required_field,
     )
     counts["publisher_queue"] = queue_counts["queued"]
-    validate_stage.validate_stage(
+    optional_empty_fields = {"doi", "doi_url"} if args.allow_missing_doi else None
+    validation_failures = validate_stage.validate_stage(
         output_path,
         out_dir / "publisher_queue_validation.md",
         "queue",
+        optional_empty_fields=optional_empty_fields,
     )
+    stage_status = "partial_validation_failed" if validation_failures else "completed"
     record_manifest_stage(
         out_dir,
         manifest,
         "publisher_queue",
-        "completed",
+        stage_status,
         input_path=input_path,
         output_path=output_path,
         row_count_value=counts["publisher_queue"],
+        message=f"Stage validation failed with {validation_failures} failure(s)"
+        if validation_failures
+        else "",
     )
     return output_path
 
@@ -1780,6 +1873,12 @@ def main() -> None:
                         help="Caller-supplied optional concept")
     parser.add_argument("--negative-concept", action="append", default=[],
                         help="Caller-supplied negative tag. Rows are tagged, not deleted.")
+    parser.add_argument("--enable-regex-concepts", dest="allow_regex_concepts",
+                        action="store_true", default=None,
+                        help="Allow re: semantic concept patterns. Disabled by default.")
+    parser.add_argument("--disable-regex-concepts", dest="allow_regex_concepts",
+                        action="store_false",
+                        help="Reject re: semantic concept patterns")
     parser.add_argument("--exclude-article-type", action="append", default=[],
                         help="Metadata article type to mark as blocked, e.g. review")
     parser.add_argument("--queue-priorities", default=None,

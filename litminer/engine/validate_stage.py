@@ -14,10 +14,17 @@ def empty(value: str) -> bool:
     return not value or value.strip() in {"", "Unknown", "Not verified", "Not available"}
 
 
-def validate_stage(input_path: Path, output_path: Path, stage: str) -> int:
+def validate_stage(
+    input_path: Path,
+    output_path: Path,
+    stage: str,
+    *,
+    optional_empty_fields: set[str] | None = None,
+) -> int:
     if stage not in STAGE_REQUIRED:
         raise SystemExit(f"Unknown stage: {stage}. Expected one of {sorted(STAGE_REQUIRED)}")
 
+    optional_empty_fields = optional_empty_fields or set()
     input_fields, rows = read_csv_rows(input_path)
     if not input_fields:
         raise SystemExit("Input CSV has no header")
@@ -30,6 +37,8 @@ def validate_stage(input_path: Path, output_path: Path, stage: str) -> int:
 
     for idx, row in enumerate(rows, start=2):
         for field in STAGE_REQUIRED[stage]:
+            if field in optional_empty_fields:
+                continue
             if field in fieldnames and empty(row.get(field, "")):
                 issues.append((idx, "FAIL", field, "Required stage field is empty/Unknown"))
 
@@ -69,8 +78,10 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", choices=sorted(STAGE_REQUIRED), required=True)
+    parser.add_argument("--allow-empty-field", action="append", default=[],
+                        help="Required field that may be empty for this validation run")
     args = parser.parse_args()
-    failures = validate_stage(args.input, args.output, args.stage)
+    failures = validate_stage(args.input, args.output, args.stage, optional_empty_fields=set(args.allow_empty_field))
     if failures:
         raise SystemExit(1)
 

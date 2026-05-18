@@ -21,6 +21,7 @@ from litminer.engine import agent_summary
 from litminer.engine import artifacts
 from litminer.engine import bootstrap
 from litminer.engine import build_publisher_queue
+from litminer.engine import cache as cache_helpers
 from litminer.engine import common
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
@@ -1135,6 +1136,18 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertTrue(result["path_checks"][0]["inside_workspace"])
         self.assertFalse(result["path_checks"][1]["inside_workspace"])
 
+    def test_mcp_workspace_doctor_rejects_workspace_root_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            outside = Path(tmp) / "outside"
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(root)}):
+                with self.assertRaises(ValueError):
+                    mcp_server.tool_workspace_doctor({
+                        "workspace_root": str(outside),
+                        "create_workspace": True,
+                    })
+
     def test_mcp_batch_verify_crossref(self) -> None:
         with patch("litminer.sources.api.crossref_verify.verify_doi", return_value={"crossref_doi": "10.1234/a"}):
             result = mcp_server.tool_batch_verify_crossref({
@@ -1303,6 +1316,17 @@ class LitminerCoreTests(unittest.TestCase):
 
         self.assertFalse([check for check in checks if check.status == "error"])
 
+    def test_runner_rejects_invalid_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad_config.json"
+            path.write_text(
+                json.dumps({"limits": {"max_results_per_query": "many"}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit):
+                run_lit_search.normalize_args(argparse.Namespace(config=path))
+
     def test_offline_smoke_generates_expected_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp) / "smoke"
@@ -1348,6 +1372,20 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(triaged_true["matched_required"], "photocatalytic_h2")
         self.assertEqual(triaged_true["matched_negative"], "")
         self.assertEqual(triaged_peroxide["matched_negative"], "h2o2_only")
+
+    def test_semantic_triage_regex_concepts_are_opt_in(self) -> None:
+        row = {"title": "Alpha beta", "abstract": ""}
+        profile = semantic_triage.load_profile(required_specs=["alpha_regex=re:alpha"])
+
+        with self.assertRaises(ValueError):
+            semantic_triage.triage_row(row, profile)
+
+        regex_profile = semantic_triage.load_profile(
+            required_specs=["alpha_regex=re:alpha"],
+            allow_regex=True,
+        )
+        triaged = semantic_triage.triage_row(row, regex_profile)
+        self.assertEqual(triaged["matched_required"], "alpha_regex")
 
     def test_dedupe_records_key_confidence_and_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1725,6 +1763,20 @@ class LitminerCoreTests(unittest.TestCase):
 
             self.assertEqual(manifest["stages"][0]["output_fields"], [])
 
+    def test_json_cache_read_modify_write_preserves_other_writers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            first = cache_helpers.JsonCache(cache_dir, "shared")
+            second = cache_helpers.JsonCache(cache_dir, "shared")
+
+            self.assertIsNone(second.get("b"))
+            first.set("a", {"value": "A"})
+            second.set("b", {"value": "B"})
+            fresh = cache_helpers.JsonCache(cache_dir, "shared")
+
+            self.assertEqual(fresh.get("a").value["value"], "A")
+            self.assertEqual(fresh.get("b").value["value"], "B")
+
     def test_run_stop_after_triage_writes_partial_control_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1841,7 +1893,7 @@ class LitminerCoreTests(unittest.TestCase):
                 resume_allow_mismatch=False,
                 resume_mismatch_reason="",
                 time_budget_seconds=None,
-                stop_after_stage="dedupe",
+                stop_after_stage=None,
                 triage_profile=None,
                 required_concept=[],
                 optional_concept=[],
@@ -1890,12 +1942,83 @@ class LitminerCoreTests(unittest.TestCase):
             )
 
             with patch("litminer.engine.api_discovery.discover_api", side_effect=fake_discover):
-                run_lit_search.run(args)
+                result = run_lit_search.run(args)
 
             manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
             discovery = [stage for stage in manifest["stages"] if stage["name"] == "discovery"][-1]
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(manifest["run_status"], "partial")
             self.assertEqual(discovery["status"], "partial_rate_limited")
             self.assertIn("rate limited", discovery["message"])
+
+    def test_crossref_provider_failure_marks_stage_and_run_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "A precise paper,10.1234/a,2026,Journal A\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+            out_dir.mkdir()
+            manifest = {"stages": []}
+            counts: dict[str, int] = {}
+
+            def fake_verify(_input_path, output_path, **_kwargs):
+                output_path.write_text(
+                    "title,doi,crossref_status,crossref_verified\n"
+                    "A precise paper,10.1234/a,network_error,false\n",
+                    encoding="utf-8",
+                )
+                return {"rows": 1, "network_error": 1}
+
+            args = argparse.Namespace(
+                skip_crossref=False,
+                resume=False,
+                crossref_checkpoint_interval=25,
+                max_crossref_rows=None,
+                cache_dir=None,
+                cache_ttl_days=30.0,
+                cache_enabled=True,
+            )
+            with patch("litminer.engine.run_lit_search.crossref_verify.verify_csv", side_effect=fake_verify):
+                run_lit_search.run_crossref_stage(input_csv, out_dir, args, counts, manifest=manifest)
+
+            crossref = [stage for stage in manifest["stages"] if stage["name"] == "crossref"][-1]
+            self.assertEqual(crossref["status"], "partial_network")
+            self.assertEqual(run_lit_search.aggregate_run_status(manifest, "completed"), "partial")
+
+    def test_unpaywall_missing_email_marks_stage_and_run_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal\n"
+                "A precise paper,10.1234/a,2026,Journal A\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+            out_dir.mkdir()
+            manifest = {"stages": []}
+            counts: dict[str, int] = {}
+            args = argparse.Namespace(
+                enrich_unpaywall=True,
+                resume=False,
+                unpaywall_email=None,
+                unpaywall_sleep=0,
+                unpaywall_checkpoint_interval=25,
+                max_unpaywall_rows=None,
+                cache_dir=None,
+                cache_ttl_days=30.0,
+                cache_enabled=True,
+            )
+
+            run_lit_search.run_unpaywall_stage(input_csv, out_dir, args, counts, manifest=manifest)
+
+            unpaywall = [stage for stage in manifest["stages"] if stage["name"] == "unpaywall"][-1]
+            self.assertEqual(unpaywall["status"], "partial_auth")
+            self.assertEqual(run_lit_search.aggregate_run_status(manifest, "completed"), "partial")
 
     def test_resume_ignores_run_control_signature_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2036,6 +2159,8 @@ class LitminerCoreTests(unittest.TestCase):
             "litminer_batch_verify_crossref",
         }:
             self.assertIn(name, names)
+        start_tool = next(tool for tool in response["result"]["tools"] if tool["name"] == "litminer_start_run")
+        self.assertIn("input_csv", start_tool["inputSchema"]["properties"])
 
     def test_mcp_background_run_completes_partial_job(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2060,6 +2185,48 @@ class LitminerCoreTests(unittest.TestCase):
 
                 self.assertEqual(status["status"], "partial")
                 self.assertTrue((root / "run" / "query_plan.json").exists())
+
+                with mcp_server._jobs_lock:
+                    mcp_server.JOBS.pop(start["job_id"], None)
+                persisted = mcp_server.tool_run_status({"job_id": start["job_id"]})
+                self.assertEqual(persisted["status"], "partial")
+                self.assertEqual(Path(persisted["output_dir"]), root / "run")
+
+    def test_mcp_cancel_run_stops_at_stage_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "input.csv").write_text(
+                "title,doi,publication_year,journal\n"
+                "Paper,10.1234/a,2026,Journal A\n",
+                encoding="utf-8",
+            )
+            original = run_lit_search.write_query_plan_artifact
+
+            def slow_query_plan(*args, **kwargs):
+                result = original(*args, **kwargs)
+                time.sleep(0.2)
+                return result
+
+            with (
+                patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(root)}),
+                patch("litminer.engine.run_lit_search.write_query_plan_artifact", side_effect=slow_query_plan),
+            ):
+                start = mcp_server.tool_start_run({
+                    "input_csv": "input.csv",
+                    "output_dir": "cancelled",
+                    "mode": "fast",
+                })
+                cancel = mcp_server.tool_cancel_run({"job_id": start["job_id"]})
+                for _ in range(50):
+                    status = mcp_server.tool_run_status({"job_id": start["job_id"]})
+                    if status["status"] in {"completed", "partial", "failed"}:
+                        break
+                    time.sleep(0.05)
+
+            self.assertEqual(cancel["status"], "cancel_requested")
+            self.assertEqual(status["status"], "partial")
+            manifest = json.loads((root / "cancelled" / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertIn("Cancelled by background job request", manifest["stop_reason"])
 
 
 if __name__ == "__main__":

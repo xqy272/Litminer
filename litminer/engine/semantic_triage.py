@@ -78,7 +78,7 @@ class TriageProfile:
     year_to: int | None = None
     require_doi: bool = False
     exclude_article_types: set[str] | None = None
-    allow_regex: bool = True
+    allow_regex: bool = False
 
 
 def normalize_text(value: str) -> str:
@@ -226,7 +226,7 @@ def load_profile(path: Path | None = None,
                   year_to: int | None = None,
                   require_doi: bool = False,
                   exclude_article_types: list[str] | None = None,
-                  allow_regex: bool = True) -> TriageProfile:
+                  allow_regex: bool = False) -> TriageProfile:
     data: dict[str, Any] = {}
     if path is not None:
         text = path.read_text(encoding="utf-8-sig")
@@ -302,7 +302,7 @@ def scoped_text(row: dict[str, str], scope: str) -> str:
     return normalize_text(" ".join(row.get(field, "") or "" for field in fields))
 
 
-def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
+def compile_pattern(pattern: str, allow_regex: bool = False) -> re.Pattern[str]:
     pattern = normalize_text(pattern)
     if len(pattern) > MAX_PATTERN_LENGTH:
         raise ValueError(f"Pattern is too long ({len(pattern)} > {MAX_PATTERN_LENGTH})")
@@ -327,7 +327,7 @@ def compile_pattern(pattern: str, allow_regex: bool = True) -> re.Pattern[str]:
     return compiled
 
 
-def _basic_pattern_match(text: str, pattern: str, allow_regex: bool = True) -> bool:
+def _basic_pattern_match(text: str, pattern: str, allow_regex: bool = False) -> bool:
     compiled = compile_pattern(pattern, allow_regex=allow_regex)
     for match in compiled.finditer(text):
         prefix = text[max(0, match.start() - 80):match.start()]
@@ -337,7 +337,7 @@ def _basic_pattern_match(text: str, pattern: str, allow_regex: bool = True) -> b
     return False
 
 
-def _word_positions(text: str, term: str, allow_regex: bool = True) -> list[int]:
+def _word_positions(text: str, term: str, allow_regex: bool = False) -> list[int]:
     normalized_text = normalize_text(text).lower()
     if not normalized_text:
         return []
@@ -365,7 +365,7 @@ def _word_positions(text: str, term: str, allow_regex: bool = True) -> list[int]
     return positions
 
 
-def _near_matches(text: str, patterns: list[str], window: int, allow_regex: bool = True) -> bool:
+def _near_matches(text: str, patterns: list[str], window: int, allow_regex: bool = False) -> bool:
     position_groups = [_word_positions(text, pattern, allow_regex=allow_regex) for pattern in patterns]
     if any(not positions for positions in position_groups):
         return False
@@ -384,7 +384,7 @@ def _near_matches(text: str, patterns: list[str], window: int, allow_regex: bool
     return walk(0)
 
 
-def concept_matches(row: dict[str, str], concept: Concept, allow_regex: bool = True) -> bool:
+def concept_matches(row: dict[str, str], concept: Concept, allow_regex: bool = False) -> bool:
     text = scoped_text(row, concept.scope)
     if concept.op == "all":
         return bool(concept.children) and all(concept_matches(row, child, allow_regex) for child in concept.children)
@@ -601,7 +601,7 @@ def triage_csv(input_path: Path, output_path: Path,
                year_to: int | None = None,
                 require_doi: bool = False,
                 exclude_article_types: list[str] | None = None,
-                allow_regex: bool = True,
+                allow_regex: bool = False,
                 sort_rows: bool = True) -> dict[str, int]:
     profile = load_profile(
         profile_path,
@@ -674,8 +674,10 @@ def main() -> None:
                         help="Mark missing/invalid DOI as metadata-blocking")
     parser.add_argument("--exclude-article-type", action="append", default=[],
                         help="Metadata article type to mark as blocked, e.g. review")
-    parser.add_argument("--disable-regex-concepts", action="store_true",
-                        help="Treat re: concepts as invalid instead of compiling caller-supplied regex")
+    parser.add_argument("--enable-regex-concepts", dest="allow_regex", action="store_true", default=False,
+                        help="Allow re: concepts. Disabled by default to avoid expensive caller-supplied regex.")
+    parser.add_argument("--disable-regex-concepts", dest="allow_regex", action="store_false",
+                        help="Reject re: concepts instead of compiling caller-supplied regex")
     parser.add_argument("--no-sort", action="store_true")
     args = parser.parse_args()
 
@@ -690,7 +692,7 @@ def main() -> None:
         year_to=args.year_to,
         require_doi=args.require_doi,
         exclude_article_types=args.exclude_article_type,
-        allow_regex=not args.disable_regex_concepts,
+        allow_regex=args.allow_regex,
         sort_rows=not args.no_sort,
     )
 

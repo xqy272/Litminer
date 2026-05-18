@@ -9,7 +9,10 @@ replace run artifacts or provenance.
 
 from __future__ import annotations
 
+import importlib
 import json
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +25,9 @@ from litminer.engine import workflow_state
 DEFAULT_CACHE_DIR = ".litminer/cache"
 DEFAULT_TTL_DAYS = 30.0
 DEFAULT_PROVIDER_FAILURE_TTL_SECONDS = 300.0
+
+_msvcrt: Any = importlib.import_module("msvcrt") if os.name == "nt" else None
+_fcntl: Any = importlib.import_module("fcntl") if os.name != "nt" else None
 
 
 def utc_now() -> datetime:
@@ -54,8 +60,36 @@ class CacheHit:
     record: dict[str, Any]
 
 
+@contextmanager
+def _exclusive_file_lock(lock_path: Path):
+    """Take an advisory lock for cache file read-modify-write cycles."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            assert _msvcrt is not None
+            _msvcrt.locking(handle.fileno(), _msvcrt.LK_LOCK, 1)
+        else:
+            assert _fcntl is not None
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                assert _msvcrt is not None
+                _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
+            else:
+                assert _fcntl is not None
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+
+
 class JsonCache:
-    """Tiny JSON-object cache with TTL-aware reads."""
+    """Tiny JSON-object cache with TTL-aware, lock-protected reads/writes."""
 
     def __init__(
         self,
@@ -70,30 +104,39 @@ class JsonCache:
         self.namespace = namespace
         self.path = self.root / f"{namespace}.json"
         self.ttl_seconds = ttl_seconds
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self._data: dict[str, Any] | None = None
         self.hits = 0
         self.misses = 0
         self.stores = 0
         self.expired = 0
 
-    def _load(self) -> dict[str, Any]:
-        if self._data is not None:
-            return self._data
-        if not self.enabled or not self.path.exists():
-            self._data = {}
-            return self._data
+    def _read_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             data = {}
-        self._data = data if isinstance(data, dict) else {}
+        return data if isinstance(data, dict) else {}
+
+    def _load(self) -> dict[str, Any]:
+        if not self.enabled:
+            self._data = {}
+            return self._data
+        with _exclusive_file_lock(self.lock_path):
+            self._data = self._read_unlocked()
         return self._data
+
+    def _write_unlocked(self, data: dict[str, Any]) -> None:
+        write_text_atomic(self.path, json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+        self._data = data
 
     def _write(self) -> None:
         if not self.enabled:
             return
-        data = self._load()
-        write_text_atomic(self.path, json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
+        with _exclusive_file_lock(self.lock_path):
+            self._write_unlocked(self._data if self._data is not None else self._read_unlocked())
 
     def _expired(self, record: dict[str, Any]) -> bool:
         expires_at = parse_time(str(record.get("expires_at") or ""))
@@ -109,16 +152,19 @@ class JsonCache:
     def get(self, key: str) -> CacheHit | None:
         if not self.enabled:
             return None
-        data = self._load()
-        raw = data.get(key)
-        if not isinstance(raw, dict):
-            self.misses += 1
-            return None
-        if self._expired(raw):
-            self.expired += 1
-            data.pop(key, None)
-            self._write()
-            return None
+        with _exclusive_file_lock(self.lock_path):
+            data = self._read_unlocked()
+            raw = data.get(key)
+            if not isinstance(raw, dict):
+                self._data = data
+                self.misses += 1
+                return None
+            if self._expired(raw):
+                self.expired += 1
+                data.pop(key, None)
+                self._write_unlocked(data)
+                return None
+            self._data = data
         self.hits += 1
         return CacheHit(
             key=key,
@@ -139,26 +185,28 @@ class JsonCache:
         if not self.enabled:
             return
         now = iso_now()
-        existing = self._load().get(key)
-        created_at = existing.get("created_at") if isinstance(existing, dict) else now
-        expires_at = ""
-        effective_ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
-        if effective_ttl is not None:
-            expires_at = (utc_now() + timedelta(seconds=max(0.0, effective_ttl))).strftime("%Y-%m-%dT%H:%M:%SZ")
-        record = {
-            "schema_version": 1,
-            "namespace": self.namespace,
-            "key": key,
-            "status": status,
-            "created_at": created_at,
-            "updated_at": now,
-            "expires_at": expires_at,
-            "metadata": metadata or {},
-            "value": value,
-        }
-        self._load()[key] = record
-        self.stores += 1
-        self._write()
+        with _exclusive_file_lock(self.lock_path):
+            data = self._read_unlocked()
+            existing = data.get(key)
+            created_at = existing.get("created_at") if isinstance(existing, dict) else now
+            expires_at = ""
+            effective_ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
+            if effective_ttl is not None:
+                expires_at = (utc_now() + timedelta(seconds=max(0.0, effective_ttl))).strftime("%Y-%m-%dT%H:%M:%SZ")
+            record = {
+                "schema_version": 1,
+                "namespace": self.namespace,
+                "key": key,
+                "status": status,
+                "created_at": created_at,
+                "updated_at": now,
+                "expires_at": expires_at,
+                "metadata": metadata or {},
+                "value": value,
+            }
+            data[key] = record
+            self._write_unlocked(data)
+            self.stores += 1
 
     def stats(self) -> dict[str, Any]:
         return {
