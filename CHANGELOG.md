@@ -8,6 +8,8 @@ when you want a stable version.
 
 ### Added
 
+- Added a concise Chinese README entry page and moved detailed usage material
+  into `references/user-guide.md`.
 - Documented the lightweight distribution path: Git clone as the official skill
   install, release tags for stable versions, and `CHANGELOG.md` for upgrades.
 - Added README guidance for updating an existing clone with `git pull --ff-only`
