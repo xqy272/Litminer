@@ -262,8 +262,8 @@ class LitminerCoreTests(unittest.TestCase):
         )
 
         with (
-            patch("litminer.sources.api.semantic_scholar_search.urllib.request.urlopen", side_effect=error),
-            patch("litminer.sources.api.semantic_scholar_search.time.sleep") as sleep,
+            patch("litminer.sources.api.http_client.urllib.request.urlopen", side_effect=error),
+            patch("litminer.sources.api.http_client.time.sleep") as sleep,
         ):
             with self.assertRaises(semantic_scholar_search.ProviderSearchError) as caught:
                 semantic_scholar_search.search("clinical rag", year_from=2024, max_results=1)
@@ -991,8 +991,8 @@ class LitminerCoreTests(unittest.TestCase):
         )
 
         with (
-            patch("litminer.sources.api.unpaywall_lookup.urllib.request.urlopen", side_effect=error),
-            patch("litminer.sources.api.unpaywall_lookup.time.sleep") as sleep,
+            patch("litminer.sources.api.http_client.urllib.request.urlopen", side_effect=error),
+            patch("litminer.sources.api.http_client.time.sleep") as sleep,
         ):
             result = unpaywall_lookup.lookup_doi("10.1234/example", email="agent@example.org")
 
@@ -1260,8 +1260,8 @@ class LitminerCoreTests(unittest.TestCase):
                 return b'{"message": {"DOI": "10.1234/example", "title": ["Example"]}}'
 
         with (
-            patch("litminer.sources.api.crossref_verify.urllib.request.urlopen", side_effect=[first, Response()]),
-            patch("litminer.sources.api.crossref_verify.time.sleep") as sleep,
+            patch("litminer.sources.api.http_client.urllib.request.urlopen", side_effect=[first, Response()]),
+            patch("litminer.sources.api.http_client.time.sleep") as sleep,
         ):
             data = crossref_verify._fetch_json("https://api.crossref.org/works/10.1234/example")
 
@@ -2400,6 +2400,113 @@ class LitminerCoreTests(unittest.TestCase):
         }
         self.assertEqual(_extract_affiliations(work), "MIT; Stanford")
         self.assertEqual(_extract_orcids(work), "0000-0001-2345-6789; 0000-0002-3456-7890")
+
+    def test_http_client_retries_on_rate_limit(self) -> None:
+        from litminer.sources.api.http_client import RetryPolicy, fetch_json
+        headers = Message()
+        headers["Retry-After"] = "0"
+        error = urllib.error.HTTPError(
+            url="https://example.org/test",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=headers,
+            fp=None,
+        )
+        with (
+            patch("litminer.sources.api.http_client.urllib.request.urlopen", side_effect=error),
+            patch("litminer.sources.api.http_client.time.sleep") as sleep,
+        ):
+            with self.assertRaises(ProviderSearchError) as caught:
+                fetch_json("https://example.org/test", retry=RetryPolicy(max_retries=2, max_wait_seconds=10))
+            self.assertEqual(caught.exception.status, "rate_limited")
+            self.assertEqual(caught.exception.http_status, 429)
+            self.assertEqual(sleep.call_count, 1)
+
+    def test_http_client_raise_on_status_raises_immediately(self) -> None:
+        from litminer.sources.api.http_client import RetryPolicy, fetch_json
+        error = urllib.error.HTTPError(
+            url="https://example.org/test",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=None,
+        )
+        with patch("litminer.sources.api.http_client.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(ProviderSearchError) as caught:
+                fetch_json(
+                    "https://example.org/test",
+                    retry=RetryPolicy(max_retries=3),
+                    raise_on_status=frozenset({403}),
+                )
+            self.assertEqual(caught.exception.status, "auth_error")
+            self.assertEqual(caught.exception.http_status, 403)
+
+    def test_citation_expand_selects_seeds_mechanically(self) -> None:
+        from litminer.engine.citation_expand import select_seeds
+        rows = [
+            {"triage_priority": "high", "triage_score": "5.0", "doi": "10.1/a"},
+            {"triage_priority": "high", "triage_score": "8.0", "doi": "10.2/b"},
+            {"triage_priority": "medium", "triage_score": "10.0", "doi": "10.3/c"},
+            {"triage_priority": "high", "triage_score": "3.0", "doi": "10.4/d"},
+        ]
+        seeds = select_seeds(rows, top_n=2)
+        self.assertEqual(seeds, ["10.2/b", "10.1/a"])
+
+        explicit = select_seeds(rows, explicit_seeds=["10.9/z"])
+        self.assertEqual(explicit, ["10.9/z"])
+
+    def test_search_audit_report_generates_markdown(self) -> None:
+        from litminer.engine import search_audit_report
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "query_plan.json").write_text(json.dumps({
+                "queries": ["test query"],
+                "year_from": 2024,
+                "concepts": {"required": [{"name": "main", "patterns": ["term1"]}]},
+                "sources": ["openalex"],
+            }), encoding="utf-8")
+            (tmp_path / "agent_summary.json").write_text(json.dumps({
+                "trust_tiers": {"discovered_or_deduped": 10, "crossref_trusted": 8},
+                "run_status": "completed",
+            }), encoding="utf-8")
+            (tmp_path / "result_profile.json").write_text(json.dumps({
+                "degraded": False,
+                "all_rows": {"total_rows": 10, "year_distribution": {"2024": 5, "2025": 5}},
+            }), encoding="utf-8")
+            (tmp_path / "run_manifest.json").write_text(json.dumps({
+                "run_status": "completed",
+                "stages": [{"name": "discovery", "status": "completed"}],
+            }), encoding="utf-8")
+
+            report_path = search_audit_report.build_audit_report(tmp_path)
+            text = report_path.read_text(encoding="utf-8")
+            self.assertIn("Search Audit Report", text)
+            self.assertIn("test query", text)
+            self.assertIn("Trust Tiers", text)
+            self.assertIn("10", text)
+
+    def test_publisher_html_extract_parses_meta_tags(self) -> None:
+        from litminer.engine.publisher_html_extract import extract_fields
+        html = (
+            '<html><head>'
+            '<meta name="citation_keywords" content="photocatalysis; water splitting">'
+            '<meta name="citation_online_date" content="2026-05-15">'
+            '<meta name="citation_funder_name" content="NSF">'
+            '<meta name="citation_doi" content="10.1234/test">'
+            '</head><body></body></html>'
+        )
+        fields = extract_fields(html)
+        self.assertEqual(fields["html_meta_status"], "extracted")
+        self.assertEqual(fields["html_meta_keywords"], "photocatalysis; water splitting")
+        self.assertEqual(fields["html_meta_online_date"], "2026-05-15")
+        self.assertEqual(fields["html_meta_funder_name"], "NSF")
+        self.assertEqual(fields["html_meta_doi"], "10.1234/test")
+
+    def test_publisher_html_extract_marks_missing_meta(self) -> None:
+        from litminer.engine.publisher_html_extract import extract_fields
+        html = "<html><body>No meta tags here.</body></html>"
+        fields = extract_fields(html)
+        self.assertEqual(fields["html_meta_status"], "not_present_on_page")
 
 
 if __name__ == "__main__":

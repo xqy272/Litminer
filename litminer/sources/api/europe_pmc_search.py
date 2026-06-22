@@ -5,19 +5,18 @@ from __future__ import annotations
 
 import argparse
 import html
-import http.client
 import json
 import re
 import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 from litminer.engine.common import normalize_doi, write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_json
 
 
 EUROPE_PMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -25,6 +24,13 @@ REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 RESULTS_PER_PAGE = 100
 USER_AGENT = "litminer/1.0"
+
+EUROPE_PMC_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=120.0,
+    backoff_base=2.0,
+    user_agent=USER_AGENT,
+)
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 OUTPUT_FIELDS = [
@@ -163,74 +169,9 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, page_size
     return f"{EUROPE_PMC_BASE}?{urllib.parse.urlencode(params)}"
 
 
-def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 120.0))
-        except ValueError:
-            pass
-    return float(2 ** attempt)
-
-
-def _status_for_fetch_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, json.JSONDecodeError):
-        return "response_parse_error"
-    return "error"
-
-
 def _fetch_json(url: str) -> dict[str, Any]:
-    last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            if exc.code == 429 and attempt < MAX_RETRIES - 1:
-                wait = _retry_after_seconds(exc, attempt)
-                print(
-                    f"  Rate limited by Europe PMC (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s",
-                    file=sys.stderr,
-                )
-                time.sleep(wait)
-                continue
-            if 500 <= exc.code < 600 and attempt < MAX_RETRIES - 1:
-                wait = _retry_after_seconds(exc, attempt)
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            break
-        except (urllib.error.URLError, json.JSONDecodeError, OSError,
-                http.client.IncompleteRead) as exc:
-            last_error = exc
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
-        raise ProviderSearchError(
-            f"Europe PMC rate limit persisted after {MAX_RETRIES} attempts",
-            status="rate_limited",
-            retry_after_seconds=_retry_after_seconds(last_error, MAX_RETRIES - 1),
-            http_status=429,
-            transient=True,
-        ) from last_error
-    status = _status_for_fetch_exception(last_error)
-    raise ProviderSearchError(
-        f"Europe PMC request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=status,
-        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
-        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
-    ) from last_error
+    """Fetch URL with retries via shared HTTP client."""
+    return fetch_json(url, retry=EUROPE_PMC_RETRY, timeout=REQUEST_TIMEOUT)
 
 
 def _year_ok(row: dict[str, str], year_from: int | None, year_to: int | None = None) -> bool:

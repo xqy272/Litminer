@@ -10,10 +10,9 @@ from __future__ import annotations
 import argparse
 import csv
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 
-from litminer.engine.common import normalize_doi, write_csv_atomic
+from litminer.engine.common import normalize_doi, utc_now, write_csv_atomic
 
 
 DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>]+", re.I)
@@ -51,10 +50,6 @@ QUERY_FIELDS = ["query", "search_query", "discovery_query", "websearch_query"]
 JOURNAL_FIELDS = ["journal", "venue", "source", "container"]
 YEAR_FIELDS = ["publication_year", "year", "date"]
 DOI_FIELDS = ["doi", "DOI"]
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def first_value(row: dict[str, str], fields: list[str]) -> str:

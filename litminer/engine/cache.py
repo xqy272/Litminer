@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from litminer.engine.common import write_text_atomic
+from litminer.engine.common import utc_now as utc_now_str, utc_now_dt, write_text_atomic
 from litminer.engine import workflow_state
 
 
@@ -31,11 +31,11 @@ _fcntl: Any = importlib.import_module("fcntl") if os.name != "nt" else None
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return utc_now_dt()
 
 
 def iso_now() -> str:
-    return utc_now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return utc_now_str()
 
 
 def parse_time(value: str) -> datetime | None:

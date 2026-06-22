@@ -26,7 +26,7 @@ from litminer.sources.api import registry as provider_registry
 from litminer.sources.api import semantic_scholar_search
 from litminer.engine import cache as cache_helpers
 from litminer.engine import status_policy
-from litminer.engine.common import write_csv_atomic, write_text_atomic
+from litminer.engine.common import utc_now, write_csv_atomic, write_text_atomic
 
 
 DEFAULT_OUTPUT_FIELDS = [
@@ -83,10 +83,6 @@ TRACE_FIELDS = [
 
 def provider_capability_rows(names: list[str] | None = None) -> list[dict[str, str]]:
     return provider_registry.provider_capability_rows(names)
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def make_run_id() -> str:

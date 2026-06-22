@@ -34,6 +34,12 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
         "result_profile.json",
         "Stratified descriptive statistics and search-process completeness caveats for the retrieved collection.",
     ),
+    (
+        "search_audit_report",
+        "primary",
+        "search_audit_report.md",
+        "Human-readable audit report for research reproducibility; same information as Agent artifacts.",
+    ),
     ("feasibility_report", "supporting", "feasibility_report.md", "Constraint feasibility and blocking reasons."),
     ("field_provenance", "supporting", "field_provenance.json", "Field-level source/trust map."),
     ("api_candidates", "supporting", "api_candidates.csv", "Raw API discovery candidates."),

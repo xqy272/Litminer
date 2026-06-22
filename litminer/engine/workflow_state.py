@@ -8,14 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from litminer.engine.common import read_csv_rows, write_text_atomic
+from litminer.engine.common import read_csv_rows, utc_now, write_text_atomic
 
 
 MANIFEST_NAME = "run_manifest.json"
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def manifest_path(out_dir: Path) -> Path:

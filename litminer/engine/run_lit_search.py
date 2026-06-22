@@ -32,6 +32,7 @@ from litminer.engine import agent_summary
 from litminer.engine import artifacts
 from litminer.engine import build_publisher_queue
 from litminer.engine import cache as cache_helpers
+from litminer.engine import citation_expand
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
 from litminer.engine import journal_metrics
@@ -40,7 +41,9 @@ from litminer.engine import publisher_probe
 from litminer.engine import processing_report
 from litminer.engine import provenance
 from litminer.engine import publisher_adapters
+from litminer.engine import publisher_html_extract
 from litminer.engine import result_profile
+from litminer.engine import search_audit_report
 from litminer.engine import semantic_triage
 from litminer.engine import query_plan
 from litminer.engine import status_policy
@@ -908,6 +911,7 @@ def finalize_run(
         out_dir / "api_discovery_trace.csv",
         workflow_state.manifest_path(out_dir),
     )
+    audit_report_path = search_audit_report.build_audit_report(out_dir)
     refresh_processing_report(out_dir, warnings=warnings)
     return {
         "status": final_status,
@@ -917,6 +921,7 @@ def finalize_run(
         "processing_report": str(out_dir / "processing_report.md"),
         "agent_summary": str(out_dir / agent_summary.SUMMARY_NAME),
         "result_profile": str(result_profile_path),
+        "search_audit_report": str(audit_report_path),
         "query_plan": str(out_dir / query_plan.PLAN_NAME),
         "field_provenance": str(out_dir / provenance.PROVENANCE_NAME),
         "publisher_adapters": str(out_dir / "publisher_adapters.json"),
@@ -1997,6 +2002,16 @@ def main() -> None:
     parser.add_argument("--max-publisher-probe-rows", type=int, default=None,
                         help="Alias-style budget for publisher probing; used when --probe-limit is not set")
     parser.add_argument("--probe-sleep", type=float, default=None)
+    parser.add_argument("--expand-citations", action="store_true", default=None,
+                        help="Expand high-priority seeds via Semantic Scholar citation/reference graph")
+    parser.add_argument("--expand-seeds", type=str, default=None,
+                        help="Comma-separated explicit seed DOIs for citation expansion (overrides mechanical seed selection)")
+    parser.add_argument("--expand-top-n", type=int, default=5,
+                        help="Max seeds from high-priority rows for citation expansion")
+    parser.add_argument("--expand-max-per-seed", type=int, default=30,
+                        help="Max papers to expand per seed DOI")
+    parser.add_argument("--expand-direction", choices=["forward", "backward", "both"], default="both",
+                        help="Citation expansion direction: forward (cited-by), backward (references), or both")
     args = parser.parse_args()
 
     result = run(args)

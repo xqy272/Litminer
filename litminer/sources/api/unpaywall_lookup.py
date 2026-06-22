@@ -8,25 +8,31 @@ PDFs and does not bypass access controls.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from litminer.engine import cache as cache_helpers
-from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
+from litminer.engine.common import normalize_doi, read_csv_rows, utc_now, write_csv_atomic
+from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_json
 
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 USER_AGENT = "litminer/1.0"
+
+UNPAYWALL_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=120.0,
+    backoff_base=2.0,
+    user_agent=USER_AGENT,
+)
 
 OUTPUT_COLUMNS = [
     "unpaywall_cache_status",
@@ -52,10 +58,6 @@ OUTPUT_COLUMNS = [
 CACHEABLE_STATUSES = {"ok"}
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def resolve_email(email: str | None = None) -> str:
     return (
         (email or "").strip()
@@ -76,70 +78,33 @@ class UnpaywallRequestError(RuntimeError):
         self.status = status
 
 
-def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 120.0))
-        except ValueError:
-            pass
-    return float(2 ** attempt)
-
-
-def _status_for_request_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, json.JSONDecodeError):
-        return "response_parse_error"
-    return "error"
-
-
 def _request_json(url: str) -> dict[str, Any]:
-    last_error: Exception | None = None
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    for attempt in range(MAX_RETRIES):
-        try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                raise
-            last_error = exc
-            if exc.code == 429:
-                wait = _retry_after_seconds(exc, attempt)
-                if attempt < MAX_RETRIES - 1:
-                    print(
-                        f"  Rate limited by Unpaywall (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s",
-                        file=sys.stderr,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise UnpaywallRateLimitError(
-                    f"Unpaywall rate limit persisted after {MAX_RETRIES} attempts",
-                    retry_after_seconds=wait,
-                ) from exc
-            if 500 <= exc.code < 600 and attempt < MAX_RETRIES - 1:
-                wait = _retry_after_seconds(exc, attempt)
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            raise
-        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
-            last_error = exc
-            if attempt < MAX_RETRIES - 1:
-                wait = float(2 ** attempt)
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-    raise UnpaywallRequestError(
-        f"Unpaywall request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=_status_for_request_exception(last_error),
-    ) from last_error
+    """Fetch via shared HTTP client, converting to Unpaywall error types."""
+    try:
+        return fetch_json(
+            url,
+            retry=UNPAYWALL_RETRY,
+            timeout=REQUEST_TIMEOUT,
+            raise_on_status=frozenset({404}),
+        )
+    except ProviderSearchError as exc:
+        if exc.http_status == 404:
+            raise urllib.error.HTTPError(
+                url=url,
+                code=404,
+                msg="Not Found",
+                hdrs=None,
+                fp=None,
+            ) from exc
+        if exc.status == "rate_limited":
+            raise UnpaywallRateLimitError(
+                f"Unpaywall rate limit persisted after {MAX_RETRIES} attempts",
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
+        raise UnpaywallRequestError(
+            f"Unpaywall request failed after {MAX_RETRIES} attempts: {exc}",
+            status=exc.status or "error",
+        ) from exc
 
 
 def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:

@@ -4,17 +4,16 @@
 from __future__ import annotations
 
 import argparse
-import http.client
 import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from litminer.engine.common import normalize_doi, write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_bytes
 
 
 ARXIV_BASE = "https://export.arxiv.org/api/query"
@@ -23,6 +22,14 @@ MAX_RETRIES = 3
 RESULTS_PER_PAGE = 100
 SLEEP_BETWEEN_REQUESTS = 3.0
 USER_AGENT = "litminer/1.0"
+
+ARXIV_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=120.0,
+    backoff_base=2.0,
+    backoff_floor=SLEEP_BETWEEN_REQUESTS,
+    user_agent=USER_AGENT,
+)
 
 NS = {
     "atom": "http://www.w3.org/2005/Atom",
@@ -144,74 +151,10 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, start: in
     return f"{ARXIV_BASE}?{urllib.parse.urlencode(params)}"
 
 
-def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 120.0))
-        except ValueError:
-            pass
-    return float(max(SLEEP_BETWEEN_REQUESTS, 2 ** attempt))
-
-
-def _status_for_fetch_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, ET.ParseError):
-        return "response_parse_error"
-    return "error"
-
-
 def _fetch_xml(url: str) -> ET.Element:
-    last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return ET.fromstring(resp.read())
-        except urllib.error.HTTPError as exc:
-            last_error = exc
-            if exc.code == 429 and attempt < MAX_RETRIES - 1:
-                wait = _retry_after_seconds(exc, attempt)
-                print(
-                    f"  Rate limited by arXiv (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s",
-                    file=sys.stderr,
-                )
-                time.sleep(wait)
-                continue
-            if 500 <= exc.code < 600 and attempt < MAX_RETRIES - 1:
-                wait = _retry_after_seconds(exc, attempt)
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            break
-        except (urllib.error.URLError, ET.ParseError, OSError,
-                http.client.IncompleteRead) as exc:
-            last_error = exc
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
-        raise ProviderSearchError(
-            f"arXiv rate limit persisted after {MAX_RETRIES} attempts",
-            status="rate_limited",
-            retry_after_seconds=_retry_after_seconds(last_error, MAX_RETRIES - 1),
-            http_status=429,
-            transient=True,
-        ) from last_error
-    status = _status_for_fetch_exception(last_error)
-    raise ProviderSearchError(
-        f"arXiv request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=status,
-        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
-        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
-    ) from last_error
+    """Fetch URL with retries via shared HTTP client, then parse XML."""
+    raw = fetch_bytes(url, retry=ARXIV_RETRY, timeout=REQUEST_TIMEOUT)
+    return ET.fromstring(raw)
 
 
 def _year_ok(row: dict[str, str], year_from: int | None, year_to: int | None = None) -> bool:

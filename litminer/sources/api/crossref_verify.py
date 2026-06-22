@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import http.client
 import json
 import os
 import re
@@ -31,11 +30,12 @@ import sys
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from litminer.engine import cache as cache_helpers
 from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
+from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_json
 
 # Configuration
 
@@ -43,6 +43,14 @@ CROSSREF_BASE = "https://api.crossref.org"
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
 USER_AGENT = "litminer/1.0"
+
+CROSSREF_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=60.0,
+    backoff_base=2.0,
+    user_agent=USER_AGENT,
+)
+CROSSREF_RAISE_ON_STATUS = frozenset({400, 404, 410})
 
 
 class CrossrefRateLimitError(RuntimeError):
@@ -72,67 +80,35 @@ def _user_agent() -> str:
     return USER_AGENT
 
 
-def _retry_wait_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 60.0))
-        except ValueError:
-            pass
-    return float(2 ** attempt)
-
-
-def _status_for_request_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        if exc.code in {401, 403}:
-            return "auth_error"
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, json.JSONDecodeError):
-        return "response_parse_error"
-    return "provider_error"
+def _crossref_retry() -> RetryPolicy:
+    return RetryPolicy(
+        max_retries=MAX_RETRIES,
+        max_wait_seconds=60.0,
+        backoff_base=2.0,
+        user_agent=_user_agent(),
+    )
 
 
 def _fetch_json(url: str) -> dict:
-    last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": _user_agent()})
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code in {400, 404, 410}:
-                raise RuntimeError(f"HTTP {e.code}: {e.reason}") from e
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                wait = _retry_wait_seconds(e, attempt)
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
-                time.sleep(wait)
-        except (urllib.error.URLError, json.JSONDecodeError, OSError,
-                http.client.IncompleteRead) as e:
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
-                time.sleep(wait)
-    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
-        raise CrossrefRateLimitError(
-            f"Crossref rate limit persisted after {MAX_RETRIES} attempts",
-            retry_after_seconds=_retry_wait_seconds(last_error, MAX_RETRIES - 1),
-        ) from last_error
-    raise CrossrefRequestError(
-        f"Crossref request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=_status_for_request_exception(last_error),
-        retry_after_seconds=(
-            _retry_wait_seconds(last_error, MAX_RETRIES - 1)
-            if isinstance(last_error, urllib.error.HTTPError) and 500 <= last_error.code < 600
-            else None
-        ),
-    ) from last_error
+    """Fetch via shared HTTP client, converting to Crossref error types."""
+    try:
+        return fetch_json(
+            url,
+            retry=_crossref_retry(),
+            timeout=REQUEST_TIMEOUT,
+            raise_on_status=CROSSREF_RAISE_ON_STATUS,
+        )
+    except ProviderSearchError as exc:
+        if exc.status == "rate_limited":
+            raise CrossrefRateLimitError(
+                str(exc),
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
+        raise CrossrefRequestError(
+            str(exc),
+            status=exc.status,
+            retry_after_seconds=exc.retry_after_seconds,
+        ) from exc
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")

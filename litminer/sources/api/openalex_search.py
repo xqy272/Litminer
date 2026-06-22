@@ -30,6 +30,7 @@ from typing import Any
 
 from litminer.engine.common import write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_json
 
 # Configuration
 
@@ -50,6 +51,14 @@ OPENALEX_SELECT_FIELDS = ",".join([
     "cited_by_count",
     "authorships",
 ])
+
+OPENALEX_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=120.0,
+    backoff_base=2.0,
+    user_agent=USER_AGENT,
+)
+OPENALEX_RAISE_ON_STATUS = frozenset({403, 409})
 
 
 # Field mapping: OpenAlex JSON path to uniform CSV column
@@ -219,78 +228,14 @@ def _build_url(query: str, year_from: int | None, year_to: int | None, page: int
     return f"{OPENALEX_BASE}?{urllib.parse.urlencode(params)}"
 
 
-def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return max(0.0, min(float(retry_after), 120.0))
-        except ValueError:
-            pass
-    return float(2 ** attempt)
-
-
-def _status_for_fetch_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, json.JSONDecodeError):
-        return "response_parse_error"
-    return "error"
-
-
 def _fetch_json(url: str) -> dict:
-    """Fetch URL with retries and backoff.
-    Distinguishes transient errors (429 rate-limit) from permanent ones (403 auth, 409 credit exhaustion).
-    """
-    last_error: Exception | None = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            if e.code in (403, 409):
-                raise ProviderSearchError(
-                    f"HTTP {e.code}: API key required, invalid, or credits exhausted. "
-                    f"Configure --api-key if your OpenAlex access policy requires it.",
-                    status="auth_error",
-                    http_status=e.code,
-                    transient=False,
-                ) from e
-            if e.code == 429:
-                last_error = e
-                wait = _retry_after_seconds(e, attempt)
-                if attempt < MAX_RETRIES - 1:
-                    print(f"  Rate limited (429). Retry {attempt + 1}/{MAX_RETRIES} after {wait}s", file=sys.stderr)
-                    time.sleep(wait)
-                continue
-            last_error = e
-        except (urllib.error.URLError, json.JSONDecodeError, OSError,
-                http.client.IncompleteRead) as e:
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
-                time.sleep(wait)
-    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
-        raise ProviderSearchError(
-            f"OpenAlex rate limit persisted after {MAX_RETRIES} attempts",
-            status="rate_limited",
-            retry_after_seconds=_retry_after_seconds(last_error, MAX_RETRIES - 1),
-            http_status=429,
-            transient=True,
-        ) from last_error
-    status = _status_for_fetch_exception(last_error)
-    raise ProviderSearchError(
-        f"OpenAlex request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=status,
-        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
-        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
-    ) from last_error
+    """Fetch URL with retries via shared HTTP client."""
+    return fetch_json(
+        url,
+        retry=OPENALEX_RETRY,
+        timeout=REQUEST_TIMEOUT,
+        raise_on_status=OPENALEX_RAISE_ON_STATUS,
+    )
 
 
 # Core search

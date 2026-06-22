@@ -6,11 +6,22 @@ import csv
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Literal
 
 
 DOI_PREFIX_RE = re.compile(r"^(https?://(dx\.)?doi\.org/|doi:\s*)", re.I)
+
+
+def utc_now() -> str:
+    """Return current UTC time as an ISO-8601 string."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_now_dt() -> datetime:
+    """Return current UTC time as a datetime object."""
+    return datetime.now(timezone.utc)
 
 
 def cell_text(value: object) -> str:

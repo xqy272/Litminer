@@ -15,18 +15,14 @@ Handles:
 from __future__ import annotations
 
 import argparse
-import http.client
-import json
 import os
 import sys
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from litminer.engine.common import write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
+from litminer.sources.api.http_client import RetryPolicy, fetch_json
 
 # Configuration
 
@@ -38,6 +34,13 @@ RATE_LIMIT_RETRIES = int(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_RETRIES", "
 RATE_LIMIT_BACKOFF_SECONDS = float(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_BACKOFF_SECONDS", "10"))
 RATE_LIMIT_MAX_WAIT_SECONDS = float(os.environ.get("SEMANTIC_SCHOLAR_RATE_LIMIT_MAX_WAIT_SECONDS", "60"))
 API_KEY_ENV_NAMES = ("SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY")
+
+S2_RETRY = RetryPolicy(
+    max_retries=MAX_RETRIES,
+    max_wait_seconds=RATE_LIMIT_MAX_WAIT_SECONDS,
+    backoff_base=RATE_LIMIT_BACKOFF_SECONDS,
+    rate_limit_retries=RATE_LIMIT_RETRIES,
+)
 
 # Fields to request from S2 API
 S2_FIELDS = (
@@ -85,79 +88,22 @@ def _build_headers() -> dict[str, str]:
     return headers
 
 
-def _retry_after_seconds(exc: urllib.error.HTTPError, attempt: int) -> float:
-    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-    if retry_after:
-        try:
-            return min(float(retry_after), RATE_LIMIT_MAX_WAIT_SECONDS)
-        except ValueError:
-            pass
-    wait = RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
-    return min(wait, RATE_LIMIT_MAX_WAIT_SECONDS)
-
-
-def _status_for_fetch_exception(exc: Exception | None) -> str:
-    text = str(exc or "").lower()
-    if isinstance(exc, urllib.error.HTTPError):
-        if exc.code in {401, 403}:
-            return "auth_error"
-        return f"http_{exc.code}"
-    if isinstance(exc, urllib.error.URLError) or any(
-        marker in text for marker in ("ssl", "certificate", "cert", "dns", "name resolution", "network")
-    ):
-        return "network_error"
-    if isinstance(exc, json.JSONDecodeError):
-        return "response_parse_error"
-    return "error"
-
-
 def _fetch_json(url: str) -> dict:
-    last_error: Exception | None = None
-    max_attempts = max(MAX_RETRIES, RATE_LIMIT_RETRIES)
-    for attempt in range(max_attempts):
-        try:
-            req = urllib.request.Request(url, headers=_build_headers())
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            last_error = e
-            if e.code == 429:
-                wait = _retry_after_seconds(e, attempt)
-                if attempt < RATE_LIMIT_RETRIES - 1:
-                    print(
-                        f"  Rate limited by Semantic Scholar (429). "
-                        f"Retry {attempt + 1}/{RATE_LIMIT_RETRIES} after {wait:g}s",
-                        file=sys.stderr,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise RateLimitError(
-                    "Semantic Scholar rate limit persisted after "
-                    f"{RATE_LIMIT_RETRIES} attempts",
-                    retry_after_seconds=wait,
-                ) from e
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            break
-        except (urllib.error.URLError, json.JSONDecodeError, OSError,
-                http.client.IncompleteRead) as e:
-            last_error = e
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {wait}s: {e}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            break
-    status = _status_for_fetch_exception(last_error)
-    raise ProviderSearchError(
-        f"Semantic Scholar request failed after {MAX_RETRIES} attempts: {last_error}",
-        status=status,
-        http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
-        transient=status in {"network_error", "response_parse_error"} or status.startswith("http_5"),
-    ) from last_error
+    """Fetch via shared HTTP client, converting rate-limited errors to RateLimitError."""
+    try:
+        return fetch_json(
+            url,
+            headers=_build_headers(),
+            retry=S2_RETRY,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except ProviderSearchError as exc:
+        if exc.status == "rate_limited":
+            raise RateLimitError(
+                str(exc),
+                retry_after_seconds=exc.retry_after_seconds,
+            ) from exc
+        raise
 
 
 # Field mapping
