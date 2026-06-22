@@ -1114,6 +1114,9 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIn("litminer_agent_summary", names)
         self.assertIn("litminer_read_csv_summary", names)
         self.assertIn("litminer_workspace_doctor", names)
+        self.assertIn("litminer_result_profile", names)
+        self.assertIn("litminer_search_audit_report", names)
+        self.assertIn("litminer_citation_expand", names)
         self.assertNotIn("litminer_batch_verify_crossref", names)
         self.assertNotIn("litminer_search_openalex", names)
 

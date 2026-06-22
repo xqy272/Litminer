@@ -155,12 +155,15 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "api_trace": output_dir / "api_discovery_trace.csv",
         "deduped": output_dir / "deduped_candidates.csv",
         "triaged": output_dir / "triaged_candidates.csv",
+        "citation_expanded": output_dir / "citation_expanded_candidates.csv",
+        "citation_trace": output_dir / "citation_expand_trace.csv",
         "selected": output_dir / "selected_candidates.csv",
         "verified": output_dir / "verified_candidates.csv",
         "oa": output_dir / "oa_annotated_candidates.csv",
         "metrics": output_dir / "metrics_annotated_candidates.csv",
         "queue": output_dir / "publisher_queue.csv",
         "probed": output_dir / "publisher_queue_probed.csv",
+        "html_meta": output_dir / "publisher_queue_html_meta.csv",
         "query_plan": output_dir / "query_plan.json",
         "field_provenance": output_dir / "field_provenance.json",
         "publisher_adapters": output_dir / "publisher_adapters.json",
@@ -277,6 +280,33 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         lines.append("")
         for field in ["triage_priority", "metadata_status", "candidate_status", "llm_review_needed"]:
             lines.extend([f"### `{field}`", "", *table(count_values(rows["triaged"], field)), ""])
+
+    if rows["citation_expanded"] or rows["citation_trace"]:
+        lines.extend(["## Citation Expansion", ""])
+        lines.append(f"- Expanded candidates: {len(rows['citation_expanded'])}")
+        if rows["citation_trace"]:
+            trace_ok = sum(1 for r in rows["citation_trace"] if (r.get("status") or "") == "ok")
+            trace_err = sum(1 for r in rows["citation_trace"] if (r.get("status") or "") == "error")
+            lines.append(f"- Seed attempts: {len(rows['citation_trace'])} (ok={trace_ok}, error={trace_err})")
+            for r in rows["citation_trace"][:10]:
+                seed = r.get("seed_doi", "")
+                qtype = r.get("query_type", "")
+                status = r.get("status", "")
+                count = r.get("returned_count", "")
+                lines.append(f"  - {qtype} seed={seed}: {status} (returned={count})")
+        lines.append("")
+
+    if rows["html_meta"]:
+        lines.extend(["## Publisher HTML Meta Extraction", ""])
+        for field in ["html_meta_status"]:
+            counter = count_values(rows["html_meta"], field)
+            if counter:
+                lines.extend([f"### `{field}`", "", *table(counter), ""])
+        extracted = sum(1 for r in rows["html_meta"] if (r.get("html_meta_status") or "") == "extracted")
+        total = len(rows["html_meta"])
+        if total:
+            lines.append(f"Coverage: {extracted}/{total} rows had citation_* meta tags.")
+            lines.append("")
 
     access_rows = rows["probed"] or rows["queue"] or rows["oa"]
     if access_rows:

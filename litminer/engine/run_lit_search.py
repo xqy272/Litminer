@@ -1536,6 +1536,7 @@ def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
         explicit_seeds=explicit_seeds,
         direction=getattr(args, "expand_direction", "both"),
         max_per_seed=getattr(args, "expand_max_per_seed", 30),
+        trace_output=out_dir / "citation_expand_trace.csv",
     )
     counts["citation_expand_seeds"] = len(summary.get("seeds", []))
     counts["citation_expand_rows"] = summary.get("expanded_count", 0)

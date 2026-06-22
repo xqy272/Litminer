@@ -61,6 +61,9 @@ WORKFLOW_TOOL_NAMES = [
     "litminer_build_publisher_queue",
     "litminer_processing_report",
     "litminer_agent_summary",
+    "litminer_result_profile",
+    "litminer_search_audit_report",
+    "litminer_citation_expand",
     "litminer_read_csv_summary",
 ]
 
@@ -192,6 +195,9 @@ _get_engine_doctor = _lazy_import("litminer.engine.doctor")
 _get_engine_bootstrap = _lazy_import("litminer.engine.bootstrap")
 _get_engine_publisher_adapters = _lazy_import("litminer.engine.publisher_adapters")
 _get_engine_provenance = _lazy_import("litminer.engine.provenance")
+_get_engine_result_profile = _lazy_import("litminer.engine.result_profile")
+_get_engine_search_audit_report = _lazy_import("litminer.engine.search_audit_report")
+_get_engine_citation_expand = _lazy_import("litminer.engine.citation_expand")
 
 
 def _workspace_root() -> Path:
@@ -672,6 +678,47 @@ def tool_agent_summary(args: dict) -> dict:
     output = _optional_workspace_path(args.get("output"), "output")
     path = mod.write_summary(output_dir, output_path=output)
     return {"status": "ok", "output": str(path), "summary": mod.build_summary(output_dir)}
+
+
+def tool_result_profile(args: dict) -> dict:
+    """Generate a stratified result profile JSON for a Litminer run directory."""
+    mod = _get_engine_result_profile()
+    output_dir = _workspace_path(args["output_dir"], "output_dir", must_exist=True)
+    output = _optional_workspace_path(args.get("output"), "output")
+    triaged = output_dir / "triaged_candidates.csv"
+    trace = output_dir / "api_discovery_trace.csv"
+    manifest = output_dir / "run_manifest.json"
+    path = mod.write_profile(triaged, trace, manifest, output_path=output)
+    return {"status": "ok", "output": str(path), "profile": mod.build_profile(triaged, trace, manifest)}
+
+
+def tool_search_audit_report(args: dict) -> dict:
+    """Generate a human-readable search audit report for a Litminer run directory."""
+    mod = _get_engine_search_audit_report()
+    output_dir = _workspace_path(args["output_dir"], "output_dir", must_exist=True)
+    output = _optional_workspace_path(args.get("output"), "output")
+    path = mod.build_audit_report(output_dir, output_path=output)
+    return {"status": "ok", "output": str(path)}
+
+
+def tool_citation_expand(args: dict) -> dict:
+    """Expand citations from triaged candidates via Semantic Scholar."""
+    mod = _get_engine_citation_expand()
+    input_csv = _workspace_path(args["input_csv"], "input_csv", must_exist=True)
+    output_csv = _optional_workspace_path(args.get("output_csv"), "output_csv")
+    if output_csv is None:
+        output_csv = input_csv.parent / "citation_expanded_candidates.csv"
+    top_n = int(args.get("top_n", 5))
+    direction = str(args.get("direction", "both"))
+    max_per_seed = int(args.get("max_per_seed", 30))
+    seeds = args.get("seeds")
+    explicit_seeds = [s.strip() for s in str(seeds).split(",") if s.strip()] if seeds else None
+    summary = mod.expand_from_triaged(
+        input_csv, output_csv,
+        top_n=top_n, explicit_seeds=explicit_seeds,
+        direction=direction, max_per_seed=max_per_seed,
+    )
+    return {"status": "ok", "output": str(output_csv), "summary": summary}
 
 
 def tool_read_csv_summary(args: dict) -> dict:
@@ -1230,6 +1277,34 @@ TOOLS: dict[str, dict] = {
         "parameters": {
             "output_dir": {"type": "string", "required": True, "description": "Litminer output directory"},
             "output": {"type": "string", "required": False, "description": "Summary JSON path"},
+        },
+    },
+    "litminer_result_profile": {
+        "handler": tool_result_profile,
+        "description": "Generate a stratified result profile JSON with descriptive statistics and completeness caveats for a Litminer output directory",
+        "parameters": {
+            "output_dir": {"type": "string", "required": True, "description": "Litminer output directory"},
+            "output": {"type": "string", "required": False, "description": "Profile JSON path"},
+        },
+    },
+    "litminer_search_audit_report": {
+        "handler": tool_search_audit_report,
+        "description": "Generate a human-readable search audit report (Markdown) for research reproducibility from a Litminer output directory",
+        "parameters": {
+            "output_dir": {"type": "string", "required": True, "description": "Litminer output directory"},
+            "output": {"type": "string", "required": False, "description": "Audit report Markdown path"},
+        },
+    },
+    "litminer_citation_expand": {
+        "handler": tool_citation_expand,
+        "description": "Expand citations from triaged candidates via Semantic Scholar citation/reference graph. Seeds are selected mechanically (Top N high-priority) or explicitly via the seeds parameter.",
+        "parameters": {
+            "input_csv": {"type": "string", "required": True, "description": "Triaged candidates CSV path inside the workspace"},
+            "output_csv": {"type": "string", "required": False, "description": "Output expanded candidates CSV path"},
+            "top_n": {"type": "integer", "required": False, "description": "Max seeds from high-priority rows (default: 5)"},
+            "seeds": {"type": "string", "required": False, "description": "Comma-separated explicit seed DOIs (overrides mechanical selection)"},
+            "direction": {"type": "string", "required": False, "description": "forward, backward, or both (default: both)"},
+            "max_per_seed": {"type": "integer", "required": False, "description": "Max papers to expand per seed (default: 30)"},
         },
     },
     "litminer_read_csv_summary": {

@@ -74,13 +74,17 @@ def expand_citations(
     *,
     direction: str = "both",
     max_per_seed: int = 30,
-) -> list[dict[str, str]]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Expand seeds via Semantic Scholar citation/reference graph.
 
-    Returns rows in uniform schema with ``discovery_source`` and
-    ``source_note`` set for traceability.
+    Returns a tuple of (expanded rows, trace rows). Expanded rows are in
+    uniform schema with ``discovery_source`` and ``source_note`` set.
+    Trace rows record ``(provider, query_type, seed_doi, status, returned_count)``
+    for each seed attempt, so ``result_profile`` can report expansion
+    failures in ``completeness_caveats``.
     """
     results: list[dict[str, str]] = []
+    trace: list[dict[str, str]] = []
     for doi in seed_dois:
         if direction in ("forward", "both"):
             try:
@@ -88,8 +92,28 @@ def expand_citations(
                 for row in citations:
                     row["discovery_source"] = "semantic_scholar_citation"
                 results.extend(citations)
+                trace.append({
+                    "provider": "semantic_scholar",
+                    "query_id": f"citation_expand:{doi}",
+                    "query_type": "citation_expand",
+                    "seed_doi": doi,
+                    "status": "ok",
+                    "status_class": "ok",
+                    "returned_count": str(len(citations)),
+                    "error": "",
+                })
                 print(f"  Citation expansion for {doi}: {len(citations)} rows", file=sys.stderr)
             except Exception as exc:
+                trace.append({
+                    "provider": "semantic_scholar",
+                    "query_id": f"citation_expand:{doi}",
+                    "query_type": "citation_expand",
+                    "seed_doi": doi,
+                    "status": "error",
+                    "status_class": "error",
+                    "returned_count": "0",
+                    "error": str(exc),
+                })
                 print(f"  Citation expansion failed for {doi}: {exc}", file=sys.stderr)
 
         if direction in ("backward", "both"):
@@ -98,11 +122,31 @@ def expand_citations(
                 for row in refs:
                     row["discovery_source"] = "semantic_scholar_reference"
                 results.extend(refs)
+                trace.append({
+                    "provider": "semantic_scholar",
+                    "query_id": f"reference_expand:{doi}",
+                    "query_type": "reference_expand",
+                    "seed_doi": doi,
+                    "status": "ok",
+                    "status_class": "ok",
+                    "returned_count": str(len(refs)),
+                    "error": "",
+                })
                 print(f"  Reference expansion for {doi}: {len(refs)} rows", file=sys.stderr)
             except Exception as exc:
+                trace.append({
+                    "provider": "semantic_scholar",
+                    "query_id": f"reference_expand:{doi}",
+                    "query_type": "reference_expand",
+                    "seed_doi": doi,
+                    "status": "error",
+                    "status_class": "error",
+                    "returned_count": "0",
+                    "error": str(exc),
+                })
                 print(f"  Reference expansion failed for {doi}: {exc}", file=sys.stderr)
 
-    return results
+    return results, trace
 
 
 def expand_from_triaged(
@@ -113,11 +157,14 @@ def expand_from_triaged(
     explicit_seeds: list[str] | None = None,
     direction: str = "both",
     max_per_seed: int = 30,
+    trace_output: Path | None = None,
 ) -> dict[str, Any]:
     """Run citation expansion from a triaged CSV and write expanded candidates.
 
     Returns a summary dict with seed count, expanded count, and per-seed
-    error info for ``agent_summary`` and ``processing_report``.
+    error info for ``agent_summary`` and ``processing_report``. If
+    ``trace_output`` is given, per-seed trace rows are written there for
+    ``result_profile`` completeness caveats.
     """
     _fieldnames, rows = read_csv_rows(triaged_path)
     seeds = select_seeds(rows, top_n=top_n, explicit_seeds=explicit_seeds)
@@ -130,10 +177,11 @@ def expand_from_triaged(
             "expanded_count": 0,
             "direction": direction,
             "errors": [],
+            "trace_rows": [],
         }
 
     print(f"Citation expansion: {len(seeds)} seed(s), direction={direction}", file=sys.stderr)
-    expanded = expand_citations(seeds, direction=direction, max_per_seed=max_per_seed)
+    expanded, trace = expand_citations(seeds, direction=direction, max_per_seed=max_per_seed)
 
     if expanded:
         fieldnames = list(expanded[0].keys())
@@ -141,11 +189,17 @@ def expand_from_triaged(
         fieldnames = list(semantic_scholar_search.OUTPUT_FIELDS)
     write_csv_atomic(expanded, output_path, fieldnames=fieldnames)
 
+    if trace_output and trace:
+        trace_fields = ["provider", "query_id", "query_type", "seed_doi",
+                        "status", "status_class", "returned_count", "error"]
+        write_csv_atomic(trace, trace_output, fieldnames=trace_fields)
+
     return {
         "seeds": seeds,
         "expanded_count": len(expanded),
         "direction": direction,
         "max_per_seed": max_per_seed,
+        "trace_rows": trace,
     }
 
 
