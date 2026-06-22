@@ -72,7 +72,6 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "queue_priorities": (str,),
         "include_metadata_blocked": (bool,),
         "queue_strict_only": (bool,),
-        "unknown_value": (str,),
     },
 }
 
@@ -244,8 +243,8 @@ def check_environment(config: dict[str, Any] | None = None) -> list[Check]:
     checks.append(
         Check(
             "env",
-            "ok" if _env_value(key_name) else "ok",
-            f"{key_name} {'is set' if _env_value(key_name) else 'is not set; usually optional'}",
+            "ok" if _env_value(key_name) else "warning",
+            f"{key_name} {'is set' if _env_value(key_name) else 'is not set; usually optional but enables higher OpenAlex rate limits'}",
         )
     )
     return checks

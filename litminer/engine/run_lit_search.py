@@ -26,8 +26,6 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from litminer.engine import api_discovery
 from litminer.engine import agent_summary
@@ -295,7 +293,7 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.skip_journal_metrics = not bool(channels.get("journal_metrics", True))
     if getattr(args, "probe_publishers", None) is None:
         args.probe_publishers = bool(channels.get("publisher_probe", False))
-    if getattr(args, "skip_unpaywall", None):
+    if getattr(args, "skip_unpaywall", None) is True:
         args.enrich_unpaywall = False
     elif getattr(args, "enrich_unpaywall", None) is None:
         args.enrich_unpaywall = bool(channels.get("unpaywall", True))
@@ -673,6 +671,18 @@ def preflight_warnings(args: argparse.Namespace) -> list[str]:
             "Journal metrics were requested but journal_metrics is disabled; "
             "metric annotation/filtering will be skipped."
         )
+    if getattr(args, "min_if", None) is not None:
+        metrics_path = getattr(args, "metrics", None) or journal_metrics.DEFAULT_METRICS
+        try:
+            validation = journal_metrics.validate_metrics(metrics_path, require_numeric_if=True)
+            if validation.get("row_count", 0) == 0:
+                warnings.append(
+                    f"--min-if is set but the metrics CSV ({metrics_path}) contains no data rows. "
+                    "All papers will receive metric_filter_status=\"unverified\". "
+                    "Provide a populated metrics CSV via --metrics, or remove --min-if."
+                )
+        except Exception:
+            pass
     if getattr(args, "min_if", None) is not None and not getattr(args, "queue_strict_only", False):
         warnings.append(
             "A minimum impact-factor threshold is set, but queue_strict_only is disabled; "
@@ -893,7 +903,6 @@ def finalize_run(
     workflow_state.write_manifest(out_dir, manifest)
     artifact_index_path = artifacts.write_index(out_dir)
     refresh_processing_report(out_dir, warnings=warnings)
-    artifact_index_path = artifacts.write_index(out_dir)
     return {
         "status": final_status,
         "output_dir": str(out_dir),

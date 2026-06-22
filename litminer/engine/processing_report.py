@@ -97,7 +97,8 @@ def read_json_object(path: Path) -> dict:
 
 
 def append_trust_summary(lines: list[str], rows: dict[str, list[dict[str, str]]]) -> None:
-    discovered = len(rows["deduped"] or rows["api"])
+    deduped_rows = rows["deduped"]
+    discovered = len(deduped_rows) if deduped_rows is not None else len(rows["api"])
     verified_rows = rows["verified"] or rows["oa"]
     trusted_crossref = sum(
         1
@@ -242,7 +243,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
             lines.extend([f"### `{field}`", "", *table(count_values(rows["api_trace"], field)), ""])
         problem_rows = [
             row for row in rows["api_trace"]
-            if (row.get("status") or "") not in {"ok"}
+            if (row.get("status") or "") not in {"ok", "empty_result"}
         ]
         if problem_rows:
             lines.extend(["### Non-OK Provider Calls", ""])
@@ -267,6 +268,8 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
 
     if rows["triaged"]:
         lines.extend(["## Triage Summary", ""])
+        lines.append("Note: triage_score includes a citation-count signal (cited_by_count, capped at +2.0).")
+        lines.append("")
         for field in ["triage_priority", "metadata_status", "candidate_status", "llm_review_needed"]:
             lines.extend([f"### `{field}`", "", *table(count_values(rows["triaged"], field)), ""])
 
@@ -338,7 +341,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "",
     ])
 
-    write_text_atomic(output_path, "\n".join(lines))
+    write_text_atomic(output_path, "\n".join(lines) + "\n")
     return output_path
 
 

@@ -178,7 +178,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "stage_status_classes": _status_classes(stage_statuses),
         "stage_next_actions": _status_next_actions(stage_statuses),
         "trust_tiers": {
-            "discovered_or_deduped": len(rows.get("deduped_candidates", []) or rows.get("api_candidates", [])),
+            "discovered_or_deduped": len(rows.get("deduped_candidates") if rows.get("deduped_candidates") is not None else rows.get("api_candidates", [])),
             "crossref_trusted": crossref_trusted,
             "metric_pass": metric_pass,
             "publisher_queue": len(rows.get("publisher_queue", [])),

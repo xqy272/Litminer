@@ -50,7 +50,6 @@
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",
     "include_metadata_blocked": false,
-    "queue_strict_only": true,
-    "unknown_value": "Unknown"
+    "queue_strict_only": true
   }
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import OrderedDict
@@ -539,6 +540,10 @@ def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
     if row.get("abstract"):
         score += 0.5
 
+    cited = int(row.get("cited_by_count") or 0)
+    citation_bonus = min(math.log2(cited + 1) * 0.3, 2.0) if cited > 0 else 0.0
+    score += citation_bonus
+
     hard_flags, meta_status, meta_reasons = metadata_flags(row, profile)
     priority = priority_for(profile, matched_required, matched_optional,
                             matched_negative, missing_required, row)
@@ -556,6 +561,8 @@ def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
         reasons.append("no semantic profile supplied; left for LLM review")
     if hard_flags:
         reasons.append("metadata flags: " + ", ".join(hard_flags))
+    if citation_bonus > 0:
+        reasons.append(f"citation signal: +{citation_bonus:.1f} ({cited} citations)")
 
     tags: list[str] = []
     tags.extend(f"required:{name}" for name in matched_required)
