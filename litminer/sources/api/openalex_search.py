@@ -63,6 +63,8 @@ OUTPUT_FIELDS = [
     "article_type",
     "cited_by_count",
     "authors",
+    "affiliations",
+    "orcids",
     "openalex_id",
     "landing_page_url",
     "discovery_source",
@@ -140,6 +142,37 @@ def _extract_authors(work: dict) -> str:
     return "; ".join(names)
 
 
+def _extract_affiliations(work: dict) -> str:
+    """Return semicolon-separated, de-duplicated institution display names."""
+    authorships = work.get("authorships", []) or []
+    seen: set[str] = set()
+    names: list[str] = []
+    for a in authorships:
+        institutions = a.get("institutions", []) or []
+        for inst in institutions:
+            name = (inst.get("display_name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return "; ".join(names)
+
+
+def _extract_orcids(work: dict) -> str:
+    """Return semicolon-separated, de-duplicated ORCID identifiers."""
+    authorships = work.get("authorships", []) or []
+    seen: set[str] = set()
+    orcids: list[str] = []
+    for a in authorships:
+        author = a.get("author", {}) or {}
+        orcid = (author.get("orcid") or "").strip()
+        if orcid:
+            orcid = orcid.replace("https://orcid.org/", "").lower()
+            if orcid not in seen:
+                seen.add(orcid)
+                orcids.append(orcid)
+    return "; ".join(orcids)
+
+
 FIELD_MAP: dict[str, Any] = {
     "title": lambda w: w.get("title", ""),
     "doi": lambda w: _extract_doi(w),
@@ -149,6 +182,8 @@ FIELD_MAP: dict[str, Any] = {
     "article_type": lambda w: w.get("type", ""),
     "cited_by_count": lambda w: str(w.get("cited_by_count", "")),
     "authors": lambda w: _extract_authors(w),
+    "affiliations": lambda w: _extract_affiliations(w),
+    "orcids": lambda w: _extract_orcids(w),
     "openalex_id": lambda w: w.get("id", ""),
     "landing_page_url": lambda w: _extract_landing_page_url(w),
     "discovery_source": lambda w: "openalex",

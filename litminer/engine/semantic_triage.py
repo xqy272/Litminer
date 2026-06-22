@@ -501,6 +501,15 @@ def priority_for(profile: TriageProfile, matched_required: list[str],
     if not has_concepts or not has_text:
         return "needs_review"
 
+    base_priority = _base_priority_for_concepts(
+        profile, matched_required, matched_optional, matched_negative, missing_required,
+    )
+    return _apply_retraction_demotion(row, base_priority)
+
+
+def _base_priority_for_concepts(profile: TriageProfile, matched_required: list[str],
+                                matched_optional: list[str], matched_negative: list[str],
+                                missing_required: list[str]) -> str:
     if profile.required and not missing_required:
         return "medium" if matched_negative else "high"
     if matched_required or matched_optional:
@@ -508,6 +517,16 @@ def priority_for(profile: TriageProfile, matched_required: list[str],
     if matched_negative:
         return "low"
     return "needs_review"
+
+
+_DEMOTION_ORDER = {"high": "medium", "medium": "needs_review", "needs_review": "low", "low": "low"}
+
+
+def _apply_retraction_demotion(row: dict[str, str], priority: str) -> str:
+    retraction = (row.get("retraction_status") or "").strip().lower()
+    if retraction == "retracted":
+        return _DEMOTION_ORDER.get(priority, "needs_review")
+    return priority
 
 
 def candidate_status(priority: str, metadata_status: str) -> str:
@@ -563,6 +582,9 @@ def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
         reasons.append("metadata flags: " + ", ".join(hard_flags))
     if citation_bonus > 0:
         reasons.append(f"citation signal: +{citation_bonus:.1f} ({cited} citations)")
+    retraction = (row.get("retraction_status") or "").strip().lower()
+    if retraction == "retracted":
+        reasons.append("demoted due to Crossref retraction update")
 
     tags: list[str] = []
     tags.extend(f"required:{name}" for name in matched_required)

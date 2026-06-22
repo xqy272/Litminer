@@ -10,6 +10,7 @@ from typing import Any
 
 from litminer.engine.common import read_csv_rows, write_text_atomic
 from litminer.engine import artifacts as artifact_index
+from litminer.engine import result_profile
 from litminer.engine import workflow_state
 from litminer.engine import publisher_adapters
 from litminer.engine import status_policy
@@ -136,6 +137,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "feasibility_report": output_dir / "feasibility_report.md",
         "run_manifest": workflow_state.manifest_path(output_dir),
         "artifacts_index": output_dir / artifact_index.INDEX_NAME,
+        "result_profile": output_dir / result_profile.PROFILE_NAME,
     }
     rows = {name: read_rows(path) for name, path in paths.items() if path.suffix == ".csv"}
     manifest = workflow_state.load_manifest(output_dir)
@@ -201,6 +203,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "metadata_statuses": count_values(rows.get("triaged_candidates", []), "metadata_status"),
         "metric_statuses": count_values(rows.get("metrics_annotated_candidates", []), "metric_filter_status"),
         "access_statuses": count_values(rows.get("publisher_queue_probed", []), "access_status"),
+        "retraction_statuses": count_values(rows.get("verified_candidates", []), "retraction_status"),
         "warnings": warnings or [],
         "source_strategy": source_strategy,
         "artifact_tiers": artifact_inventory.get("by_tier", {}),
@@ -209,7 +212,19 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "publisher_adapters": publisher_adapters.adapter_rows(),
         "artifacts": artifact_inventory.get("artifacts_by_name", {}),
         "artifacts_index_path": str(paths["artifacts_index"]),
+        "result_profile_path": str(paths["result_profile"]),
     }
+
+    profile_path = paths["result_profile"]
+    if profile_path.exists():
+        try:
+            full_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            summary["result_profile"] = result_profile.to_summary_dict(full_profile)
+        except (json.JSONDecodeError, ValueError):
+            summary["result_profile"] = {"error": "result_profile.json could not be parsed"}
+    else:
+        summary["result_profile"] = None
+
     summary["next_actions"] = _next_actions(summary)
     return summary
 

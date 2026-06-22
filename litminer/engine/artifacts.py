@@ -28,6 +28,12 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
         "api_discovery_trace.csv",
         "Provider/query/status trace for discovery failures.",
     ),
+    (
+        "result_profile",
+        "primary",
+        "result_profile.json",
+        "Stratified descriptive statistics and search-process completeness caveats for the retrieved collection.",
+    ),
     ("feasibility_report", "supporting", "feasibility_report.md", "Constraint feasibility and blocking reasons."),
     ("field_provenance", "supporting", "field_provenance.json", "Field-level source/trust map."),
     ("api_candidates", "supporting", "api_candidates.csv", "Raw API discovery candidates."),

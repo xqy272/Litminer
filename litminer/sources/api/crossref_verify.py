@@ -171,7 +171,42 @@ def _extract_crossref_metadata(message: dict) -> dict[str, str]:
         "crossref_url": message.get("URL", ""),
         "crossref_created": _extract_date_part(message.get("created", {})),
         "crossref_published": _extract_date_part(message.get("published-print", {}) or message.get("published-online", {})),
+        "retraction_status": _extract_retraction_status(message),
     }
+
+
+def _extract_retraction_status(message: dict) -> str:
+    """Classify retraction status from Crossref ``update-to`` relationships.
+
+    Crossref records updates (retractions, corrections, etc.) under the
+    ``update-to`` field. Each entry has ``type`` (e.g. ``retraction``) and
+    ``DOI`` pointing to the updating work. See the Crossref REST API
+    documentation for the updates schema.
+
+    Returns one of:
+    - ``retracted``: at least one update of type ``retraction`` is recorded.
+    - ``update_to``: an update of another type (correction, expression_of_concern, etc.)
+    - ``active``: no updates recorded.
+    - ``unknown``: field missing or malformed.
+    """
+    updates = message.get("update-to")
+    if not updates or not isinstance(updates, list):
+        return "active"
+    has_retraction = False
+    has_other_update = False
+    for entry in updates:
+        if not isinstance(entry, dict):
+            continue
+        update_type = (entry.get("type") or "").strip().lower()
+        if update_type == "retraction":
+            has_retraction = True
+        elif update_type:
+            has_other_update = True
+    if has_retraction:
+        return "retracted"
+    if has_other_update:
+        return "update_to"
+    return "active"
 
 
 def _safe_first_date_part(date_dict: dict) -> list:
@@ -428,7 +463,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "crossref_created", "crossref_published", "crossref_mismatches",
         "crossref_lookup_method", "crossref_title_similarity",
         "crossref_recovered_doi_confidence", "crossref_status", "crossref_verified",
-        "crossref_retry_after_seconds",
+        "crossref_retry_after_seconds", "retraction_status",
     ]
     for col in xref_cols:
         if col not in fieldnames:
@@ -455,6 +490,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "cache_store": 0,
         "reused": 0,
         "skipped_budget": 0,
+        "retracted": 0,
+        "update_to": 0,
     }
     request_count = 0
     existing_rows = _existing_verified_rows(output_path)
@@ -485,6 +522,11 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             counts[status] += 1
         elif status == "title_recovered":
             counts["title_recovered"] += 1
+        retraction = (row.get("retraction_status") or "").strip()
+        if retraction == "retracted":
+            counts["retracted"] += 1
+        elif retraction == "update_to":
+            counts["update_to"] += 1
 
     for i, row in enumerate(rows):
         existing = existing_rows.get(_row_identity(row))

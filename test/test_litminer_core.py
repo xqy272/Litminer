@@ -2274,6 +2274,133 @@ class LitminerCoreTests(unittest.TestCase):
             manifest = json.loads((root / "cancelled" / "run_manifest.json").read_text(encoding="utf-8"))
             self.assertIn("Cancelled by background job request", manifest["stop_reason"])
 
+    def test_result_profile_stratifies_and_reports_caveats(self) -> None:
+        from litminer.engine import result_profile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            triaged = tmp_path / "triaged_candidates.csv"
+            triaged.write_text(
+                "title,doi,publication_year,journal,article_type,cited_by_count,abstract,triage_priority,crossref_status\n"
+                "Paper A,10.1/a,2026,Journal A,article,5,abstract text,high,verified\n"
+                "Paper B,10.2/b,2025,Journal B,article,0,abstract text,medium,lookup_failed\n"
+                "Paper C,10.3/c,2026,Journal A,review,100,,low,verified\n",
+                encoding="utf-8",
+            )
+            trace = tmp_path / "api_discovery_trace.csv"
+            trace.write_text(
+                "provider,query_id,status,status_class,http_status,transient_error,cache_status,next_action\n"
+                "openalex,q001,ok,ok,200,,,\n"
+                "semantic_scholar,q002,skipped_circuit_breaker,skipped,,,continue_with_other_sources,\n"
+                "semantic_scholar,q003,rate_limited,rate_limited,429,true,,retry_after_cooldown\n",
+                encoding="utf-8",
+            )
+            manifest = tmp_path / "run_manifest.json"
+            manifest.write_text(json.dumps({"run_status": "partial"}), encoding="utf-8")
+
+            profile = result_profile.build_profile(triaged, trace, manifest)
+
+            self.assertFalse(profile["degraded"])
+            self.assertEqual(profile["all_rows"]["total_rows"], 3)
+            self.assertEqual(profile["crossref_verified"]["total_rows"], 2)
+            self.assertEqual(profile["all_rows"]["year_distribution"], {"2025": 1, "2026": 2})
+            self.assertEqual(profile["crossref_verified"]["top_journals"], [("Journal A", 2)])
+            self.assertEqual(profile["all_rows"]["high_cited"][0]["cited_by_count"], 100)
+            self.assertAlmostEqual(profile["all_rows"]["abstract_coverage"], 2 / 3, places=4)
+            self.assertEqual(profile["all_rows"]["doi_coverage"], 1.0)
+            self.assertIn("semantic_scholar", profile["completeness_caveats"]["circuit_broken_providers"])
+            self.assertEqual(profile["completeness_caveats"]["rate_limited_queries"], 1)
+            self.assertIn("semantic_scholar", profile["completeness_caveats"]["provider_failure_counts"])
+
+    def test_result_profile_degrades_to_failure_summary_when_empty(self) -> None:
+        from litminer.engine import result_profile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            triaged = tmp_path / "triaged_candidates.csv"
+            triaged.write_text("title,doi\n", encoding="utf-8")
+            trace = tmp_path / "api_discovery_trace.csv"
+            trace.write_text(
+                "provider,query_id,status,status_class,next_action\n"
+                "openalex,q001,rate_limited,rate_limited,retry_after_cooldown\n",
+                encoding="utf-8",
+            )
+            manifest = tmp_path / "run_manifest.json"
+            manifest.write_text(json.dumps({"run_status": "partial"}), encoding="utf-8")
+
+            profile = result_profile.build_profile(triaged, trace, manifest)
+            self.assertTrue(profile["degraded"])
+            self.assertIsNone(profile["all_rows"])
+            self.assertIsNotNone(profile["failure_summary"])
+            self.assertEqual(profile["failure_summary"]["provider_status_counts"]["rate_limited"], 1)
+
+    def test_result_profile_missing_columns_return_none(self) -> None:
+        from litminer.engine import result_profile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            triaged = tmp_path / "triaged_candidates.csv"
+            triaged.write_text("title,doi\nPaper A,10.1/a\n", encoding="utf-8")
+            trace = tmp_path / "api_discovery_trace.csv"
+            trace.write_text(
+                "provider,query_id,status,status_class,next_action\n"
+                "openalex,q001,ok,ok,\n",
+                encoding="utf-8",
+            )
+            manifest = tmp_path / "run_manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+
+            profile = result_profile.build_profile(triaged, trace, manifest)
+            self.assertFalse(profile["degraded"])
+            self.assertIsNone(profile["all_rows"]["top_journals"])
+            self.assertIsNone(profile["all_rows"]["oa_rate"])
+            self.assertIsNone(profile["all_rows"]["triage_priority_distribution"])
+
+    def test_retraction_demotes_priority(self) -> None:
+        row = {
+            "title": "Retracted paper",
+            "abstract": "text",
+            "retraction_status": "retracted",
+        }
+        from litminer.engine.semantic_triage import Concept, TriageProfile, _apply_retraction_demotion
+        self.assertEqual(_apply_retraction_demotion(row, "high"), "medium")
+        self.assertEqual(_apply_retraction_demotion(row, "medium"), "needs_review")
+        self.assertEqual(_apply_retraction_demotion(row, "low"), "low")
+
+        row_active = {"retraction_status": "active"}
+        self.assertEqual(_apply_retraction_demotion(row_active, "high"), "high")
+
+    def test_crossref_retraction_status_classification(self) -> None:
+        from litminer.sources.api.crossref_verify import _extract_retraction_status
+        self.assertEqual(_extract_retraction_status({}), "active")
+        self.assertEqual(_extract_retraction_status({"update-to": []}), "active")
+        self.assertEqual(
+            _extract_retraction_status({"update-to": [{"type": "retraction", "DOI": "10.1/r"}]}),
+            "retracted",
+        )
+        self.assertEqual(
+            _extract_retraction_status({"update-to": [{"type": "correction", "DOI": "10.1/c"}]}),
+            "update_to",
+        )
+        self.assertEqual(
+            _extract_retraction_status({"update-to": [{"type": "retraction"}, {"type": "correction"}]}),
+            "retracted",
+        )
+
+    def test_openalex_extracts_affiliations_and_orcids(self) -> None:
+        from litminer.sources.api.openalex_search import _extract_affiliations, _extract_orcids
+        work = {
+            "authorships": [
+                {
+                    "author": {"display_name": "Alice", "orcid": "https://orcid.org/0000-0001-2345-6789"},
+                    "institutions": [{"display_name": "MIT"}, {"display_name": "MIT"}],
+                },
+                {
+                    "author": {"display_name": "Bob", "orcid": "0000-0002-3456-7890"},
+                    "institutions": [{"display_name": "Stanford"}],
+                },
+            ],
+        }
+        self.assertEqual(_extract_affiliations(work), "MIT; Stanford")
+        self.assertEqual(_extract_orcids(work), "0000-0001-2345-6789; 0000-0002-3456-7890")
+
 
 if __name__ == "__main__":
     unittest.main()

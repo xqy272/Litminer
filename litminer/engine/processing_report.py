@@ -15,6 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from litminer.engine import artifacts
+from litminer.engine import result_profile
 from litminer.engine import status_policy
 from litminer.engine.common import normalize_doi, read_csv_rows, write_text_atomic
 
@@ -263,8 +264,12 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         crossref_rows = rows["verified"]
         if crossref_rows:
             lines.extend(["## Crossref Verification", ""])
-            for field in ["crossref_status", "crossref_verified", "crossref_lookup_method", "crossref_cache_status"]:
+            for field in ["crossref_status", "crossref_verified", "crossref_lookup_method", "crossref_cache_status", "retraction_status"]:
                 lines.extend([f"### `{field}`", "", *table(count_values(crossref_rows, field)), ""])
+            retracted = sum(1 for row in crossref_rows if (row.get("retraction_status") or "").strip() == "retracted")
+            if retracted:
+                lines.append(f"Note: {retracted} row(s) are marked as retracted via Crossref update-to relationships.")
+                lines.append("")
 
     if rows["triaged"]:
         lines.extend(["## Triage Summary", ""])
@@ -340,6 +345,17 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "- Use `publisher_queue.csv` for page inspection tasks and `publisher_queue_probed.csv` when access probing was enabled.",
         "",
     ])
+
+    profile_path = output_dir / result_profile.PROFILE_NAME
+    if profile_path.exists():
+        try:
+            full_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            lines.append(result_profile.to_markdown(full_profile))
+        except (json.JSONDecodeError, ValueError):
+            lines.append("## Result Profile")
+            lines.append("")
+            lines.append("result_profile.json could not be parsed.")
+            lines.append("")
 
     write_text_atomic(output_path, "\n".join(lines) + "\n")
     return output_path

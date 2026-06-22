@@ -40,6 +40,7 @@ from litminer.engine import publisher_probe
 from litminer.engine import processing_report
 from litminer.engine import provenance
 from litminer.engine import publisher_adapters
+from litminer.engine import result_profile
 from litminer.engine import semantic_triage
 from litminer.engine import query_plan
 from litminer.engine import status_policy
@@ -902,6 +903,11 @@ def finalize_run(
     manifest["completed_at"] = workflow_state.utc_now()
     workflow_state.write_manifest(out_dir, manifest)
     artifact_index_path = artifacts.write_index(out_dir)
+    result_profile_path = result_profile.write_profile(
+        out_dir / "triaged_candidates.csv",
+        out_dir / "api_discovery_trace.csv",
+        workflow_state.manifest_path(out_dir),
+    )
     refresh_processing_report(out_dir, warnings=warnings)
     return {
         "status": final_status,
@@ -910,6 +916,7 @@ def finalize_run(
         "feasibility_report": str(out_dir / "feasibility_report.md"),
         "processing_report": str(out_dir / "processing_report.md"),
         "agent_summary": str(out_dir / agent_summary.SUMMARY_NAME),
+        "result_profile": str(result_profile_path),
         "query_plan": str(out_dir / query_plan.PLAN_NAME),
         "field_provenance": str(out_dir / provenance.PROVENANCE_NAME),
         "publisher_adapters": str(out_dir / "publisher_adapters.json"),
