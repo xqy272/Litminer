@@ -262,18 +262,31 @@ for reviewed trusted profiles with `--enable-regex-concepts` or the MCP
 Read outputs in this order:
 
 1. `agent_summary.json`: machine-readable run status, trust tiers, provider
-   health, artifact read order, and next actions.
-2. `processing_report.md`: compact human-readable counts, status classes,
-   metadata health, cache/recovery notes, and queue summary.
-3. `artifacts_index.json`: canonical artifact inventory grouped by primary,
+   health, artifact read order, embedded `result_profile` summary, and next
+   actions.
+2. `result_profile.json`: stratified descriptive statistics (all rows +
+   Crossref-verified) with `completeness_caveats` reporting search-process
+   failures. Degraded to `failure_summary` on 0-result runs.
+3. `processing_report.md`: compact human-readable counts, status classes,
+   metadata health, cache/recovery notes, queue summary, and appended
+   result profile section.
+4. `search_audit_report.md`: human-readable audit report for research
+   reproducibility — same information as Agent artifacts, formatted for
+   a researcher to explain "how did you find these papers?".
+5. `artifacts_index.json`: canonical artifact inventory grouped by primary,
    supporting, and debug roles.
-4. `query_plan.json`: runtime queries, concepts, sources, budgets, and advisory
+6. `query_plan.json`: runtime queries, concepts, sources, budgets, and advisory
    source strategy.
-5. `run_manifest.json`: stage status, fingerprints, resume signature, cache
+7. `run_manifest.json`: stage status, fingerprints, resume signature, cache
    config, and reused/skipped stages.
-6. `triaged_candidates.csv`: semantic review surface.
-7. `publisher_queue.csv`: article-page inspection queue.
-8. `api_discovery_trace.csv`: provider/query/status trail for failures.
+8. `triaged_candidates.csv`: semantic review surface.
+9. `publisher_queue.csv`: article-page inspection queue.
+10. `publisher_queue_probed.csv`: probed queue with access/PDF/SI status
+    (when publisher probing is enabled).
+11. `publisher_queue_html_meta.csv`: publisher HTML meta extraction output
+    (when publisher probing is enabled; contains `citation_keywords`,
+    `citation_online_date`, `citation_funder_name`, etc.).
+12. `api_discovery_trace.csv`: provider/query/status trail for failures.
 
 Use `litminer_read_csv_summary` in MCP mode when a CSV is too large for direct
 context loading.

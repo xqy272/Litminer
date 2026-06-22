@@ -48,14 +48,19 @@ serve the Agent workflow described in `SKILL.md`.
 - `litminer/engine/run_lit_search.py`: end-to-end workflow runner.
 - `litminer/engine/api_discovery.py`: unified discovery orchestrator with trace/report output.
 - `litminer/engine/dedupe_papers.py`: DOI/title dedupe with complementary-field merging.
-- `litminer/engine/semantic_triage.py`: runtime concept tagging, scoring, and metadata flags.
-- `litminer/sources/api/crossref_verify.py`: Crossref DOI verification and title-based DOI recovery.
+- `litminer/engine/semantic_triage.py`: runtime concept tagging, scoring, citation-count signal, retraction demotion, and metadata flags.
+- `litminer/engine/citation_expand.py`: optional citation/reference graph expansion via Semantic Scholar (mechanical seed selection + Agent override).
+- `litminer/engine/result_profile.py`: stratified descriptive statistics with completeness caveats and failure-summary degradation.
+- `litminer/engine/search_audit_report.py`: human-readable audit report for research reproducibility.
+- `litminer/engine/publisher_html_extract.py`: publisher HTML meta tag extraction (citation_keywords, citation_online_date, citation_funder_name, etc.).
+- `litminer/sources/api/http_client.py`: shared single-request HTTP client with retry/backoff/429 handling (does not absorb circuit breaker logic).
+- `litminer/sources/api/crossref_verify.py`: Crossref DOI verification, title-based DOI recovery, and retraction status extraction.
 - `litminer/sources/api/unpaywall_lookup.py`: structured OA/access-link annotation.
 - `litminer/engine/journal_metrics.py`: verified local journal metric annotation.
 - `litminer/engine/build_publisher_queue.py`: publisher-page evidence queue generation.
 - `litminer/engine/publisher_probe.py`: safe DOI/page access probe; no PDF reading.
-- `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, and queue report.
-- `litminer/engine/agent_summary.py`: machine-readable trust tiers, stage status, artifact paths, and next actions.
+- `litminer/engine/processing_report.py`: compact source, metadata, triage, Crossref, OA/access, queue, and result profile report.
+- `litminer/engine/agent_summary.py`: machine-readable trust tiers, stage status, artifact paths, embedded result profile, and next actions.
 - `litminer/engine/artifacts.py`: artifact tier index for Agent navigation.
 - `litminer/engine/cache.py`: workspace-local JSON cache for deterministic metadata and short-lived provider failures.
 - `litminer/engine/status_policy.py`: shared status class and next-action semantics.
@@ -200,16 +205,19 @@ For long runs, prefer explicit controls:
 
 ### 3. Read Outputs In This Order
 
-1. `agent_summary.json` for machine-readable trust tiers, status, artifacts, and next actions.
-2. `artifacts_index.json` for primary/supporting/debug artifact navigation.
-3. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, cache/recovery notes, and queue summary.
-4. `query_plan.json` for Agent-derived queries, sources, concepts, budgets, and advisory source strategy.
-5. `run_manifest.json` for stage status, resume decisions, row counts, file fingerprints, and cache config.
-6. `feasibility_report.md` for feasibility and blocking reasons.
-7. `field_provenance.json` for field-level source/trust checks.
-8. `triaged_candidates.csv` for semantic review.
-9. `publisher_queue.csv` for article-page evidence work.
-10. `publisher_queue_probed.csv` only if probing was enabled.
+1. `agent_summary.json` for machine-readable trust tiers, status, artifacts, embedded `result_profile` summary, and next actions.
+2. `result_profile.json` for stratified descriptive statistics (all rows + Crossref-verified) with `completeness_caveats`. Degraded to `failure_summary` on 0-result runs.
+3. `artifacts_index.json` for primary/supporting/debug artifact navigation.
+4. `processing_report.md` for counts, source distribution, metadata health, Crossref status, OA/access hints, cache/recovery notes, queue summary, and appended result profile section.
+5. `search_audit_report.md` for human-readable audit report (same information as Agent artifacts, formatted for reproducibility).
+6. `query_plan.json` for Agent-derived queries, sources, concepts, budgets, and advisory source strategy.
+7. `run_manifest.json` for stage status, resume decisions, row counts, file fingerprints, and cache config.
+8. `feasibility_report.md` for feasibility and blocking reasons.
+9. `field_provenance.json` for field-level source/trust checks.
+10. `triaged_candidates.csv` for semantic review.
+11. `publisher_queue.csv` for article-page evidence work.
+12. `publisher_queue_probed.csv` only if probing was enabled.
+13. `publisher_queue_html_meta.csv` only if publisher probing was enabled; contains `citation_keywords`, `citation_online_date`, `citation_funder_name`, etc.
 
 Do not mechanically scan large CSVs before checking `processing_report.md`.
 Use the report's Trust Tiers to keep discovered candidates separate from

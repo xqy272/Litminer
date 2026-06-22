@@ -1511,6 +1511,95 @@ def run_publisher_probe_stage(input_path: Path, out_dir: Path,
     return probed
 
 
+def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
+                              args: argparse.Namespace,
+                              counts: dict[str, int],
+                              manifest: dict[str, Any] | None = None) -> Path:
+    if not getattr(args, "expand_citations", False):
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "citation_expand",
+            "skipped_disabled",
+            input_path=triaged_path,
+            row_count_value=workflow_state.row_count(triaged_path),
+        )
+        return triaged_path
+    expanded_path = out_dir / "citation_expanded_candidates.csv"
+    explicit_seeds = None
+    if getattr(args, "expand_seeds", None):
+        explicit_seeds = [s.strip() for s in args.expand_seeds.split(",") if s.strip()]
+    summary = citation_expand.expand_from_triaged(
+        triaged_path,
+        expanded_path,
+        top_n=getattr(args, "expand_top_n", 5),
+        explicit_seeds=explicit_seeds,
+        direction=getattr(args, "expand_direction", "both"),
+        max_per_seed=getattr(args, "expand_max_per_seed", 30),
+    )
+    counts["citation_expand_seeds"] = len(summary.get("seeds", []))
+    counts["citation_expand_rows"] = summary.get("expanded_count", 0)
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "citation_expand",
+        "completed" if summary.get("expanded_count", 0) > 0 else "skipped_no_seeds",
+        input_path=triaged_path,
+        output_path=expanded_path,
+        row_count_value=summary.get("expanded_count", 0),
+        message=f"Seeds: {len(summary.get('seeds', []))}, direction: {summary.get('direction', 'both')}",
+    )
+    return expanded_path
+
+
+def run_publisher_html_extract_stage(input_path: Path, out_dir: Path,
+                                     args: argparse.Namespace,
+                                     counts: dict[str, int],
+                                     manifest: dict[str, Any] | None = None) -> Path:
+    if not args.probe_publishers:
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "publisher_html_extract",
+            "skipped_disabled",
+            input_path=input_path,
+            row_count_value=workflow_state.row_count(input_path),
+        )
+        return input_path
+    extracted_path = out_dir / "publisher_queue_html_meta.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "publisher_html_extract",
+        extracted_path,
+        input_path=input_path,
+    ):
+        counts["html_meta_extracted"] = workflow_state.row_count(extracted_path)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "publisher_html_extract",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=extracted_path,
+            row_count_value=counts["html_meta_extracted"],
+            message="Reused existing publisher_queue_html_meta.csv",
+        )
+        return extracted_path
+    html_counts = publisher_html_extract.extract_csv(input_path, extracted_path)
+    counts["html_meta_extracted"] = sum(html_counts.values())
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "publisher_html_extract",
+        "completed",
+        input_path=input_path,
+        output_path=extracted_path,
+        row_count_value=workflow_state.row_count(extracted_path),
+        message=f"Extracted: {html_counts.get('extracted', 0)}, not_present: {html_counts.get('not_present_on_page', 0)}",
+    )
+    return extracted_path
+
+
 def run(args: argparse.Namespace) -> dict[str, str]:
     started_at = time.monotonic()
     args = normalize_args(args)
@@ -1728,6 +1817,25 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             triaged=triaged,
         )
 
+    citation_expanded = run_citation_expand_stage(triaged, out_dir, args, counts, manifest=manifest)
+    if citation_expanded != triaged:
+        refresh_processing_report(out_dir, warnings=warnings)
+    should_stop, stop_reason = should_stop_after(args, "citation_expand", started_at)
+    if should_stop:
+        return finalize_run(
+            out_dir,
+            manifest,
+            counts,
+            args,
+            strict_path,
+            backup_path,
+            queue_priorities,
+            warnings,
+            run_status="partial",
+            stop_reason=stop_reason,
+            triaged=triaged,
+        )
+
     selected = out_dir / "selected_candidates.csv"
     if getattr(args, "resume", False) and workflow_state.reusable_stage(
         manifest,
@@ -1859,6 +1967,11 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             publisher_queue=final_queue,
         )
 
+    html_extracted = run_publisher_html_extract_stage(final_queue, out_dir, args, counts, manifest=manifest)
+    if html_extracted != final_queue:
+        write_provenance_artifact(html_extracted, out_dir, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+
     return finalize_run(
         out_dir,
         manifest,
@@ -1869,7 +1982,7 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         queue_priorities,
         warnings,
         triaged=triaged,
-        publisher_queue=final_queue,
+        publisher_queue=html_extracted,
     )
 
 

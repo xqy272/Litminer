@@ -185,18 +185,29 @@ def _layer_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
     """Compute descriptive statistics for one trust layer.
 
     Missing source columns degrade to None per the module docstring.
+    Retracted rows (``retraction_status=retracted``) are excluded from
+    descriptive statistics per iteration_plan §2.2 — they are counted
+    separately in ``retracted_count`` but do not pollute year/journal/
+    high-cited distributions.
     """
+    active_rows = [
+        row for row in rows
+        if (row.get("retraction_status") or "").strip().lower() != "retracted"
+    ]
+    retracted_count = len(rows) - len(active_rows)
     return {
         "total_rows": len(rows),
-        "year_distribution": _year_distribution(rows),
-        "top_journals": _top_values(rows, "journal", limit=15),
-        "top_authors": _top_authors(rows, limit=15),
-        "high_cited": _high_cited(rows, limit=10),
-        "article_type_distribution": _article_type_distribution(rows),
-        "oa_rate": _oa_rate(rows),
-        "abstract_coverage": _coverage(rows, "abstract"),
-        "doi_coverage": _coverage(rows, "doi"),
-        "triage_priority_distribution": _triage_priority_distribution(rows),
+        "active_rows": len(active_rows),
+        "retracted_count": retracted_count,
+        "year_distribution": _year_distribution(active_rows),
+        "top_journals": _top_values(active_rows, "journal", limit=15),
+        "top_authors": _top_authors(active_rows, limit=15),
+        "high_cited": _high_cited(active_rows, limit=10),
+        "article_type_distribution": _article_type_distribution(active_rows),
+        "oa_rate": _oa_rate(active_rows),
+        "abstract_coverage": _coverage(active_rows, "abstract"),
+        "doi_coverage": _coverage(active_rows, "doi"),
+        "triage_priority_distribution": _triage_priority_distribution(active_rows),
     }
 
 
@@ -410,8 +421,14 @@ def to_markdown(profile: dict[str, Any]) -> str:
     verified = profile.get("crossref_verified")
 
     lines.append(f"Total rows: {all_rows.get('total_rows', 0)}")
+    retracted = all_rows.get("retracted_count", 0)
+    if retracted:
+        lines.append(f"Retracted rows (excluded from statistics): {retracted}")
     if verified is not None:
         lines.append(f"Crossref-verified rows: {(verified or {}).get('total_rows', 0)}")
+        verified_retracted = (verified or {}).get("retracted_count", 0)
+        if verified_retracted:
+            lines.append(f"  of which retracted (excluded from verified statistics): {verified_retracted}")
     lines.append("")
 
     year_dist = all_rows.get("year_distribution") or {}

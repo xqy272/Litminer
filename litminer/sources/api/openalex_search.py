@@ -16,15 +16,10 @@ The script handles:
 from __future__ import annotations
 
 import argparse
-import http.client
-import json
 import os
 import re
 import sys
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
