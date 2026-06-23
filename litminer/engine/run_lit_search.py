@@ -1566,11 +1566,17 @@ def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
 
     # Merge expanded rows back into merged candidates so they go through
     # the full dedupe → crossref → triage pipeline like normal discovery rows.
+    # Overwrite merged_candidates.csv in place so --resume picks it up.
     existing_inputs = [merged_path, expanded_path]
-    new_merged = out_dir / "merged_with_expanded.csv"
-    merge_csv.merge_csv(existing_inputs, new_merged, allow_missing=True)
-    counts["merged_after_expand"] = workflow_state.row_count(new_merged)
-    return new_merged
+    merge_csv.merge_csv(existing_inputs, merged_path, allow_missing=True)
+    counts["merged_after_expand"] = workflow_state.row_count(merged_path)
+    record_manifest_stage(
+        out_dir, manifest, "merge", "completed",
+        output_path=merged_path,
+        row_count_value=counts["merged_after_expand"],
+        message="Merged expanded candidates after --expand-citations",
+    )
+    return merged_path
 
 
 def run_publisher_html_extract_stage(input_path: Path, out_dir: Path,
@@ -2049,7 +2055,8 @@ def main() -> None:
     parser.add_argument("--stop-after-stage",
                         choices=[
                             "query_plan", "discovery", "merge", "dedupe", "crossref", "triage",
-                            "selection", "unpaywall", "metrics", "queue", "probe",
+                            "citation_expand", "selection", "unpaywall", "metrics", "queue",
+                            "probe", "publisher_html_extract",
                         ],
                         default=None,
                         help="Stop after a named stage and still write reports/manifest")

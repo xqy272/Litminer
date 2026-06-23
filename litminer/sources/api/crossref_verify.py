@@ -162,8 +162,7 @@ def _extract_retraction_status(message: dict) -> str:
     Returns one of:
     - ``retracted``: at least one update of type ``retraction`` is recorded.
     - ``update_to``: an update of another type (correction, expression_of_concern, etc.)
-    - ``active``: no updates recorded.
-    - ``unknown``: field missing or malformed.
+    - ``active``: no updates recorded (including empty or missing ``update-to`` field).
     """
     updates = message.get("update-to")
     if not updates or not isinstance(updates, list):

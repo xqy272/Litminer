@@ -51,6 +51,9 @@ Listed by default:
 | `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
 | `litminer_processing_report` | Generate a compact human-readable run report. |
 | `litminer_agent_summary` | Generate machine-readable run status and next actions. |
+| `litminer_result_profile` | Generate stratified descriptive statistics with completeness caveats. |
+| `litminer_search_audit_report` | Generate a human-readable audit report for research reproducibility. |
+| `litminer_citation_expand` | Expand citations from triaged candidates via Semantic Scholar citation/reference graph. |
 | `litminer_read_csv_summary` | Read paginated CSV summaries instead of loading large files. |
 
 Prefer `litminer_start_run` plus `litminer_run_status` for long retrieval.

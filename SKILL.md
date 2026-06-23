@@ -237,6 +237,36 @@ Use repeated `--query` values when recall matters. Add `--include-arxiv`,
 `--include-europe-pmc`, or `--include-semantic-scholar` only when the domain and
 user goal justify the extra source coverage.
 
+### Citation Expansion
+
+After the first triage pass, expand from high-priority seed papers via the
+Semantic Scholar citation/reference graph. This finds papers that use
+different terminology but are scientifically related.
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --query "USER_QUERY_HERE" \
+  --expand-citations \
+  --expand-top-n 5 \
+  --expand-direction both \
+  --output-dir .litminer/runs/litminer_run
+```
+
+- `--expand-citations`: enable citation/reference expansion (default: off).
+- `--expand-seeds doi:10.xxx,doi:10.yyy`: override mechanical seed selection
+  with explicit DOIs. Default seed selection is mechanical (Top N by
+  `triage_priority=high` + `triage_score`), not a scientific importance
+  judgment.
+- `--expand-top-n N`: max seeds from high-priority rows (default: 5).
+- `--expand-max-per-seed N`: max papers to expand per seed (default: 30).
+- `--expand-direction`: `forward` (cited-by), `backward` (references), or
+  `both` (default).
+
+Expanded rows go through the full dedupe → Crossref verification → triage
+pipeline — same trust path as normal discovery rows. Trace is written to
+`citation_expand_trace.csv`.
+
 ## Runtime Semantics
 
 Do not put user topics, domain vocabularies, inclusion criteria, or requested

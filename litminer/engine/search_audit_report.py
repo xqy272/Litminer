@@ -96,7 +96,7 @@ def _format_source_health(trace_rows: list[dict[str, str]]) -> list[str]:
     return lines
 
 
-def _format_exclusions(counts: dict[str, int], manifest: dict[str, Any]) -> list[str]:
+def _format_exclusions(manifest: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     stages = manifest.get("stages") or []
     if isinstance(stages, list):
@@ -193,7 +193,7 @@ def build_audit_report(
     # Exclusions / stage status
     lines.append("## Stage Status and Exclusions")
     lines.append("")
-    lines.extend(_format_exclusions({}, manifest))
+    lines.extend(_format_exclusions(manifest))
 
     # Trust tiers
     trust = summary.get("trust_tiers") or {}

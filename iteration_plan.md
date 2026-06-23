@@ -401,7 +401,7 @@ def status_for_exception(exc: Exception) -> str: ...
 **集成方式：**
 - 在 `publisher_probe.py` 之后作为可选阶段
 - 输入：`publisher_queue.csv` 中 `access_status in ("html_possible", "abstract_only_or_landing")` 的行
-- 输出：扩展 `publisher_queue_probed.csv` 的字段
+- 输出：独立的 `publisher_queue_html_meta.csv` 文件（含 `html_meta_*` 列）
 - 在 `processing_report.md` 增加段落报告 HTML meta 覆盖率（"142 篇中 98 篇有 citation_keywords，67 篇有 citation_author_institution"）
 
 **为什么放在第三轮：** `result_profile` 的分层统计设计必须在 HTML meta 字段进来之前稳定（第二轮完成）。如果 HTML meta 字段和 `result_profile` 同时开发，会出现"统计框架还没稳定就有新字段要纳入"的问题。
