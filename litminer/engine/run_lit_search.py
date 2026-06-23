@@ -907,13 +907,13 @@ def finalize_run(
         manifest["stop_reason"] = stop_reason
     manifest["completed_at"] = workflow_state.utc_now()
     workflow_state.write_manifest(out_dir, manifest)
-    artifact_index_path = artifacts.write_index(out_dir)
     result_profile_path = result_profile.write_profile(
         out_dir / "triaged_candidates.csv",
         out_dir / "api_discovery_trace.csv",
         workflow_state.manifest_path(out_dir),
     )
     audit_report_path = search_audit_report.build_audit_report(out_dir)
+    artifact_index_path = artifacts.write_index(out_dir)
     refresh_processing_report(out_dir, warnings=warnings)
     return {
         "status": final_status,
