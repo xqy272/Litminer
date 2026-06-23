@@ -297,6 +297,8 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
         args.skip_journal_metrics = not bool(channels.get("journal_metrics", True))
     if getattr(args, "probe_publishers", None) is None:
         args.probe_publishers = bool(channels.get("publisher_probe", False))
+    if getattr(args, "expand_citations", None) is None:
+        args.expand_citations = False
     if getattr(args, "skip_unpaywall", None) is True:
         args.enrich_unpaywall = False
     elif getattr(args, "enrich_unpaywall", None) is None:
@@ -1514,7 +1516,15 @@ def run_publisher_probe_stage(input_path: Path, out_dir: Path,
 def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
                               args: argparse.Namespace,
                               counts: dict[str, int],
-                              manifest: dict[str, Any] | None = None) -> Path:
+                              manifest: dict[str, Any] | None = None,
+                              merged_path: Path | None = None) -> Path | None:
+    """Run citation expansion and merge expanded rows back into merged candidates.
+
+    Returns the path to the updated merged candidates file if expansion
+    produced rows and they were merged back, or ``None`` if expansion was
+    disabled or produced no rows. The caller should restart the
+    dedupe → crossref → triage pipeline from the updated merged file.
+    """
     if not getattr(args, "expand_citations", False):
         record_manifest_stage(
             out_dir,
@@ -1524,7 +1534,7 @@ def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
             input_path=triaged_path,
             row_count_value=workflow_state.row_count(triaged_path),
         )
-        return triaged_path
+        return None
     expanded_path = out_dir / "citation_expanded_candidates.csv"
     explicit_seeds = None
     if getattr(args, "expand_seeds", None):
@@ -1550,7 +1560,17 @@ def run_citation_expand_stage(triaged_path: Path, out_dir: Path,
         row_count_value=summary.get("expanded_count", 0),
         message=f"Seeds: {len(summary.get('seeds', []))}, direction: {summary.get('direction', 'both')}",
     )
-    return expanded_path
+
+    if summary.get("expanded_count", 0) == 0 or merged_path is None:
+        return None
+
+    # Merge expanded rows back into merged candidates so they go through
+    # the full dedupe → crossref → triage pipeline like normal discovery rows.
+    existing_inputs = [merged_path, expanded_path]
+    new_merged = out_dir / "merged_with_expanded.csv"
+    merge_csv.merge_csv(existing_inputs, new_merged, allow_missing=True)
+    counts["merged_after_expand"] = workflow_state.row_count(new_merged)
+    return new_merged
 
 
 def run_publisher_html_extract_stage(input_path: Path, out_dir: Path,
@@ -1818,9 +1838,8 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             triaged=triaged,
         )
 
-    citation_expanded = run_citation_expand_stage(triaged, out_dir, args, counts, manifest=manifest)
-    if citation_expanded != triaged:
-        refresh_processing_report(out_dir, warnings=warnings)
+    expanded_merged = run_citation_expand_stage(triaged, out_dir, args, counts, manifest=manifest, merged_path=merged)
+    refresh_processing_report(out_dir, warnings=warnings)
     should_stop, stop_reason = should_stop_after(args, "citation_expand", started_at)
     if should_stop:
         return finalize_run(
@@ -1836,6 +1855,23 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             stop_reason=stop_reason,
             triaged=triaged,
         )
+
+    if expanded_merged is not None:
+        # Expanded rows were merged back; restart dedupe → crossref → triage
+        # so expanded candidates go through the full verification pipeline.
+        merged = expanded_merged
+        deduped = out_dir / "deduped_candidates.csv"
+        dedupe_papers.dedupe(merged, deduped, "doi", "title")
+        counts["deduped"] = len(read_rows(deduped))
+        record_manifest_stage(
+            out_dir, manifest, "dedupe", "completed",
+            input_path=merged, output_path=deduped,
+            row_count_value=counts["deduped"],
+            message="Re-ran after citation expansion",
+        )
+        triage_input = run_crossref_stage(deduped, out_dir, args, counts, manifest=manifest)
+        triaged = run_triage_stage(triage_input, out_dir, args, counts, manifest=manifest)
+        refresh_processing_report(out_dir, warnings=warnings)
 
     selected = out_dir / "selected_candidates.csv"
     if getattr(args, "resume", False) and workflow_state.reusable_stage(

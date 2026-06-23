@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from litminer.engine.common import read_csv_rows, write_csv_atomic
+from litminer.engine.common import read_csv_rows, utc_now, write_csv_atomic
 from litminer.engine.publisher_probe import request_url
 
 
@@ -164,7 +164,7 @@ def extract_fields(body: str) -> dict[str, str]:
     combined = _merge_meta_and_jsonld(meta, jsonld)
 
     if not combined:
-        return {"html_meta_status": "not_present_on_page"}
+        return {"html_meta_status": "not_present_on_page", "html_meta_extracted_at": utc_now()}
 
     def _join(key: str) -> str:
         return "; ".join(combined.get(key, []))
@@ -174,6 +174,7 @@ def extract_fields(body: str) -> dict[str, str]:
 
     return {
         "html_meta_status": "extracted",
+        "html_meta_extracted_at": utc_now(),
         "html_meta_keywords": _join("citation_keywords"),
         "html_meta_online_date": _join("citation_online_date"),
         "html_meta_funder_name": _join("citation_funder_name"),
@@ -199,6 +200,7 @@ def extract_row(row: dict[str, str]) -> dict[str, str]:
     )
     if not start_url or row.get("access_status") in ("blocked", "blocked_url", "missing_url"):
         out["html_meta_status"] = "skipped_no_accessible_url"
+        out["html_meta_extracted_at"] = utc_now()
         for col in OUTPUT_COLUMNS:
             if col not in out:
                 out[col] = ""
