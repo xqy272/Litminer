@@ -38,6 +38,47 @@ Stable keys:
 Agent rule: use `next_actions` and `stage_next_actions` before rerunning broad
 discovery or presenting a low candidate count as scientific absence.
 
+## `result_profile.json`
+
+Level: Stable, extensible.
+
+Purpose: stratified descriptive statistics about the retrieved collection,
+with search-process completeness caveats. Degraded to `failure_summary`
+on 0-result runs.
+
+Stable keys:
+
+- `schema_version`
+- `degraded` (bool; true when 0-result failure summary is emitted)
+- `all_rows` (object or null; statistics across all rows, excluding retracted)
+- `crossref_verified` (object or null; statistics for Crossref-verified rows only)
+- `completeness_caveats` (object; provider failures, rate limits, circuit breaks)
+- `failure_summary` (object or null; present only when `degraded` is true)
+
+Each layer stats object contains: `total_rows`, `active_rows`,
+`retracted_count`, `year_distribution`, `top_journals`, `top_authors`,
+`high_cited`, `article_type_distribution`, `oa_rate`, `abstract_coverage`,
+`doi_coverage`, `triage_priority_distribution`.
+
+Agent rule: statistics describe the retrieved collection, not the research
+field. `completeness_caveats` reports search-process completeness only;
+it never claims result completeness (field coverage). See SKILL.md
+"Statistical Output Boundary".
+
+## `search_audit_report.md`
+
+Level: Stable.
+
+Purpose: human-readable audit report for research reproducibility. Contains
+the same information as Agent artifacts (`agent_summary.json`,
+`query_plan.json`, `result_profile.json`, `run_manifest.json`), formatted
+as natural-language Markdown for a researcher to explain "how did you find
+these papers?".
+
+Agent rule: the audit report's information must be consistent with
+`agent_summary.json` — no "Agent knows but researcher doesn't" information
+gap.
+
 ## `run_manifest.json`
 
 Level: Stable, extensible.
@@ -123,6 +164,28 @@ Stable fields:
 
 Agent rule: inspect `status_class`, `transient_error`, and `next_action`
 before treating empty source results as evidence.
+
+## `citation_expand_trace.csv`
+
+Level: Stable.
+
+Purpose: per-seed audit trail for citation/reference expansion via Semantic
+Scholar. Written when `--expand-citations` is enabled.
+
+Stable fields:
+
+- `provider` (always `semantic_scholar`)
+- `query_id` (e.g. `citation_expand:10.xxx`)
+- `query_type` (`citation_expand` or `reference_expand`)
+- `seed_doi`
+- `status` (`ok` or `error`)
+- `status_class`
+- `returned_count`
+- `error`
+
+Agent rule: if any seed has `status=error`, the expansion is partial.
+Check `completeness_caveats` in `result_profile.json` for the aggregated
+failure picture.
 
 ## `triaged_candidates.csv`
 

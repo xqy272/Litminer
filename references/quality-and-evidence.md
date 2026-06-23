@@ -49,12 +49,14 @@ Allowed processing:
 
 - DOI normalization and metadata health checks
 - deduplication
-- Crossref verification and mismatch marking
+- Crossref verification, mismatch marking, and retraction status extraction
 - OA/access hint annotation
+- citation/reference graph expansion from high-priority seeds
 - source and provider distribution summaries
-- triage priority summaries
-- publisher-page queue generation
-- compact reports such as `processing_report.md`
+- stratified result statistics (`result_profile.json`)
+- triage priority summaries (with citation-count signal and retraction demotion)
+- publisher-page queue generation and HTML meta tag extraction
+- compact reports such as `processing_report.md` and `search_audit_report.md`
 
 Not allowed:
 
@@ -68,9 +70,9 @@ Not allowed:
 | Channel | Evidence Level | Use |
 |---------|----------------|-----|
 | OpenAlex / Semantic Scholar | Bibliographic candidate evidence | Discovery and recall. |
-| Crossref | Verified metadata evidence | DOI, title, journal, year, article type. |
+| Crossref | Verified metadata evidence | DOI, title, journal, year, article type, retraction status. |
 | Unpaywall | OA/access-link evidence | OA status and structured landing/PDF links. |
-| Publisher landing page / HTML | Article-page evidence | Access status, abstract, visible article sections, links to SI/PDF. |
+| Publisher landing page / HTML | Article-page evidence | Access status, abstract, visible article sections, links to SI/PDF, `citation_*` meta tags. |
 | Journal metrics CSV | Verified metric evidence | IF/JCR-style filtering when table is trusted. |
 | WebSearch | Supplemental clue | Must be verified before final use. |
 

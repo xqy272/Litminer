@@ -9,9 +9,12 @@ Litminer 是一个面向 AI Agent 的科研文献信息获取 skill。它帮助 
 ## 适合什么
 
 - 从 OpenAlex、Semantic Scholar、arXiv、Europe PMC 等来源发现候选文献。
-- 用 Crossref 验证 DOI、标题、期刊、年份和文章类型。
+- 用 Crossref 验证 DOI、标题、期刊、年份和文章类型，同时检测撤稿状态。
 - 用 Unpaywall 标注 OA 状态和结构化访问线索。
-- 去重、合并、语义初筛、排序并生成处理报告。
+- 去重、合并、语义初筛（含引用计数信号和撤稿降级）、排序并生成处理报告。
+- 从高优先级论文出发做引用/参考文献扩展，发现关键词检索遗漏的相关论文。
+- 生成分层结果统计（`result_profile`）和人类可读审计报告（`search_audit_report`）。
+- 从出版商页面提取 `citation_keywords`、`citation_online_date`、`citation_funder_name` 等结构化元数据。
 - 构建 DOI/出版社页面证据队列，供 Agent 后续检查文章页面。
 
 ## 安装
@@ -103,11 +106,16 @@ python -m litminer.engine.run_lit_search \
 | `api_candidates.csv` | API 发现候选。 |
 | `api_discovery_trace.csv` | 查询、来源、状态和失败原因追踪。 |
 | `deduped_candidates.csv` | DOI/标题去重并合并后的候选。 |
-| `verified_candidates.csv` | Crossref 验证结果。 |
-| `triaged_candidates.csv` | 带语义标签、优先级和元数据状态的审查面。 |
+| `verified_candidates.csv` | Crossref 验证结果（含撤稿状态）。 |
+| `triaged_candidates.csv` | 带语义标签、优先级、引用信号和元数据状态的审查面。 |
+| `citation_expanded_candidates.csv` | 引用/参考文献扩展候选（`--expand-citations` 启用时）。 |
 | `publisher_queue.csv` | DOI/出版社页面证据队列。 |
-| `processing_report.md` | 来源、元数据、triage、OA/access 和队列摘要。 |
-| `agent_summary.json` | Agent 优先读取的机器可读摘要。 |
+| `publisher_queue_probed.csv` | 访问探测结果（`--probe-publishers` 启用时）。 |
+| `publisher_queue_html_meta.csv` | 出版商 HTML meta 字段提取（`--probe-publishers` 启用时）。 |
+| `result_profile.json` | 分层描述性统计和检索过程完整性告诫。 |
+| `search_audit_report.md` | 人类可读审计报告，用于研究可复现性。 |
+| `processing_report.md` | 来源、元数据、triage、OA/access、引用扩展、HTML meta 和队列摘要。 |
+| `agent_summary.json` | Agent 优先读取的机器可读摘要（含嵌入的 result_profile 摘要）。 |
 | `run_manifest.json` | 阶段状态、复用记录、行数、文件指纹和运行签名。 |
 
 ## 可选 MCP

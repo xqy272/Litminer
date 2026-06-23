@@ -14,9 +14,12 @@ Agent and user still make the final scientific judgement.
 ## What It Does
 
 - Discover candidates from OpenAlex, Semantic Scholar, arXiv, Europe PMC, and similar sources.
-- Verify DOI, title, journal, year, and article type through Crossref.
+- Verify DOI, title, journal, year, and article type through Crossref, with retraction status detection.
 - Annotate OA and access hints through Unpaywall.
-- Deduplicate, merge, triage, rank, and summarize candidates.
+- Deduplicate, merge, triage (with citation-count signal and retraction demotion), rank, and summarize candidates.
+- Expand from high-priority seeds via citation/reference graph to find papers keyword search misses.
+- Generate stratified result statistics (`result_profile`) and a human-readable audit report (`search_audit_report`).
+- Extract structured metadata (`citation_keywords`, `citation_online_date`, `citation_funder_name`) from publisher HTML meta tags.
 - Build DOI/publisher-page evidence queues for follow-up inspection.
 
 ## Install
@@ -117,11 +120,16 @@ trusted profiles with `--enable-regex-concepts` or the MCP
 | `api_candidates.csv` | API-discovered candidates. |
 | `api_discovery_trace.csv` | Query/source/status/failure trace. |
 | `deduped_candidates.csv` | DOI/title deduplicated candidates. |
-| `verified_candidates.csv` | Crossref verification output. |
-| `triaged_candidates.csv` | Semantic tags, priorities, and metadata status. |
+| `verified_candidates.csv` | Crossref verification output (with retraction status). |
+| `triaged_candidates.csv` | Semantic tags, priorities, citation signal, and metadata status. |
+| `citation_expanded_candidates.csv` | Citation/reference expansion candidates (when `--expand-citations` is enabled). |
 | `publisher_queue.csv` | DOI/publisher-page evidence queue. |
-| `processing_report.md` | Source, metadata, triage, OA/access, and queue summary. |
-| `agent_summary.json` | Machine-readable summary for Agent decisions. |
+| `publisher_queue_probed.csv` | Access probe results (when `--probe-publishers` is enabled). |
+| `publisher_queue_html_meta.csv` | Publisher HTML meta field extraction (when `--probe-publishers` is enabled). |
+| `result_profile.json` | Stratified descriptive statistics and search-process completeness caveats. |
+| `search_audit_report.md` | Human-readable audit report for research reproducibility. |
+| `processing_report.md` | Source, metadata, triage, OA/access, citation expansion, HTML meta, and queue summary. |
+| `agent_summary.json` | Machine-readable summary for Agent decisions (with embedded result_profile summary). |
 | `run_manifest.json` | Stage status, reuse records, row counts, fingerprints, and signature. |
 
 ## Optional MCP

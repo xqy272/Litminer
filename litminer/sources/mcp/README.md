@@ -47,6 +47,9 @@ you need lower-level source, stage, or debug tools.
 | `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
 | `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
 | `litminer_agent_summary` | Generate machine-readable run status, trust tiers, source strategy, artifacts, and next actions. |
+| `litminer_result_profile` | Generate stratified descriptive statistics (all rows + Crossref-verified) with completeness caveats. |
+| `litminer_search_audit_report` | Generate a human-readable audit report (Markdown) for research reproducibility. |
+| `litminer_citation_expand` | Expand citations from triaged candidates via Semantic Scholar citation/reference graph. |
 | `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
 | `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
 | `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |

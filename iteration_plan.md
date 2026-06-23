@@ -67,8 +67,11 @@ Core 不持有 institutional credentials、cookies、proxies。机构访问、Ja
 
 ---
 
-## 第一轮：修真 Bug + 边界文档化（1-3 天）
+## 第一轮：修真 Bug + 边界文档化 ✅ 已完成
 
+> commit `170a44e` — Fix review-identified bugs, remove sys.path workarounds, add preflight metrics warning and citation signal to triage
+> commit `6ed058f` — Add statistical output boundary, limits-as-product-definition to SKILL.md, and project review suite
+>
 > 每项都有确凿的代码证据或明确的文档责任，改动小，不触碰边界。
 > SKILL.md 的三个新章节一起写，一次提交。
 
@@ -136,8 +139,10 @@ citation_bonus = min(math.log2(cited + 1) * 0.3, 2.0) if cited > 0 else 0.0
 
 ---
 
-## 第二轮：让产出物更有用 + 撤稿检查（3-5 天）
+## 第二轮：让产出物更有用 + 撤稿检查 ✅ 已完成
 
+> commit `6bf3b04` — Add stratified result_profile, Crossref retraction status with triage demotion, and OpenAlex affiliation/ORCID extraction
+>
 > 不增加新数据源、不改管道结构，让现有管道的输出对 Agent 和人类更有价值。
 > `result_profile` 的设计必须在 HTML meta 提取（第三轮）之前稳定——新字段进来时有现成的地方放。
 
@@ -243,8 +248,12 @@ class LayerStats:
 
 ---
 
-## 第三轮：核心能力增强 + 审计性（1-2 周）
+## 第三轮：核心能力增强 + 审计性 ✅ 已完成
 
+> commit `802580f` — Unify HTTP client across 6 providers, add citation expansion, search audit report, publisher HTML meta extraction, and consolidate utc_now
+> commit `ef676c3` — Wire citation_expand and publisher_html_extract into pipeline, exclude retracted rows from result_profile stats, sync SKILL.md and CLAUDE.md, clean dead imports
+> commit `f22f397` — Add citation_expand trace output, processing_report sections for expansion and HTML meta, and MCP tools for result_profile, search_audit_report, and citation_expand
+>
 > 这轮开始触碰管道结构，但每项仍然是独立可交付的。
 > 每个新阶段必须是独立模块，`run_lit_search.py` 只增加编排调用（10 行以内），不增加实现逻辑。
 
@@ -403,7 +412,9 @@ def status_for_exception(exc: Exception) -> str: ...
 
 ---
 
-## 第四轮：可用性补全（1-2 周，可与第三轮交叉）
+## 第四轮：可用性补全 ⏳ 待做
+
+> 依赖前三轮完成。可在发版后按需推进。
 
 ### 4.1 RIS/BibTeX 导出
 
@@ -758,11 +769,11 @@ compliance assessment.
 整个迭代路线的核心逻辑：
 
 ```
-第一轮：修真 bug + 边界文档化        → 让现有功能可靠 + 产品定义写下来
-第二轮：分层统计 + 完整性告诫 + 撤稿  → 让现有产出有用且诚实
-第三轮：HTTP 统一 + 引用扩展 + 审计性 + HTML meta → 强化核心检索能力 + 补全边界内缺失
-第四轮：导出 + 增量合并 + delta       → 补齐可用性短板
-按需：不预设，等触发                  → 不为未来抽象，用真实需求验证
+第一轮：修真 bug + 边界文档化        ✅ → 让现有功能可靠 + 产品定义写下来
+第二轮：分层统计 + 完整性告诫 + 撤稿  ✅ → 让现有产出有用且诚实
+第三轮：HTTP 统一 + 引用扩展 + 审计性 + HTML meta ✅ → 强化核心检索能力 + 补全边界内缺失
+第四轮：导出 + 增量合并 + delta       ⏳ → 补齐可用性短板
+按需：不预设，等触发                  ⏳ → 不为未来抽象，用真实需求验证
 ```
 
 每一轮都是独立可交付的。第一轮做完就有价值，不依赖后续轮次。每一轮的工作量都在"1 人 + AI Agent 几天内可完成"的范围内。Core 不引入新的运行时依赖，不越过已定义的产品边界。

@@ -103,12 +103,22 @@ full-text dataset.
 ## Output Reading Order
 
 Read `agent_summary.json` first. It gives run status, trust tiers, artifact
-read order, provider health, cache state, and next actions.
+read order, provider health, cache state, embedded `result_profile` summary,
+and next actions.
+
+Read `result_profile.json` second for stratified descriptive statistics
+(all rows + Crossref-verified) and `completeness_caveats` that report
+search-process failures. On 0-result runs, it degrades to `failure_summary`.
 
 For stable machine-readable contracts, see `artifact-contracts.md` and
 `csv-fields.md`.
 
-Read `processing_report.md` second for human-readable status and counts.
+Read `processing_report.md` third for human-readable status, counts, and
+the appended result profile section.
+
+Read `search_audit_report.md` when the user needs to explain "how did you
+find these papers?" to a colleague — it is the same information as the
+Agent artifacts, formatted for human reproducibility.
 
 Read `artifacts_index.json` when selecting the next local file. It is the
 canonical inventory of primary, supporting, and debug artifacts.
@@ -123,7 +133,9 @@ Report:
 - what was actually queried
 - how many candidates were discovered, deduped, verified, metric-passed, and
   queued
-- which sources failed or were rate-limited
+- which sources failed or were rate-limited (from `completeness_caveats`)
+- whether any retracted papers were detected and demoted
+- whether citation expansion was used and how many papers it added
 - which constraints limited the count
 - which fields remain unknown
 - which local artifacts contain the evidence
