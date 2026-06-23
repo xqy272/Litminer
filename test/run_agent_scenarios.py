@@ -166,9 +166,14 @@ def _check_csv(expect: dict[str, Any], errors: list[str]) -> None:
                 continue
             values = [row.get(field, "") for row in rows if row.get(field, "")]
             seen: set[str] = set()
-            duplicates = sorted({v for v in values if v in seen or not seen.add(v)})  # type: ignore[func-returns-value]
+            duplicates: set[str] = set()
+            for v in values:
+                if v in seen:
+                    duplicates.add(v)
+                else:
+                    seen.add(v)
             if duplicates:
-                errors.append(f"{path}: duplicate values for {field!r}: {duplicates}")
+                errors.append(f"{path}: duplicate values for {field!r}: {sorted(duplicates)}")
 
 
 def _run_command(command: list[str], env: dict[str, str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:

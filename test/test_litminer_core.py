@@ -2458,6 +2458,121 @@ class LitminerCoreTests(unittest.TestCase):
         explicit = select_seeds(rows, explicit_seeds=["10.9/z"])
         self.assertEqual(explicit, ["10.9/z"])
 
+    def test_citation_expand_from_input_csv_does_not_mutate_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            original = (
+                "title,doi,publication_year,journal,abstract,article_type\n"
+                "Seed,10.1/seed,2026,Journal A,Reports external validation.,original_research\n"
+            )
+            input_csv.write_text(original, encoding="utf-8")
+            out_dir = tmp_path / "run"
+
+            def fake_expand_from_triaged(_triaged_path, output_path, **kwargs):
+                output_path.write_text(
+                    "title,doi,publication_year,journal,abstract,article_type\n"
+                    "Expanded,10.2/expanded,2025,Journal B,Related reference.,original_research\n",
+                    encoding="utf-8",
+                )
+                trace_output = kwargs.get("trace_output")
+                if trace_output:
+                    trace_output.write_text(
+                        "provider,query_id,query_type,seed_doi,status,status_class,returned_count,error\n"
+                        "semantic_scholar,reference_expand:10.1/seed,reference_expand,10.1/seed,ok,ok,1,\n",
+                        encoding="utf-8",
+                    )
+                return {"seeds": ["10.1/seed"], "expanded_count": 1, "direction": "backward"}
+
+            args = argparse.Namespace(
+                input_csv=input_csv,
+                query=None,
+                query_file=None,
+                year_from=None,
+                year_to=None,
+                output_dir=out_dir,
+                config=None,
+                mode="fast",
+                resume=False,
+                resume_allow_mismatch=False,
+                resume_mismatch_reason="",
+                time_budget_seconds=None,
+                stop_after_stage="citation_expand",
+                triage_profile=None,
+                required_concept=["validation=external validation"],
+                optional_concept=[],
+                negative_concept=[],
+                exclude_article_type=[],
+                queue_priorities="high,medium,needs_review",
+                include_metadata_blocked=False,
+                fields_needed=None,
+                page_required_field=None,
+                openalex_api_key=None,
+                openalex_mailto=None,
+                openalex_work_types=None,
+                discovery_sources="openalex",
+                max_results_per_query=30,
+                skip_openalex=False,
+                include_semantic_scholar=False,
+                include_arxiv=False,
+                include_europe_pmc=False,
+                semantic_query_limit=3,
+                semantic_max_results=50,
+                skip_crossref=True,
+                strict_discovery=False,
+                parallel_providers=False,
+                provider_workers=None,
+                provider_failure_threshold=1,
+                provider_rate_limit_cooldown_seconds=60,
+                enrich_unpaywall=False,
+                skip_unpaywall=True,
+                unpaywall_email=None,
+                unpaywall_sleep=0,
+                crossref_checkpoint_interval=25,
+                unpaywall_checkpoint_interval=25,
+                max_crossref_rows=None,
+                max_unpaywall_rows=None,
+                metrics=None,
+                min_if=None,
+                skip_journal_metrics=True,
+                target_count=None,
+                queue_strict_only=False,
+                allow_missing_doi=True,
+                screenshot_root=tmp_path / "screens",
+                probe_publishers=False,
+                probe_limit=None,
+                max_publisher_probe_rows=None,
+                probe_sleep=0,
+                expand_citations=True,
+                expand_seeds="10.1/seed",
+                expand_top_n=5,
+                expand_max_per_seed=1,
+                expand_direction="backward",
+                cache_enabled=True,
+                cache_dir=tmp_path / "cache",
+                cache_ttl_days=30,
+                provider_failure_cache_ttl_seconds=300,
+                allow_regex_concepts=False,
+            )
+
+            with patch("litminer.engine.citation_expand.expand_from_triaged", side_effect=fake_expand_from_triaged):
+                result = run_lit_search.run(args)
+
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(input_csv.read_text(encoding="utf-8"), original)
+
+            merged = out_dir / "merged_candidates.csv"
+            self.assertTrue(merged.exists())
+            with merged.open(encoding="utf-8", newline="") as handle:
+                merged_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(merged_rows), 2)
+            self.assertEqual({row["doi"] for row in merged_rows}, {"10.1/seed", "10.2/expanded"})
+
+            manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
+            latest_merge = [stage for stage in manifest["stages"] if stage["name"] == "merge"][-1]
+            self.assertEqual(Path(latest_merge["output_path"]), merged)
+            self.assertNotEqual(Path(latest_merge["output_path"]), input_csv)
+
     def test_search_audit_report_generates_markdown(self) -> None:
         from litminer.engine import search_audit_report
         with tempfile.TemporaryDirectory() as tmp:

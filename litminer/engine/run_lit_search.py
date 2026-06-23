@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from dataclasses import dataclass, field
@@ -1719,16 +1720,48 @@ def run(args: argparse.Namespace) -> dict[str, str]:
 
     merged = out_dir / "merged_candidates.csv"
     if len(discovery_inputs) == 1:
-        merged = discovery_inputs[0]
-        record_manifest_stage(
-            out_dir,
-            manifest,
-            "merge",
-            "skipped_single_input",
-            input_path=merged,
-            output_path=merged,
-            row_count_value=workflow_state.row_count(merged),
-        )
+        single_input = discovery_inputs[0]
+        if args.input_csv:
+            if getattr(args, "resume", False) and workflow_state.reusable_stage(
+                manifest,
+                "merge",
+                merged,
+                input_path=single_input,
+            ):
+                record_manifest_stage(
+                    out_dir,
+                    manifest,
+                    "merge",
+                    "skipped_existing",
+                    input_path=single_input,
+                    output_path=merged,
+                    row_count_value=workflow_state.row_count(merged),
+                    message="Reused existing merged_candidates.csv",
+                )
+            else:
+                if single_input.resolve(strict=False) != merged.resolve(strict=False):
+                    shutil.copyfile(single_input, merged)
+                record_manifest_stage(
+                    out_dir,
+                    manifest,
+                    "merge",
+                    "completed",
+                    input_path=single_input,
+                    output_path=merged,
+                    row_count_value=workflow_state.row_count(merged),
+                    message="Copied --input-csv into workflow working artifact",
+                )
+        else:
+            merged = single_input
+            record_manifest_stage(
+                out_dir,
+                manifest,
+                "merge",
+                "skipped_single_input",
+                input_path=merged,
+                output_path=merged,
+                row_count_value=workflow_state.row_count(merged),
+            )
     else:
         if getattr(args, "resume", False) and workflow_state.reusable_stage(manifest, "merge", merged):
             record_manifest_stage(
