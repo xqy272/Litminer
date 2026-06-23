@@ -182,7 +182,7 @@ Litminer does not:
 - [MCP surface](references/mcp-surface.md): tool profiles, workspace rules, and JSON-RPC examples.
 - [Release checklist](references/release-checklist.md): lightweight release steps.
 - [Examples](examples/README.md): minimal end-to-end example.
-- [Agent evals](evals/README.md): small workflow checks for Agent use.
+- [Testing](test/README.md): three-layer testing architecture.
 - [SKILL.md](SKILL.md): skill entry read by Agents.
 - [CLAUDE.md](CLAUDE.md): detailed Agent operating guide.
 
@@ -197,7 +197,6 @@ Litminer/
 |-- litminer/
 |-- references/
 |-- examples/
-|-- evals/
 `-- test/
 ```
 

@@ -168,7 +168,7 @@ Litminer 不做这些事：
 - [MCP 工具面](references/mcp-surface.md)：工具 profile、workspace 规则和 JSON-RPC 示例。
 - [发布 checklist](references/release-checklist.md)：轻量 release tag 发布流程。
 - [最小示例](examples/README.md)：本地 CSV 端到端示例。
-- [Agent evals](evals/README.md)：小型 Agent 行为检查。
+- [测试说明](test/README.md)：三层测试架构说明。
 - [SKILL.md](SKILL.md)：Agent 读取的 skill 入口。
 - [CLAUDE.md](CLAUDE.md)：更详细的 Agent 操作指南。
 
@@ -183,7 +183,6 @@ Litminer/
 |-- litminer/
 |-- references/
 |-- examples/
-|-- evals/
 `-- test/
 ```
 

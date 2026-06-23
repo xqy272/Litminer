@@ -1,0 +1,4 @@
+title,doi,publication_year,journal,abstract,article_type,triage_priority,triage_score,candidate_status,metadata_status,crossref_status
+"External validation of enzyme stability predictors",10.1234/litminer.agent.001,2026,Journal of Agent Fixtures,"Reports prospective external validation.",original_research,high,3.0,ready_for_verification,ok,verified
+"External validation of enzyme stability predictors",10.1234/litminer.agent.001,2026,Journal of Agent Fixtures,"Title-recovered duplicate for the same DOI.",original_research,high,2.8,ready_for_verification,ok,title_recovered
+"Clinical RAG evaluation under deployment drift",10.1234/litminer.agent.003,2026,Applied Agent Evaluation,"Reports prospective validation under deployment drift.",original_research,medium,2.0,ready_for_verification,ok,verified

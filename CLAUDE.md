@@ -384,6 +384,8 @@ python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke
 python -m litminer.engine.journal_metrics --validate --metrics references/journal_metrics_seed.csv
+python test/run_agent_scenarios.py
+python test/run_agent_scenarios.py --profile known_issue
 ```
 
 Optional network smoke tests when source wrappers changed:
