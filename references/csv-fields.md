@@ -25,6 +25,7 @@ them, and how an Agent should treat them.
 | `landing_page_url` | discovery/import | Queue | Optional page target when DOI is missing or unavailable. |
 | `discovery_source` | discovery/import | Debug | Source of candidate row. |
 | `merged_discovery_sources` | dedupe | Debug | Sources combined during dedupe. |
+| `europe_pmc_url` | Europe PMC discovery | Debug | Europe PMC/PubMed-adjacent record page; keep as provenance, not the primary article link when DOI or publisher URL exists. |
 
 ## Crossref Fields
 

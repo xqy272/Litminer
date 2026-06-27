@@ -945,8 +945,25 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(row["publication_year"], "2026")
         self.assertEqual(row["pmid"], "12345678")
         self.assertEqual(row["pmcid"], "PMC123")
+        self.assertEqual(row["landing_page_url"], "https://doi.org/10.5555/example")
+        self.assertEqual(row["url"], "https://doi.org/10.5555/example")
+        self.assertEqual(row["europe_pmc_url"], "https://europepmc.org/article/MED/12345678")
         self.assertEqual(row["europe_pmc_id"], "MED:12345678")
         self.assertEqual(row["best_full_text_url"], "https://example.org/fulltext")
+
+    def test_europe_pmc_record_without_doi_uses_record_page_as_landing(self) -> None:
+        record = {
+            "source": "MED",
+            "id": "12345678",
+            "title": "A biomedical paper without DOI",
+            "pubYear": "2026",
+        }
+
+        row = europe_pmc_search.record_to_row(record, source_query="example")
+
+        self.assertEqual(row["doi"], "")
+        self.assertEqual(row["landing_page_url"], "https://europepmc.org/article/MED/12345678")
+        self.assertEqual(row["europe_pmc_url"], "https://europepmc.org/article/MED/12345678")
 
     def test_unpaywall_response_flattens_best_oa_location(self) -> None:
         result = {

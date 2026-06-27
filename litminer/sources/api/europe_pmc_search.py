@@ -44,6 +44,7 @@ OUTPUT_FIELDS = [
     "best_full_text_url",
     "pmid",
     "pmcid",
+    "europe_pmc_url",
     "europe_pmc_id",
     "discovery_source",
     "discovery_query",
@@ -88,15 +89,19 @@ def _best_full_text_url(record: dict[str, Any]) -> str:
     return ""
 
 
-def _landing_page(record: dict[str, Any]) -> str:
+def _europe_pmc_url(record: dict[str, Any]) -> str:
     source = _value(record, "source")
     record_id = _value(record, "id")
     if source and record_id:
         return f"https://europepmc.org/article/{urllib.parse.quote(source)}/{urllib.parse.quote(record_id)}"
+    return ""
+
+
+def _landing_page(record: dict[str, Any]) -> str:
     doi = normalize_doi(_value(record, "doi"))
     if doi:
         return f"https://doi.org/{doi}"
-    return ""
+    return _europe_pmc_url(record)
 
 
 def _year(record: dict[str, Any]) -> str:
@@ -122,6 +127,7 @@ def record_to_row(record: dict[str, Any], source_query: str = "") -> dict[str, s
         pmid = record_id
     pmcid = _value(record, "pmcid")
     landing = _landing_page(record)
+    europe_pmc_url = _europe_pmc_url(record)
     return {
         "title": _value(record, "title"),
         "doi": normalize_doi(_value(record, "doi")),
@@ -136,6 +142,7 @@ def record_to_row(record: dict[str, Any], source_query: str = "") -> dict[str, s
         "best_full_text_url": _best_full_text_url(record),
         "pmid": pmid,
         "pmcid": pmcid,
+        "europe_pmc_url": europe_pmc_url,
         "europe_pmc_id": f"{source}:{record_id}" if source and record_id else record_id,
         "discovery_source": "europe_pmc",
         "discovery_query": source_query,

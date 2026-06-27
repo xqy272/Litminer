@@ -47,6 +47,7 @@ DEFAULT_OUTPUT_FIELDS = [
     "arxiv_id",
     "pmid",
     "pmcid",
+    "europe_pmc_url",
     "europe_pmc_id",
     "discovery_source",
     "discovery_provider",

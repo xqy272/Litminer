@@ -287,6 +287,9 @@ def _compact_columns(fieldnames: list[str]) -> list[str]:
         "crossref_title",
         "doi",
         "crossref_doi",
+        "doi_url",
+        "publisher_url",
+        "landing_page_url",
         "publication_year",
         "crossref_year",
         "journal",
@@ -297,8 +300,9 @@ def _compact_columns(fieldnames: list[str]) -> list[str]:
         "metadata_status",
         "crossref_status",
         "metric_filter_status",
-        "publisher_url",
+        "best_oa_landing_url",
         "best_oa_url",
+        "europe_pmc_url",
     ]
     selected = [field for field in preferred if field in fieldnames]
     if selected:

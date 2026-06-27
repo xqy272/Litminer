@@ -73,6 +73,7 @@ Not allowed:
 | Crossref | Verified metadata evidence | DOI, title, journal, year, article type, retraction status. |
 | Unpaywall | OA/access-link evidence | OA status and structured landing/PDF links. |
 | Publisher landing page / HTML | Article-page evidence | Access status, abstract, visible article sections, links to SI/PDF, `citation_*` meta tags. |
+| PubMed / Europe PMC record pages | Provenance and access context | Useful for biomedical metadata, PMIDs, and full-text hints; do not use as the primary article link when DOI or publisher-facing URL exists. |
 | Journal metrics CSV | Verified metric evidence | IF/JCR-style filtering when table is trusted. |
 | WebSearch | Supplemental clue | Must be verified before final use. |
 

@@ -321,6 +321,16 @@ Read outputs in this order:
 Use `litminer_read_csv_summary` in MCP mode when a CSV is too large for direct
 context loading.
 
+### Article Link Delivery
+
+When listing papers for a user, use the article-facing link in this order:
+`publisher_queue.publisher_url`, `publisher_queue.doi_url`,
+`triaged_candidates.landing_page_url`, then `best_oa_landing_url` /
+`best_oa_url` as access hints. Do not substitute a PubMed, Europe PMC, or other
+aggregator record page for the main paper link when a DOI or publisher-facing
+URL is available. PubMed/Europe PMC links and PMIDs are provenance/access
+metadata, not the primary article link.
+
 ## Failure And Recovery Rules
 
 - Treat `status_class=rate_limited`, `network`, or `auth` as retrieval

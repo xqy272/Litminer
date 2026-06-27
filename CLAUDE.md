@@ -223,6 +223,14 @@ Do not mechanically scan large CSVs before checking `processing_report.md`.
 Use the report's Trust Tiers to keep discovered candidates separate from
 Crossref-trusted, metric-pass, and publisher-queued rows.
 
+When listing papers for a user, use article-facing links in this order:
+`publisher_queue.publisher_url`, `publisher_queue.doi_url`,
+`triaged_candidates.landing_page_url`, then `best_oa_landing_url` /
+`best_oa_url` as access hints. Do not substitute PubMed, Europe PMC, or other
+aggregator record pages for the main paper link when a DOI or
+publisher-facing URL exists. PubMed/Europe PMC links and PMIDs are provenance
+or access metadata, not the primary article link.
+
 ## Stage Semantics
 
 ### Discovery
