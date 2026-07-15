@@ -87,10 +87,64 @@ def _split_semicolon(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(";") if item.strip()]
 
 
+def _is_crossref_trusted(row: dict[str, str]) -> bool:
+    return (row.get("crossref_status") or "").strip() in CROSSREF_TRUSTED_STATUSES
+
+
+def _canonical_value(
+    row: dict[str, str],
+    *,
+    discovery_fields: tuple[str, ...],
+    crossref_field: str,
+) -> str:
+    """Use Crossref metadata only for rows whose Crossref status is trusted."""
+    if _is_crossref_trusted(row):
+        verified_value = (row.get(crossref_field) or "").strip()
+        if verified_value:
+            return verified_value
+    for field in discovery_fields:
+        value = (row.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _canonical_year(row: dict[str, str]) -> str:
+    return _canonical_value(
+        row,
+        discovery_fields=("publication_year", "year"),
+        crossref_field="crossref_year",
+    )
+
+
+def _canonical_journal(row: dict[str, str]) -> str:
+    return _canonical_value(
+        row,
+        discovery_fields=("journal",),
+        crossref_field="crossref_container",
+    )
+
+
+def _canonical_article_type(row: dict[str, str]) -> str:
+    return _canonical_value(
+        row,
+        discovery_fields=("article_type",),
+        crossref_field="crossref_type",
+    )
+
+
+def _canonical_doi(row: dict[str, str]) -> str:
+    return _canonical_value(
+        row,
+        discovery_fields=("doi",),
+        crossref_field="crossref_doi",
+    )
+
+
 def _year_distribution(rows: list[dict[str, str]]) -> dict[str, int]:
     counter: Counter[str] = Counter()
     for row in rows:
-        year = (row.get("publication_year") or row.get("crossref_year") or row.get("year") or "").strip()
+        year = _canonical_year(row)
         if year:
             counter[year] += 1
     return dict(sorted(counter.items(), key=lambda item: item[0]))
@@ -104,6 +158,19 @@ def _top_values(rows: list[dict[str, str]], column: str, limit: int = 15) -> lis
         value = (row.get(column) or "").strip()
         if value:
             counter[value] += 1
+    return [(key, count) for key, count in counter.most_common(limit)]
+
+
+def _top_journals(rows: list[dict[str, str]], limit: int = 15) -> list[tuple[str, int]] | None:
+    if not _has_column(rows, "journal") and not _has_column(rows, "crossref_container"):
+        return None
+    if not rows:
+        return []
+    counter: Counter[str] = Counter()
+    for row in rows:
+        journal = _canonical_journal(row)
+        if journal:
+            counter[journal] += 1
     return [(key, count) for key, count in counter.most_common(limit)]
 
 
@@ -137,16 +204,11 @@ def _high_cited(rows: list[dict[str, str]], limit: int = 10) -> list[dict[str, A
 
 
 def _article_type_distribution(rows: list[dict[str, str]]) -> dict[str, int] | None:
-    column = None
-    for candidate in ("article_type", "crossref_type"):
-        if _has_column(rows, candidate):
-            column = candidate
-            break
-    if column is None:
+    if not _has_column(rows, "article_type") and not _has_column(rows, "crossref_type"):
         return None
     counter: Counter[str] = Counter()
     for row in rows:
-        value = (row.get(column) or "").strip() or "<blank>"
+        value = _canonical_article_type(row) or "<blank>"
         counter[value] += 1
     return dict(sorted(counter.items(), key=lambda item: (-item[1], item[0])))
 
@@ -169,6 +231,13 @@ def _coverage(rows: list[dict[str, str]], column: str) -> float | None:
         return None
     present = sum(1 for row in rows if (row.get(column) or "").strip())
     return round(present / total, 4)
+
+
+def _doi_coverage(rows: list[dict[str, str]]) -> float | None:
+    if not rows:
+        return None
+    present = sum(1 for row in rows if _canonical_doi(row))
+    return round(present / len(rows), 4)
 
 
 def _triage_priority_distribution(rows: list[dict[str, str]]) -> dict[str, int] | None:
@@ -199,14 +268,15 @@ def _layer_stats(rows: list[dict[str, str]]) -> dict[str, Any]:
         "total_rows": len(rows),
         "active_rows": len(active_rows),
         "retracted_count": retracted_count,
+        "canonical_field_policy": "crossref_first_for_bibliographically_verified_rows",
         "year_distribution": _year_distribution(active_rows),
-        "top_journals": _top_values(active_rows, "journal", limit=15),
+        "top_journals": _top_journals(active_rows, limit=15),
         "top_authors": _top_authors(active_rows, limit=15),
         "high_cited": _high_cited(active_rows, limit=10),
         "article_type_distribution": _article_type_distribution(active_rows),
         "oa_rate": _oa_rate(active_rows),
         "abstract_coverage": _coverage(active_rows, "abstract"),
-        "doi_coverage": _coverage(active_rows, "doi"),
+        "doi_coverage": _doi_coverage(active_rows),
         "triage_priority_distribution": _triage_priority_distribution(active_rows),
     }
 

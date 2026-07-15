@@ -27,7 +27,14 @@ Stable keys:
 - `stage_statuses`
 - `stage_status_classes`
 - `stage_next_actions`
+- `capability_statuses`
 - `trust_tiers`
+- `trust_tier_statuses`
+- `verification_lanes`
+- `workflow_statuses`
+- `bibliographic_statuses`
+- `concept_diagnostics`
+- `delta_profile`
 - `provider_statuses`
 - `provider_status_classes`
 - `provider_next_actions`
@@ -58,7 +65,9 @@ Stable keys:
 Each layer stats object contains: `total_rows`, `active_rows`,
 `retracted_count`, `year_distribution`, `top_journals`, `top_authors`,
 `high_cited`, `article_type_distribution`, `oa_rate`, `abstract_coverage`,
-`doi_coverage`, `triage_priority_distribution`.
+`doi_coverage`, `triage_priority_distribution`, and a canonical field policy.
+For the Crossref-verified layer, DOI/year/container/article type come from
+Crossref fields before discovery fields.
 
 Agent rule: statistics describe the retrieved collection, not the research
 field. `completeness_caveats` reports search-process completeness only;
@@ -115,6 +124,52 @@ readers. Prefer `input_path` and `output_path` in new automation.
 
 Agent rule: if `run_status` is `partial`, do not describe the run as complete.
 Use `--resume` only when the user request has not changed.
+
+## `research_session_manifest.json`
+
+Level: Stable, extensible.
+
+Purpose: cross-iteration lineage for normal and `--merge-into` runs.
+
+Stable keys:
+
+- `schema_version`
+- `session_id`
+- `created_at`
+- `updated_at`
+- `iterations`
+
+Each iteration contains `iteration_id`, `completed_at`, `merge_mode`,
+`run_status`, `queries`, `concepts`, and a compact `delta` summary.
+
+Agent rule: this is iteration-level lineage, not per-paper scientific history.
+Do not use `--resume` to create a new iteration.
+
+## `delta_profile.json`
+
+Level: Stable, extensible.
+
+Purpose: mechanical difference between the prior candidate pool and the current
+triaged collection.
+
+Stable keys include `iteration_id`, `queries`, `previous_rows`, `current_rows`,
+`new_rows`, `new_bibliographically_verified`, `new_priority_distribution`,
+`new_source_distribution`, `new_top_journals`, and `boundary`.
+
+Agent rule: delta counts describe retrieved rows only. They do not measure
+field recall or scientific importance.
+
+## `concept_diagnostics.json`
+
+Level: Stable, extensible.
+
+Purpose: mechanical match-rate diagnostics for caller-supplied concepts.
+
+Stable keys include `total_rows`, `high_priority_rows`, `concepts`, `warnings`,
+and `boundary`. Concept entries expose match rates and source distributions.
+
+Agent rule: warnings identify low selectivity or zero matches; Litminer does not
+decide which scientific criteria should be changed.
 
 ## `query_plan.json`
 
@@ -203,14 +258,41 @@ Stable fields:
 - `triage_score`
 - `triage_reasons`
 - `matched_required`
+- `matched_required_evidence`
 - `matched_optional`
+- `matched_optional_evidence`
 - `matched_negative`
+- `matched_negative_evidence`
 - `candidate_status`
 - `metadata_status`
+- `bibliographic_status`
+- `bibliographic_review_needed`
+- `scientific_review_needed`
+- `workflow_status`
 - `llm_review_needed`
 
 Agent rule: triage priorities are ranking signals, not final inclusion
-decisions.
+decisions. `llm_review_needed` is scientific review only; bibliographic backlog
+is represented separately.
+
+## `verification_queue.csv`
+
+Level: Stable for queue-order fields, extensible for candidate metadata.
+
+Purpose: deterministic ordering before Crossref consumes a row budget.
+
+Stable fields:
+
+- `verification_queue_rank`
+- `verification_lane`
+- `verification_reason`
+- `triage_priority`
+- `triage_score`
+- `doi`
+- `metadata_status`
+
+Agent rule: this is a bibliographic work queue, not the publisher evidence
+queue. Rows beyond a Crossref budget remain here and in triage artifacts.
 
 ## `publisher_queue.csv`
 
@@ -229,9 +311,13 @@ Stable fields:
 - `triage_priority`
 - `candidate_status`
 - `metadata_status`
+- `bibliographic_status`
+- `workflow_status`
 
 Agent rule: publisher queue rows are inspection targets, not extracted
-article-level claims.
+article-level claims. In a verification-enabled run, rows must be
+bibliographically verified by default. Fast mode may contain unverified DOI
+pointers and must preserve that status.
 
 ## Debug And Supporting Artifacts
 

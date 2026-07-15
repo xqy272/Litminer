@@ -16,9 +16,11 @@ Agent and user still make the final scientific judgement.
 - Discover candidates from OpenAlex, Semantic Scholar, arXiv, Europe PMC, and similar sources.
 - Verify DOI, title, journal, year, and article type through Crossref, with retraction status detection.
 - Annotate OA and access hints through Unpaywall.
-- Deduplicate, merge, triage (with citation-count signal and retraction demotion), rank, and summarize candidates.
+- Pretriage deduplicated candidates, then build a budget-aware Crossref queue ordered by relevance, DOI availability, and metadata state.
+- Keep bibliographic trust, scientific review, and workflow readiness separate, with field-level match evidence and concept diagnostics.
 - Expand from high-priority seeds via citation/reference graph to find papers keyword search misses.
 - Generate stratified result statistics (`result_profile`) and a human-readable audit report (`search_audit_report`).
+- Merge a new research iteration into an existing candidate pool with `--merge-into`, with delta and lineage artifacts.
 - Extract structured metadata (`citation_keywords`, `citation_online_date`, `citation_funder_name`) from publisher HTML meta tags.
 - Build DOI/publisher-page evidence queues for follow-up inspection.
 
@@ -112,6 +114,21 @@ or `--mode expanded` after the candidate direction looks right.
 trusted profiles with `--enable-regex-concepts` or the MCP
 `enable_regex_concepts` parameter.
 
+If the user intent, queries, or concepts change, do not use `--resume`. Start a
+new research iteration instead:
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --query "new focused query" \
+  --required-concept "main=term1|term2" \
+  --merge-into .litminer/runs/litminer_run
+```
+
+`--resume` is only for an interrupted run with the same signature.
+`--merge-into` reruns dedupe, semantic ranking, verification ordering, and final
+triage while preserving iteration lineage.
+
 ## Main Outputs
 
 | File | Purpose |
@@ -120,16 +137,21 @@ trusted profiles with `--enable-regex-concepts` or the MCP
 | `api_candidates.csv` | API-discovered candidates. |
 | `api_discovery_trace.csv` | Query/source/status/failure trace. |
 | `deduped_candidates.csv` | DOI/title deduplicated candidates. |
+| `pretriaged_candidates.csv` | Semantic ordering used before spending Crossref budget. |
+| `verification_queue.csv` | Deterministic relevance- and DOI-aware bibliographic work queue. |
 | `verified_candidates.csv` | Crossref verification output (with retraction status). |
-| `triaged_candidates.csv` | Semantic tags, priorities, citation signal, and metadata status. |
+| `triaged_candidates.csv` | Semantic evidence plus bibliographic, scientific-review, and workflow states. |
+| `concept_diagnostics.json` | Concept match rates, source distributions, and low-selectivity warnings. |
 | `citation_expanded_candidates.csv` | Citation/reference expansion candidates (when `--expand-citations` is enabled). |
-| `publisher_queue.csv` | DOI/publisher-page evidence queue. |
+| `publisher_queue.csv` | DOI/publisher-page evidence queue; verification-enabled runs default to bibliographically verified rows. |
 | `publisher_queue_probed.csv` | Access probe results (when `--probe-publishers` is enabled). |
 | `publisher_queue_html_meta.csv` | Publisher HTML meta field extraction (when `--probe-publishers` is enabled). |
 | `result_profile.json` | Stratified descriptive statistics and search-process completeness caveats. |
+| `delta_profile.json` | Current-iteration additions by priority, source, journal, and bibliographic trust. |
+| `research_session_manifest.json` | Cross-iteration queries, concepts, status, and delta lineage. |
 | `search_audit_report.md` | Human-readable audit report for research reproducibility. |
 | `processing_report.md` | Source, metadata, triage, OA/access, citation expansion, HTML meta, and queue summary. |
-| `agent_summary.json` | Machine-readable summary for Agent decisions (with embedded result_profile summary). |
+| `agent_summary.json` | Machine-readable capability, verification-lane, concept-diagnostic, delta, and result-profile summary. |
 | `run_manifest.json` | Stage status, reuse records, row counts, fingerprints, and signature. |
 
 ## Optional MCP

@@ -36,10 +36,17 @@ OUTPUT_COLUMNS = [
     "triage_priority",
     "triage_score",
     "candidate_status",
+    "workflow_status",
+    "bibliographic_status",
+    "bibliographic_review_needed",
+    "scientific_review_needed",
     "semantic_tags",
     "matched_required",
+    "matched_required_evidence",
     "matched_optional",
+    "matched_optional_evidence",
     "matched_negative",
+    "matched_negative_evidence",
     "missing_required",
     "triage_reasons",
     "llm_review_needed",
@@ -57,6 +64,19 @@ PRIORITY_ORDER = {
 MAX_PATTERN_LENGTH = 300
 MAX_PATTERN_CACHE_SIZE = 512
 _PATTERN_CACHE: OrderedDict[tuple[str, bool], re.Pattern[str]] = OrderedDict()
+CROSSREF_TRUSTED_STATUSES = {"verified", "title_recovered"}
+CROSSREF_PROVIDER_PENDING_STATUSES = {
+    "rate_limited",
+    "network_error",
+    "auth_error",
+    "response_parse_error",
+    "provider_error",
+}
+CROSSREF_LOOKUP_FAILED_STATUSES = {
+    "lookup_failed",
+    "title_lookup_failed",
+    "http_404",
+}
 
 
 @dataclass
@@ -285,21 +305,24 @@ def load_profile(path: Path | None = None,
     )
 
 
-def scoped_text(row: dict[str, str], scope: str) -> str:
+def scope_fields(scope: str) -> list[str]:
     scope = (scope or "title_abstract").lower()
     if scope == "title":
-        fields = ["title", "crossref_title"]
-    elif scope == "abstract":
-        fields = ["abstract", "summary"]
-    elif scope == "article_type":
-        fields = ["article_type", "crossref_type"]
-    elif scope == "metadata":
-        fields = [
+        return ["title", "crossref_title"]
+    if scope == "abstract":
+        return ["abstract", "summary"]
+    if scope == "article_type":
+        return ["article_type", "crossref_type"]
+    if scope == "metadata":
+        return [
             "title", "crossref_title", "abstract", "summary", "journal",
             "crossref_container", "article_type", "crossref_type", "keywords",
         ]
-    else:
-        fields = ["title", "crossref_title", "abstract", "summary", "keywords"]
+    return ["title", "crossref_title", "abstract", "summary", "keywords"]
+
+
+def scoped_text(row: dict[str, str], scope: str) -> str:
+    fields = scope_fields(scope)
     return normalize_text(" ".join(row.get(field, "") or "" for field in fields))
 
 
@@ -408,6 +431,57 @@ def concept_matches(row: dict[str, str], concept: Concept, allow_regex: bool = F
     return False
 
 
+def _evidence_snippet(text: str, start: int, end: int, radius: int = 55) -> str:
+    left = max(0, start - radius)
+    right = min(len(text), end + radius)
+    snippet = text[left:right].strip()
+    return snippet.replace(";", ",")
+
+
+def concept_evidence(row: dict[str, str], concept: Concept, allow_regex: bool = False) -> str:
+    """Return transparent match provenance without interpreting scientific role."""
+    if not concept_matches(row, concept, allow_regex):
+        return ""
+    if concept.children:
+        child_evidence = [
+            concept_evidence(row, child, allow_regex)
+            for child in concept.children
+            if concept_matches(row, child, allow_regex)
+        ]
+        details = " + ".join(item for item in child_evidence if item)
+        return f"{concept.name}@{concept.scope}:{concept.op}({details})"
+
+    if concept.op in {"near", "not_near"}:
+        for field in scope_fields(concept.scope):
+            text = normalize_text(row.get(field, "") or "")
+            if text and (
+                _near_matches(text, concept.patterns, concept.window, allow_regex)
+                if concept.op == "near"
+                else not _near_matches(text, concept.patterns, concept.window, allow_regex)
+            ):
+                return (
+                    f"{concept.name}={'|'.join(concept.patterns)}@{field}:"
+                    f"{_evidence_snippet(text, 0, min(len(text), 110))}"
+                )
+        return f"{concept.name}@{concept.scope}:{concept.op}"
+
+    for field in scope_fields(concept.scope):
+        text = normalize_text(row.get(field, "") or "")
+        if not text:
+            continue
+        for pattern in concept.patterns:
+            compiled = compile_pattern(pattern, allow_regex=allow_regex)
+            for match in compiled.finditer(text):
+                prefix = text[max(0, match.start() - 80):match.start()]
+                if NEGATION_BEFORE_RE.search(prefix):
+                    continue
+                return (
+                    f"{concept.name}={pattern}@{field}:"
+                    f"{_evidence_snippet(text, match.start(), match.end())}"
+                )
+    return f"{concept.name}@{concept.scope}"
+
+
 def row_year(row: dict[str, str]) -> int | None:
     for field in ("crossref_year", "publication_year", "year"):
         value = (row.get(field) or "").strip()
@@ -420,6 +494,29 @@ def row_year(row: dict[str, str]) -> int | None:
 def article_type(row: dict[str, str]) -> str:
     value = row.get("crossref_type") or row.get("article_type") or ""
     return value.strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def bibliographic_status(row: dict[str, str]) -> str:
+    """Return a workflow-safe bibliographic state independent of relevance."""
+    status = (row.get("crossref_status") or "").strip().lower()
+    verified = (row.get("crossref_verified") or "").strip().lower() in {"true", "1", "yes"}
+    if status in CROSSREF_TRUSTED_STATUSES:
+        return "verified"
+    if status == "mismatch":
+        return "mismatch"
+    if status == "skipped_budget":
+        return "pending_budget"
+    if status in CROSSREF_PROVIDER_PENDING_STATUSES or status.startswith("http_5"):
+        return "pending_provider"
+    if status == "missing_doi":
+        return "missing_identifier"
+    if status in CROSSREF_LOOKUP_FAILED_STATUSES or status.startswith("http_4"):
+        return "lookup_failed"
+    if not status:
+        return "verified" if verified else "not_checked"
+    if verified:
+        return "verified"
+    return "unverified"
 
 
 def metadata_flags(row: dict[str, str], profile: TriageProfile) -> tuple[list[str], str, list[str]]:
@@ -456,18 +553,21 @@ def metadata_flags(row: dict[str, str], profile: TriageProfile) -> tuple[list[st
         flags.append(f"article_type_{art_type}")
         reasons.append(f"article type '{art_type}' is in caller-supplied excluded types")
 
-    mismatches = (row.get("crossref_mismatches") or "").strip()
-    if mismatches:
-        flags.append("crossref_mismatch")
-        reasons.append(mismatches)
-
     crossref_status = (row.get("crossref_status") or "").strip().lower()
-    if crossref_status in {"lookup_failed", "title_lookup_failed"}:
-        flags.append(f"crossref_{crossref_status}")
-        reasons.append(f"Crossref status is {crossref_status}")
-    elif crossref_status == "mismatch":
+    mismatches = (row.get("crossref_mismatches") or "").strip()
+    error_code = (row.get("crossref_error_code") or "").strip()
+    if crossref_status == "mismatch":
         flags.append("crossref_mismatch")
-        reasons.append("Crossref metadata mismatch")
+        reasons.append(mismatches or "Crossref metadata mismatch")
+    elif crossref_status == "skipped_budget":
+        flags.append("crossref_pending_budget")
+        reasons.append(error_code or "Crossref verification is pending because the row budget was exhausted")
+    elif crossref_status in CROSSREF_PROVIDER_PENDING_STATUSES or crossref_status.startswith("http_5"):
+        flags.append("crossref_pending_provider")
+        reasons.append(error_code or f"Crossref status is {crossref_status}")
+    elif crossref_status in CROSSREF_LOOKUP_FAILED_STATUSES or crossref_status.startswith("http_4"):
+        flags.append(f"crossref_{crossref_status}")
+        reasons.append(error_code or f"Crossref status is {crossref_status}")
 
     metric_status = (row.get("metric_filter_status") or "").strip().lower()
     if metric_status in {"fail", "unverified"}:
@@ -481,7 +581,6 @@ def metadata_flags(row: dict[str, str], profile: TriageProfile) -> tuple[list[st
         or flag.startswith("article_type_")
         or (profile.require_doi and flag in {"missing_doi", "invalid_doi_format"})
         or flag == "crossref_mismatch"
-        or flag in {"crossref_lookup_failed", "crossref_title_lookup_failed"}
         or flag == "metric_fail"
     ]
     if blocking:
@@ -541,11 +640,49 @@ def candidate_status(priority: str, metadata_status: str) -> str:
     return "low_priority"
 
 
+def workflow_status(
+    priority: str,
+    metadata_status: str,
+    bibliography: str,
+    scientific_review: bool = False,
+) -> str:
+    if metadata_status == "blocked":
+        return "blocked"
+    if scientific_review or priority == "needs_review":
+        return "scientific_review"
+    if priority == "low":
+        return "low_priority"
+    if bibliography == "verified":
+        return "ready_for_enrichment"
+    if bibliography in {"pending_budget", "pending_provider", "not_checked", "unverified"}:
+        return "pending_bibliographic_verification"
+    if bibliography == "missing_identifier":
+        return "identifier_recovery"
+    if bibliography == "lookup_failed":
+        return "bibliographic_review"
+    return "metadata_review"
+
+
 def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
     matched_required = [c.name for c in profile.required if concept_matches(row, c, profile.allow_regex)]
     matched_optional = [c.name for c in profile.optional if concept_matches(row, c, profile.allow_regex)]
     matched_negative = [c.name for c in profile.negative if concept_matches(row, c, profile.allow_regex)]
     missing_required = [c.name for c in profile.required if c.name not in matched_required]
+    required_evidence = [
+        concept_evidence(row, concept, profile.allow_regex)
+        for concept in profile.required
+        if concept.name in matched_required
+    ]
+    optional_evidence = [
+        concept_evidence(row, concept, profile.allow_regex)
+        for concept in profile.optional
+        if concept.name in matched_optional
+    ]
+    negative_evidence = [
+        concept_evidence(row, concept, profile.allow_regex)
+        for concept in profile.negative
+        if concept.name in matched_negative
+    ]
 
     score = 0.0
     score += sum(c.weight for c in profile.required if c.name in matched_required)
@@ -566,6 +703,8 @@ def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
     hard_flags, meta_status, meta_reasons = metadata_flags(row, profile)
     priority = priority_for(profile, matched_required, matched_optional,
                             matched_negative, missing_required, row)
+    bibliography = bibliographic_status(row)
+    scientific_review = priority == "needs_review" or bool(matched_negative)
 
     reasons = []
     if matched_required:
@@ -597,13 +736,25 @@ def triage_row(row: dict[str, str], profile: TriageProfile) -> dict[str, str]:
         "triage_priority": priority,
         "triage_score": f"{score:.1f}",
         "candidate_status": candidate_status(priority, meta_status),
+        "workflow_status": workflow_status(
+            priority,
+            meta_status,
+            bibliography,
+            scientific_review=scientific_review,
+        ),
+        "bibliographic_status": bibliography,
+        "bibliographic_review_needed": "false" if bibliography == "verified" else "true",
+        "scientific_review_needed": "true" if scientific_review else "false",
         "semantic_tags": "; ".join(tags),
         "matched_required": "; ".join(matched_required),
+        "matched_required_evidence": "; ".join(item for item in required_evidence if item),
         "matched_optional": "; ".join(matched_optional),
+        "matched_optional_evidence": "; ".join(item for item in optional_evidence if item),
         "matched_negative": "; ".join(matched_negative),
+        "matched_negative_evidence": "; ".join(item for item in negative_evidence if item),
         "missing_required": "; ".join(missing_required),
         "triage_reasons": "; ".join(reasons) if reasons else "no explicit match",
-        "llm_review_needed": "true" if priority == "needs_review" or matched_negative or hard_flags else "false",
+        "llm_review_needed": "true" if scientific_review else "false",
         "hard_filter_flags": "; ".join(hard_flags),
         "metadata_status": meta_status,
         "metadata_reasons": "; ".join(meta_reasons),
@@ -710,20 +861,24 @@ def main() -> None:
     parser.add_argument("--no-sort", action="store_true")
     args = parser.parse_args()
 
-    triage_csv(
-        args.input,
-        args.output,
-        profile_path=args.profile,
-        required_concepts=args.required_concept,
-        optional_concepts=args.optional_concept,
-        negative_concepts=args.negative_concept,
-        year_from=args.year_from,
-        year_to=args.year_to,
-        require_doi=args.require_doi,
-        exclude_article_types=args.exclude_article_type,
-        allow_regex=args.allow_regex,
-        sort_rows=not args.no_sort,
-    )
+    try:
+        triage_csv(
+            args.input,
+            args.output,
+            profile_path=args.profile,
+            required_concepts=args.required_concept,
+            optional_concepts=args.optional_concept,
+            negative_concepts=args.negative_concept,
+            year_from=args.year_from,
+            year_to=args.year_to,
+            require_doi=args.require_doi,
+            exclude_article_types=args.exclude_article_type,
+            allow_regex=args.allow_regex,
+            sort_rows=not args.no_sort,
+        )
+    except ValueError as exc:
+        print(f"Semantic triage validation error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

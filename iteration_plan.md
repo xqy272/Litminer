@@ -356,7 +356,7 @@ def status_for_exception(exc: Exception) -> str: ...
 - 配置了哪些概念（required/optional/negative）、为什么
 - 每个数据源的成功/失败/限速情况
 - 排除了多少行、为什么（DOI 缺失、Crossref 失配、metric 未过、撤稿等）
-- 如果有 `--merge-into`，每轮的查询和新增数量（`delta_profile` 在第四轮实现，此处预留占位；未实现时该段落留空）
+- 如果有 `--merge-into`，报告每轮查询和 `delta_profile` 中的新增数量
 - Trust Tiers 各层的行数和含义
 - `completeness_caveats` 的人类可读版本
 
@@ -412,7 +412,7 @@ def status_for_exception(exc: Exception) -> str: ...
 
 ---
 
-## 第四轮：可用性补全 ⏳ 待做
+## 第四轮：可用性补全 ⏳ 部分完成（4.2、4.3 已完成）
 
 > 依赖前三轮完成。可在发版后按需推进。
 
@@ -438,9 +438,9 @@ def export_bibtex(csv_path: Path, output_path: Path, *,
 
 **为什么做这个：** 这是人类研究者从"能看结果"到"能用结果"的桥梁。实现量很小（RIS 是固定格式的文本模板），但用户感知价值高。
 
-### 4.2 增量合并能力（`--merge-into`）
+### 4.2 增量合并能力（`--merge-into`）✅ 已完成
 
-**前置条件：** 给 `merge_csv.py` 补测试——union-schema 合并、空文件、重复字段、无头文件这些 case 都要覆盖。在未测试代码上建功能是不安全的。
+**前置条件（已完成）：** `merge_csv.py` 已覆盖 union-schema 合并、空/缺失输入和重复表头；重复表头会明确失败，避免字段被静默覆盖。
 
 **设计：** 不是"迭代式会话"（那是 Agent 的职责），而是一个简单的机械能力——将新一轮运行的发现结果合并到已有的输出目录中。
 
@@ -453,24 +453,24 @@ python -m litminer.engine.run_lit_search --query "water splitting catalyst" \
     --merge-into run1/
 ```
 
-**行为（关键）：**
-- 新发现的行追加到 `api_candidates.csv`
-- 重新执行去重（已有行 + 新行）
+**已实现行为（关键）：**
+- 从已有目录选择 `deduped_candidates.csv`、`merged_candidates.csv` 或 `api_candidates.csv` 作为既有候选池，并保存 `merge_base_candidates.csv` 快照
+- 新发现与既有候选池合并后重新执行去重
 - **全量重跑 triage（用新概念配置）**——第二轮补充检索的典型场景就是改了概念配置（加同义词、加 negative concept），这种情况下旧行的 `triage_score` 是过期的，混在一起排序会得到错误结果。不重跑 triage 会在概念配置变更时静默产出错误排序，违反原则一
-- 已完成的 Crossref/Unpaywall 验证结果通过 cache 自动保留，仅验证新增行
-- **manifest 记录每轮的查询、时间戳、概念配置**——未来排查"为什么这次排序和上次不一样"时是关键证据
+- 重新执行 pretriage、验证队列、Crossref 和最终 triage；已有可信 Crossref 结果可复用且不消耗当前行预算
+- `research_session_manifest.json` 记录每轮查询、概念、时间、运行状态和增量摘要
 - `result_profile` 重新计算（含新的 `completeness_caveats`）
 
 **不做的事：**
 - 不自动判断"需不需要补充检索"（Agent 的判断）
 - 不自动生成新查询词（Agent 的判断）
-- 不跟踪"第几轮发现了什么"的详细历史（manifest 已有时间戳和查询记录，够用）
+- 不跟踪每篇论文的完整跨轮版本历史；只保留机械候选池快照和轮次级谱系
 
 **为什么是 `--merge-into` 而不是 `--append-to`：** 语义更准确。不是在已有运行上追加阶段，而是将新检索的原始发现合并到已有的候选池中，然后重跑管道。
 
-### 4.3 delta_profile（`--merge-into` 的增量可见性）
+### 4.3 delta_profile（`--merge-into` 的增量可见性）✅ 已完成
 
-**新增：** 合并时除了重算整体 `result_profile`，再产一个 `delta_profile`——这一轮新增了 N 行、其中 M 篇高优先级、Top 新增期刊是 X/Y/Z、新增的 OA 论文数等。
+**已实现：** 每轮 finalize 都写 `delta_profile.json`；合并轮次会相对 `merge_base_candidates.csv` 计算新增行数、新增书目已验证数、新增优先级分布、来源分布和 Top 期刊。`agent_summary.json` 嵌入当前轮 delta；若发现旧轮遗留 delta，会明确标记 stale，而不是静默误报。
 
 **为什么必须做：** 没有 delta，`--merge-into` 在产品层是黑盒。研究者做迭代检索的真实场景是问 Agent"第二轮新找到了什么"——不是"现在总共有多少论文"。Agent 如果只能说"现在总共有 240 篇"而说不出"新增了 53 篇，其中 12 篇高优先级"，那迭代检索的价值就打了折扣。差集计算是机械操作（manifest 里已有每轮的时间戳和查询），不增加新 API 调用。
 
@@ -772,7 +772,7 @@ compliance assessment.
 第一轮：修真 bug + 边界文档化        ✅ → 让现有功能可靠 + 产品定义写下来
 第二轮：分层统计 + 完整性告诫 + 撤稿  ✅ → 让现有产出有用且诚实
 第三轮：HTTP 统一 + 引用扩展 + 审计性 + HTML meta ✅ → 强化核心检索能力 + 补全边界内缺失
-第四轮：导出 + 增量合并 + delta       ⏳ → 补齐可用性短板
+第四轮：导出 ⏳ + 增量合并/delta ✅    → 4.2、4.3 已完成，4.1、4.4 仍待推进
 按需：不预设，等触发                  ⏳ → 不为未来抽象，用真实需求验证
 ```
 

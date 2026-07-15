@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from collections import Counter
 from pathlib import Path
 
 from litminer.engine.common import write_csv_atomic
@@ -27,6 +28,16 @@ def merge_csv(inputs: list[Path], output: Path, allow_missing: bool = False) -> 
             if not reader.fieldnames:
                 print(f"Skipping empty/headerless input: {path}", file=sys.stderr)
                 continue
+
+            header_counts = Counter(reader.fieldnames)
+            duplicate_fields = sorted(
+                field for field, count in header_counts.items() if field and count > 1
+            )
+            if duplicate_fields:
+                raise SystemExit(
+                    f"Input CSV has duplicate header field(s): {path}: "
+                    + ", ".join(duplicate_fields)
+                )
 
             for field in reader.fieldnames:
                 if field not in fieldnames:

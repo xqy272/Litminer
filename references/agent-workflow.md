@@ -19,11 +19,14 @@ Litminer supplies deterministic mechanics:
 - structured scholarly API discovery
 - trace rows for every provider/query call
 - DOI/title deduplication
+- pre-verification semantic ranking and a deterministic DOI-first verification queue
 - Crossref metadata verification
-- semantic tags and priorities
+- semantic tags, field-level match evidence, and orthogonal workflow states
+- concept match-rate diagnostics
 - Unpaywall OA/access hints
 - verified local journal metric annotation
 - publisher-page evidence queues
+- incremental merge deltas and cross-iteration lineage
 - processing reports, summaries, provenance, and manifests
 
 ## Run Modes
@@ -38,6 +41,12 @@ them.
 Use `expanded` or `full` when recall is worth extra time and rate-limit risk.
 These modes enable Semantic Scholar by default but still keep arXiv and Europe
 PMC explicit because they are domain-specific.
+
+Use `--resume` only for an interrupted run whose signature is unchanged. Use
+`--merge-into EXISTING_OUTPUT_DIR` when the Agent deliberately changes queries,
+concepts, sources, or mode. Merge mode is a new research iteration: it snapshots
+the prior candidate pool, combines new discovery, reruns downstream stages, and
+writes `delta_profile.json` plus `research_session_manifest.json`.
 
 ## Query And Concept Planning
 
@@ -69,6 +78,12 @@ limits. Use arXiv in preprint-heavy fields. Use Europe PMC for biomedical and
 life-science topics. Use WebSearch only as supplemental lead generation that
 must be verified before promotion.
 
+For arXiv, plain intent queries are compiled into explicit `all:` terms with
+AND semantics. Advanced arXiv field syntax is passed through. Inspect
+`provider_query` and `provider_query_mode` instead of assuming the provider saw
+the original intent string verbatim. In biomedical work, treat arXiv as a
+supplemental preprint source rather than the primary evidence route.
+
 Inspect `query_plan.json.source_strategy` after each run. Treat
 `missing_recommended_sources` and `risk_flags` as advisory retrieval-gap hints,
 not automatic source changes.
@@ -82,14 +97,23 @@ explicitly changes that behavior.
 Discovery outputs candidates. Do not present discovery-only rows as verified
 paper facts.
 
-Crossref outputs bibliographic trust. Only `verified` and `title_recovered`
-are trusted by default. Treat `mismatch`, `lookup_failed`, and
-`title_lookup_failed` as blockers unless the user asks for manual review.
+Pretriage ranks the full candidate set before Crossref budget is spent.
+`verification_queue.csv` then orders DOI-bearing high/medium rows before title
+recovery and low-priority or metadata-blocked rows. Citation-expanded rows are
+rerun through the same ordering.
+
+Crossref outputs bibliographic trust. Only `verified` and `title_recovered` are
+trusted by default. `crossref_mismatches` contains real field mismatches only;
+operational failures and `skipped_budget` use `crossref_status` plus
+`crossref_error_code`. Budget-limited and provider-limited rows stay pending
+for later verification rather than becoming scientific mismatches.
 
 Semantic triage outputs a review surface. Important columns include
 `triage_priority`, `triage_score`, `semantic_tags`, `matched_required`,
-`matched_optional`, `matched_negative`, `missing_required`, `metadata_status`,
-and `llm_review_needed`.
+`matched_optional`, `matched_negative`, their `*_evidence` fields,
+`missing_required`, `metadata_status`, `bibliographic_status`,
+`scientific_review_needed`, `workflow_status`, and `llm_review_needed`.
+Scientific review and bibliographic recovery are separate queues.
 
 Unpaywall outputs OA/access hints. It does not read PDFs or prove article-level
 claims.
@@ -97,8 +121,12 @@ claims.
 Journal metrics output metric annotations from a verified local table. Missing
 metric coverage is not evidence that a journal lacks a metric.
 
-Publisher queue outputs pages and fields to inspect. It is not an extracted
-full-text dataset.
+Publisher queue outputs pages and fields to inspect. When Crossref was enabled,
+the default workflow queues only bibliographically verified rows; unresolved
+rows remain visible in `verification_queue.csv` and `triaged_candidates.csv`.
+When Crossref was intentionally disabled in fast mode, DOI-bearing discovery
+rows may still be queued as explicitly unverified pointers. The queue is not an
+extracted full-text dataset.
 
 ## Output Reading Order
 
@@ -108,7 +136,12 @@ and next actions.
 
 Read `result_profile.json` second for stratified descriptive statistics
 (all rows + Crossref-verified) and `completeness_caveats` that report
-search-process failures. On 0-result runs, it degrades to `failure_summary`.
+search-process failures. Crossref-trusted rows use Crossref bibliographic fields
+as canonical. On 0-result runs, it degrades to `failure_summary`.
+
+For iterative research, read `research_session_manifest.json` and
+`delta_profile.json` next. Read `concept_diagnostics.json` before assuming a
+high-priority set is selective.
 
 For stable machine-readable contracts, see `artifact-contracts.md` and
 `csv-fields.md`.
@@ -136,6 +169,10 @@ Report:
 - which sources failed or were rate-limited (from `completeness_caveats`)
 - whether any retracted papers were detected and demoted
 - whether citation expansion was used and how many papers it added
+- whether Crossref, metrics, probing, and other optional capabilities were
+  `completed`, `partial`, or `not_run` (a zero count is not enough)
+- which rows remain in bibliographic backlog because of budget or provider state
+- what the current iteration added when `--merge-into` was used
 - which constraints limited the count
 - which fields remain unknown
 - which local artifacts contain the evidence

@@ -445,8 +445,6 @@
     {
       "id": "partial_stdout_should_not_claim_complete",
       "profiles": ["known_issue"],
-      "expected_failure": true,
-      "expected_failure_reason": "Current CLI prints completion and downstream artifact paths for early-stopped partial runs.",
       "user_prompt": "Stop after dedupe. The Agent should see a partial run and should not be told that triage artifacts exist.",
       "dimensions": ["partial_run", "stdout_contract", "artifact_contract"],
       "agent_expectation": {
@@ -490,8 +488,6 @@
     {
       "id": "regex_rejection_should_be_clean",
       "profiles": ["known_issue"],
-      "expected_failure": true,
-      "expected_failure_reason": "Regex concepts are rejected, but the CLI currently emits a raw Python traceback.",
       "user_prompt": "The user supplied a dangerous regex concept. The Agent should get a clean validation error, not a traceback.",
       "dimensions": ["regex", "safety", "cli_validation"],
       "agent_expectation": {
@@ -516,8 +512,6 @@
     {
       "id": "publisher_queue_should_dedupe_doi",
       "profiles": ["known_issue"],
-      "expected_failure": true,
-      "expected_failure_reason": "The queue builder currently preserves duplicate DOI rows, causing duplicate page-inspection work.",
       "user_prompt": "Build the publisher inspection queue. The Agent should not inspect the same DOI twice.",
       "dimensions": ["publisher_queue", "dedupe", "doi"],
       "agent_expectation": {

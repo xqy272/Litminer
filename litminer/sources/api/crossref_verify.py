@@ -436,6 +436,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "crossref_doi", "crossref_title", "crossref_container", "crossref_publisher",
         "crossref_type", "crossref_year", "crossref_issn", "crossref_url",
         "crossref_created", "crossref_published", "crossref_mismatches",
+        "crossref_error_code",
         "crossref_lookup_method", "crossref_title_similarity",
         "crossref_recovered_doi_confidence", "crossref_status", "crossref_verified",
         "crossref_retry_after_seconds", "retraction_status",
@@ -464,11 +465,13 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         "cache_miss": 0,
         "cache_store": 0,
         "reused": 0,
+        "budget_used": 0,
         "skipped_budget": 0,
         "retracted": 0,
         "update_to": 0,
     }
     request_count = 0
+    budget_used = 0
     existing_rows = _existing_verified_rows(output_path)
     cache_obj = (
         cache_helpers.JsonCache(
@@ -515,13 +518,16 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             checkpoint(i)
             continue
 
-        if max_rows is not None and max_rows >= 0 and i >= max_rows:
-            row["crossref_mismatches"] = "SKIPPED_BY_MAX_ROWS_BUDGET"
+        if max_rows is not None and max_rows >= 0 and budget_used >= max_rows:
+            row["crossref_mismatches"] = ""
+            row["crossref_error_code"] = "SKIPPED_BY_MAX_ROWS_BUDGET"
             row["crossref_status"] = "skipped_budget"
             row["crossref_verified"] = "false"
             counts["skipped_budget"] += 1
             checkpoint(i)
             continue
+        budget_used += 1
+        counts["budget_used"] = budget_used
 
         doi = row.get("doi", "").strip()
         if not doi:
@@ -548,7 +554,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                         meta = _best_title_match(title, input_row=row, raise_transient=True)
                     except CrossrefRateLimitError as exc:
                         polite_pause()
-                        row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+                        row["crossref_mismatches"] = ""
+                        row["crossref_error_code"] = "CROSSREF_RATE_LIMITED"
                         row["crossref_status"] = "rate_limited"
                         row["crossref_verified"] = "false"
                         row["crossref_retry_after_seconds"] = (
@@ -559,7 +566,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                         continue
                     except CrossrefRequestError as exc:
                         polite_pause()
-                        row["crossref_mismatches"] = f"CROSSREF_{exc.status.upper()}"
+                        row["crossref_mismatches"] = ""
+                        row["crossref_error_code"] = f"CROSSREF_{exc.status.upper()}"
                         row["crossref_status"] = exc.status
                         row["crossref_verified"] = "false"
                         row["crossref_retry_after_seconds"] = (
@@ -579,7 +587,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                         counts["cache_store"] += 1
                         row["crossref_cache_status"] = "store"
                 if meta is None:
-                    row["crossref_mismatches"] = "NO_DOI_TITLE_LOOKUP_FAILED"
+                    row["crossref_mismatches"] = ""
+                    row["crossref_error_code"] = "NO_DOI_TITLE_LOOKUP_FAILED"
                     row["crossref_status"] = "title_lookup_failed"
                     row["crossref_verified"] = "false"
                     counts["title_lookup_failed"] += 1
@@ -590,12 +599,14 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 for key, value in meta.items():
                     row[key] = value
                 row["crossref_mismatches"] = ""
+                row["crossref_error_code"] = ""
                 row["crossref_status"] = "title_recovered"
                 row["crossref_verified"] = "true"
                 counts["title_recovered"] += 1
                 checkpoint(i)
                 continue
-            row["crossref_mismatches"] = "NO_DOI"
+            row["crossref_mismatches"] = ""
+            row["crossref_error_code"] = "NO_DOI"
             row["crossref_status"] = "missing_doi"
             row["crossref_verified"] = "false"
             counts["missing_doi"] += 1
@@ -618,7 +629,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 meta = verify_doi(doi, raise_transient=True)
             except CrossrefRateLimitError as exc:
                 polite_pause()
-                row["crossref_mismatches"] = "CROSSREF_RATE_LIMITED"
+                row["crossref_mismatches"] = ""
+                row["crossref_error_code"] = "CROSSREF_RATE_LIMITED"
                 row["crossref_status"] = "rate_limited"
                 row["crossref_verified"] = "false"
                 row["crossref_retry_after_seconds"] = (
@@ -629,7 +641,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 continue
             except CrossrefRequestError as exc:
                 polite_pause()
-                row["crossref_mismatches"] = f"CROSSREF_{exc.status.upper()}"
+                row["crossref_mismatches"] = ""
+                row["crossref_error_code"] = f"CROSSREF_{exc.status.upper()}"
                 row["crossref_status"] = exc.status
                 row["crossref_verified"] = "false"
                 row["crossref_retry_after_seconds"] = (
@@ -649,7 +662,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                 counts["cache_store"] += 1
                 row["crossref_cache_status"] = "store"
         if meta is None:
-            row["crossref_mismatches"] = "CROSSREF_LOOKUP_FAILED"
+            row["crossref_mismatches"] = ""
+            row["crossref_error_code"] = "CROSSREF_LOOKUP_FAILED"
             row["crossref_status"] = "lookup_failed"
             row["crossref_verified"] = "false"
             counts["lookup_failed"] += 1
@@ -665,6 +679,7 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         # Detect mismatches
         warnings = detect_mismatches(row, meta, strict=strict)
         row["crossref_mismatches"] = "; ".join(warnings) if warnings else ""
+        row["crossref_error_code"] = ""
         if warnings:
             row["crossref_status"] = "mismatch"
             row["crossref_verified"] = "false"
@@ -686,7 +701,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
         f"rate_limited={counts['rate_limited']}, network_error={counts['network_error']}, "
         f"auth_error={counts['auth_error']}, response_parse_error={counts['response_parse_error']}, "
         f"provider_error={counts['provider_error']}, cache_hit={counts['cache_hit']}, "
-        f"cache_store={counts['cache_store']}, skipped_budget={counts['skipped_budget']}.",
+        f"cache_store={counts['cache_store']}, budget_used={counts['budget_used']}, "
+        f"skipped_budget={counts['skipped_budget']}.",
         file=sys.stderr,
     )
 
@@ -715,7 +731,7 @@ def main() -> None:
     parser.add_argument("--checkpoint-interval", type=int, default=25,
                         help="Write batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--max-rows", type=int, default=None,
-                        help="Only verify the first N CSV rows; remaining rows are marked skipped_budget")
+                        help="Process at most N rows that are not reusable from prior output; remaining rows are marked skipped_budget")
     parser.add_argument("--cache-dir", type=Path, default=None,
                         help="Optional JSON cache directory for Crossref DOI/title metadata")
     parser.add_argument("--cache-ttl-days", type=float, default=None,

@@ -52,6 +52,8 @@ DEFAULT_OUTPUT_FIELDS = [
     "discovery_source",
     "discovery_provider",
     "discovery_query",
+    "provider_query",
+    "provider_query_mode",
     "discovery_query_id",
     "discovery_rank",
     "discovery_run_id",

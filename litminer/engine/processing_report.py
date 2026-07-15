@@ -97,7 +97,35 @@ def read_json_object(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def append_trust_summary(lines: list[str], rows: dict[str, list[dict[str, str]]]) -> None:
+def latest_stage_status(manifest: dict, name: str) -> str:
+    stages = manifest.get("stages", []) if isinstance(manifest, dict) else []
+    if not isinstance(stages, list):
+        return ""
+    for stage in reversed(stages):
+        if isinstance(stage, dict) and stage.get("name") == name:
+            return str(stage.get("status") or "")
+    return ""
+
+
+def capability_status(manifest: dict, name: str) -> str:
+    status = latest_stage_status(manifest, name).strip().lower()
+    if not status or status == "skipped_disabled":
+        return "not_run"
+    status_class = status_policy.classify_status(status)
+    if status_class == "ok" or status == "skipped_existing":
+        return "completed"
+    if status_class in {"budget_limited", "partial", "rate_limited", "network", "auth", "error"}:
+        return "partial"
+    if status_class == "skipped":
+        return "not_run"
+    return status_class
+
+
+def append_trust_summary(
+    lines: list[str],
+    rows: dict[str, list[dict[str, str]]],
+    manifest: dict,
+) -> None:
     deduped_rows = rows["deduped"]
     discovered = len(deduped_rows) if deduped_rows is not None else len(rows["api"])
     verified_rows = rows["verified"] or rows["oa"]
@@ -113,19 +141,23 @@ def append_trust_summary(lines: list[str], rows: dict[str, list[dict[str, str]]]
     )
     queued = len(rows["queue"])
     probed = sum(1 for row in rows["probed"] if (row.get("publisher_probe_at") or "").strip())
+    crossref_status = capability_status(manifest, "crossref")
+    metrics_status = capability_status(manifest, "metrics")
+    probe_status = capability_status(manifest, "publisher_probe")
 
     lines.extend([
         "## Trust Tiers",
         "",
         f"- discovered_or_deduped: {discovered}",
+        f"- bibliographically_verified: {trusted_crossref} ({crossref_status})",
         f"- crossref_trusted: {trusted_crossref}",
-        f"- metric_pass: {metric_pass}",
+        f"- metric_pass: {metric_pass} ({metrics_status})",
         f"- publisher_queue: {queued}",
-        f"- publisher_probe_checked: {probed}",
+        f"- publisher_probe_checked: {probed} ({probe_status})",
         "",
         "Interpretation:",
         "- Discovery rows are candidates, not verified article facts.",
-        "- Crossref trusted rows have bibliographic metadata support.",
+        "- Bibliographically verified rows have Crossref metadata support; this is not scientific inclusion.",
         "- Metric-pass rows only mean the local verified metric table matched the journal threshold.",
         "- Publisher queue rows identify pages to inspect; they are not extracted full-text evidence.",
         "",
@@ -154,6 +186,8 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "api": output_dir / "api_candidates.csv",
         "api_trace": output_dir / "api_discovery_trace.csv",
         "deduped": output_dir / "deduped_candidates.csv",
+        "pretriaged": output_dir / "pretriaged_candidates.csv",
+        "verification_queue": output_dir / "verification_queue.csv",
         "triaged": output_dir / "triaged_candidates.csv",
         "citation_expanded": output_dir / "citation_expanded_candidates.csv",
         "citation_trace": output_dir / "citation_expand_trace.csv",
@@ -165,6 +199,8 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "probed": output_dir / "publisher_queue_probed.csv",
         "html_meta": output_dir / "publisher_queue_html_meta.csv",
         "query_plan": output_dir / "query_plan.json",
+        "delta_profile": output_dir / "delta_profile.json",
+        "research_session_manifest": output_dir / "research_session_manifest.json",
         "field_provenance": output_dir / "field_provenance.json",
         "publisher_adapters": output_dir / "publisher_adapters.json",
         "agent_summary": output_dir / "agent_summary.json",
@@ -189,9 +225,11 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "",
     ]
     for name in [
-        "api", "api_trace", "deduped", "triaged", "selected", "verified",
+        "api", "api_trace", "deduped", "pretriaged", "verification_queue",
+        "triaged", "selected", "verified",
         "oa", "metrics", "queue", "probed", "query_plan", "field_provenance",
-        "publisher_adapters", "agent_summary",
+        "publisher_adapters", "agent_summary", "delta_profile",
+        "research_session_manifest",
         "artifacts_index",
     ]:
         path = paths[name]
@@ -233,7 +271,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         lines.append(f"- duplicates_or_removed_before_dedupe: {max(0, len(rows['api']) - len(rows['deduped']))}")
 
     lines.append("")
-    append_trust_summary(lines, rows)
+    append_trust_summary(lines, rows, manifest)
 
     lines.extend(["", "## Source Distribution", ""])
     for field in ["discovery_provider", "discovery_source"]:

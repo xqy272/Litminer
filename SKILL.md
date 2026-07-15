@@ -191,12 +191,14 @@ the change must be deliberate, not incidental.
    - `expanded` / `full`: deeper recall with Semantic Scholar and higher
      rate-limit risk.
 4. Prefer the full runner over assembling stages manually.
-5. After timeout or interruption, resume with the same `--output-dir` before
-   restarting, but only if the user request and candidate universe have not
-   changed.
-6. Read `agent_summary.json` and `processing_report.md` before scanning large
+5. After timeout or interruption, resume with the same `--output-dir` only when
+   the run signature and user intent are unchanged.
+6. When queries, concepts, sources, or the user request change, start a new
+   iteration with `--merge-into`; do not bypass resume-signature protection.
+7. Read `agent_summary.json` and `processing_report.md` before scanning large
    CSVs.
-7. Deliver counts, trust tiers, artifact paths, known gaps, and next actions.
+8. Deliver counts, trust tiers, capability states, artifact paths, known gaps,
+   iteration deltas, and next actions.
 
 ## Minimal Commands
 
@@ -221,7 +223,10 @@ python -m litminer.engine.run_lit_search \
   --output-dir .litminer/runs/litminer_run
 ```
 
-Verified pass or continuation:
+Interrupted continuation with the same mode, queries, concepts, and controls:
+
+Repeat the original command; this example assumes the interrupted run used
+`balanced` mode.
 
 ```bash
 python -m litminer.engine.run_lit_search \
@@ -232,6 +237,20 @@ python -m litminer.engine.run_lit_search \
   --required-concept "main=term1|term2" \
   --output-dir .litminer/runs/litminer_run
 ```
+
+New research iteration after changing the retrieval plan:
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --query "NEW_FOCUSED_QUERY" \
+  --required-concept "main=term1|term2" \
+  --merge-into .litminer/runs/litminer_run
+```
+
+`--resume` and `--merge-into` are separate workflows. Resume reuses an
+unchanged run; merge mode snapshots the prior candidate pool, combines new
+discovery, and reruns the downstream ranking and verification path.
 
 Use repeated `--query` values when recall matters. Add `--include-arxiv`,
 `--include-europe-pmc`, or `--include-semantic-scholar` only when the domain and
@@ -263,8 +282,9 @@ python -m litminer.engine.run_lit_search \
 - `--expand-direction`: `forward` (cited-by), `backward` (references), or
   `both` (default).
 
-Expanded rows go through the full dedupe → Crossref verification → triage
-pipeline — same trust path as normal discovery rows. Trace is written to
+Expanded rows go through the full dedupe → pretriage → verification queue →
+Crossref verification → final triage pipeline — the same budget allocation and
+trust path as normal discovery rows. Trace is written to
 `citation_expand_trace.csv`.
 
 ## Runtime Semantics
@@ -287,6 +307,19 @@ Caller-supplied `re:` regex concepts are disabled by default. Enable them only
 for reviewed trusted profiles with `--enable-regex-concepts` or the MCP
 `enable_regex_concepts` parameter.
 
+Treat relevance, bibliographic trust, and workflow readiness as separate axes:
+
+- `scientific_review_needed` / `llm_review_needed` describe scientific semantic
+  ambiguity, not provider outages or row-budget exhaustion.
+- `bibliographic_status` and `bibliographic_review_needed` describe Crossref
+  trust and unresolved verification work.
+- `workflow_status` tells the Agent whether to enrich, recover an identifier,
+  continue bibliographic verification, or perform scientific review.
+
+For arXiv, inspect `provider_query` and `provider_query_mode`. Plain intent
+queries are transparently compiled into explicit `all:` terms joined with AND;
+advanced arXiv field syntax is preserved unchanged.
+
 ## Primary Artifacts
 
 Read outputs in this order:
@@ -296,27 +329,40 @@ Read outputs in this order:
    actions.
 2. `result_profile.json`: stratified descriptive statistics (all rows +
    Crossref-verified) with `completeness_caveats` reporting search-process
-   failures. Degraded to `failure_summary` on 0-result runs.
-3. `processing_report.md`: compact human-readable counts, status classes,
+   failures. Crossref-trusted rows use Crossref DOI/year/container/type as the
+   canonical bibliographic fields. Degraded to `failure_summary` on 0-result
+   runs.
+3. `research_session_manifest.json` and `delta_profile.json`: iteration lineage
+   and the current iteration's mechanical additions. Use them when
+   `--merge-into` was used.
+4. `concept_diagnostics.json`: mechanical concept match rates and low-
+   selectivity/zero-match warnings. It does not recommend scientific criteria.
+5. `processing_report.md`: compact human-readable counts, status classes,
    metadata health, cache/recovery notes, queue summary, and appended
    result profile section.
-4. `search_audit_report.md`: human-readable audit report for research
+6. `search_audit_report.md`: human-readable audit report for research
    reproducibility — same information as Agent artifacts, formatted for
    a researcher to explain "how did you find these papers?".
-5. `artifacts_index.json`: canonical artifact inventory grouped by primary,
+7. `artifacts_index.json`: canonical artifact inventory grouped by primary,
    supporting, and debug roles.
-6. `query_plan.json`: runtime queries, concepts, sources, budgets, and advisory
-   source strategy.
-7. `run_manifest.json`: stage status, fingerprints, resume signature, cache
+8. `query_plan.json`: runtime queries, concepts, sources, budgets, session
+   iteration id, merge target, and advisory source strategy.
+9. `run_manifest.json`: stage status, fingerprints, resume signature, cache
    config, and reused/skipped stages.
-8. `triaged_candidates.csv`: semantic review surface.
-9. `publisher_queue.csv`: article-page inspection queue.
-10. `publisher_queue_probed.csv`: probed queue with access/PDF/SI status
+10. `verification_queue.csv`: relevance- and DOI-aware ordering used before
+    Crossref consumes row budget.
+11. `triaged_candidates.csv`: semantic review surface with orthogonal
+    scientific, bibliographic, and workflow states.
+12. `publisher_queue.csv`: article-page inspection queue. When Crossref ran,
+    only bibliographically verified rows enter by default; when Crossref was
+    intentionally disabled, DOI-bearing discovery pointers may remain
+    unverified and must be labeled as such.
+13. `publisher_queue_probed.csv`: probed queue with access/PDF/SI status
     (when publisher probing is enabled).
-11. `publisher_queue_html_meta.csv`: publisher HTML meta extraction output
+14. `publisher_queue_html_meta.csv`: publisher HTML meta extraction output
     (when publisher probing is enabled; contains `citation_keywords`,
     `citation_online_date`, `citation_funder_name`, etc.).
-12. `api_discovery_trace.csv`: provider/query/status trail for failures.
+15. `api_discovery_trace.csv`: provider/query/status trail for failures.
 
 Use `litminer_read_csv_summary` in MCP mode when a CSV is too large for direct
 context loading.
@@ -339,6 +385,11 @@ metadata, not the primary article link.
   and `next_action` in `api_discovery_trace.csv` before rerunning.
 - Cache is workspace-local acceleration only. It is not evidence.
 - Crossref and Unpaywall cache only positive metadata/access results.
+- `skipped_budget`, rate limits, network failures, and lookup failures are
+  operational states, not Crossref metadata mismatches and not automatic
+  scientific-review requests.
+- Crossref row budgets apply to unresolved work after `verification_queue.csv`
+  ordering; reusable verified rows do not consume the current budget.
 - Provider failure cache is short-lived and only suppresses transient failures
   such as rate limits and network failures. Auth and generic errors should be
   fixed and retried, not hidden by cache.

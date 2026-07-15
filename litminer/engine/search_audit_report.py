@@ -244,8 +244,10 @@ def build_audit_report(
         lines.extend(_format_completeness_caveats(caveats))
 
     # Run status
-    run_status = summary.get("run_status") or manifest.get("run_status") or ""
-    stop_reason = summary.get("stop_reason") or manifest.get("stop_reason") or ""
+    # The manifest is the canonical final run state. Prefer it over a summary
+    # that may have been written at an earlier resumable stage.
+    run_status = manifest.get("run_status") or summary.get("run_status") or ""
+    stop_reason = manifest.get("stop_reason") or summary.get("stop_reason") or ""
     if run_status:
         lines.append("## Run Status")
         lines.append("")

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 import urllib.error
@@ -52,8 +53,14 @@ OUTPUT_FIELDS = [
     "arxiv_categories",
     "discovery_source",
     "discovery_query",
+    "provider_query",
+    "provider_query_mode",
     "source_note",
 ]
+
+ARXIV_FIELD_RE = re.compile(r"(?i)(?:^|[\s(])(?:all|ti|abs|au|cat|id|doi|jr|co):")
+QUERY_TOKEN_RE = re.compile(r'"[^"]+"|\(|\)|\bANDNOT\b|\bAND\b|\bOR\b|\bNOT\b|[^\s()]+', re.I)
+BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "ANDNOT"}
 
 
 def _clean_text(value: str | None) -> str:
@@ -104,7 +111,52 @@ def _entry_authors(entry: ET.Element) -> str:
     return "; ".join(names)
 
 
-def entry_to_row(entry: ET.Element, source_query: str = "") -> dict[str, str]:
+def is_advanced_query(query: str) -> bool:
+    return bool(ARXIV_FIELD_RE.search(query or ""))
+
+
+def compile_query(query: str) -> tuple[str, str]:
+    """Compile a plain intent query into explicit arXiv all-field semantics."""
+    query = " ".join((query or "").split())
+    if not query:
+        return query, "empty"
+    if is_advanced_query(query):
+        return query, "advanced_raw"
+
+    raw_tokens = QUERY_TOKEN_RE.findall(query)
+    compiled: list[str] = []
+    previous_kind = ""
+    for raw in raw_tokens:
+        upper = raw.upper()
+        if upper in BOOLEAN_OPERATORS:
+            compiled.append(upper)
+            previous_kind = "operator"
+            continue
+        if raw == "(":
+            if previous_kind in {"operand", "close"}:
+                compiled.append("AND")
+            compiled.append(raw)
+            previous_kind = "open"
+            continue
+        if raw == ")":
+            compiled.append(raw)
+            previous_kind = "close"
+            continue
+
+        if previous_kind in {"operand", "close"}:
+            compiled.append("AND")
+        term = raw if raw.startswith('"') and raw.endswith('"') else raw
+        compiled.append(f"all:{term}")
+        previous_kind = "operand"
+    return " ".join(compiled), "plain_and_compiled"
+
+
+def entry_to_row(
+    entry: ET.Element,
+    source_query: str = "",
+    provider_query: str = "",
+    provider_query_mode: str = "",
+) -> dict[str, str]:
     entry_id = _text(entry, "atom:id")
     landing, pdf = _entry_links(entry)
     published = _text(entry, "atom:published")
@@ -128,7 +180,12 @@ def entry_to_row(entry: ET.Element, source_query: str = "") -> dict[str, str]:
         "arxiv_categories": categories,
         "discovery_source": "arxiv",
         "discovery_query": source_query,
-        "source_note": f"updated={updated}; categories={categories}",
+        "provider_query": provider_query or source_query,
+        "provider_query_mode": provider_query_mode or "advanced_raw",
+        "source_note": (
+            f"updated={updated}; categories={categories}; "
+            f"provider_query_mode={provider_query_mode or 'advanced_raw'}"
+        ),
     }
 
 
@@ -182,16 +239,25 @@ def search(query: str, year_from: int | None = None,
     seen_ids: set[str] = set()
     start = 0
 
-    print(f"Searching arXiv: {query!r}", file=sys.stderr)
+    provider_query, query_mode = compile_query(query)
+    print(
+        f"Searching arXiv: intent={query!r}; effective={provider_query!r}; mode={query_mode}",
+        file=sys.stderr,
+    )
     try:
         while len(results) < max_results:
             page_size = min(RESULTS_PER_PAGE, max_results - len(results))
-            root = _fetch_xml(_build_url(query, year_from, year_to, start, page_size))
+            root = _fetch_xml(_build_url(provider_query, year_from, year_to, start, page_size))
             entries = root.findall("atom:entry", NS)
             if not entries:
                 break
             for entry in entries:
-                row = entry_to_row(entry, source_query=query)
+                row = entry_to_row(
+                    entry,
+                    source_query=query,
+                    provider_query=provider_query,
+                    provider_query_mode=query_mode,
+                )
                 arxiv_id = row.get("arxiv_id", "")
                 if arxiv_id and arxiv_id in seen_ids:
                     continue

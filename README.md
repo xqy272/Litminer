@@ -11,9 +11,11 @@ Litminer 是一个面向 AI Agent 的科研文献信息获取 skill。它帮助 
 - 从 OpenAlex、Semantic Scholar、arXiv、Europe PMC 等来源发现候选文献。
 - 用 Crossref 验证 DOI、标题、期刊、年份和文章类型，同时检测撤稿状态。
 - 用 Unpaywall 标注 OA 状态和结构化访问线索。
-- 去重、合并、语义初筛（含引用计数信号和撤稿降级）、排序并生成处理报告。
+- 去重后先做语义预分流，再按相关性、DOI 可用性和元数据状态生成预算感知的 Crossref 验证队列。
+- 生成正交的书目状态、科学审查状态和工作流状态，并保留字段级概念匹配证据与概念选择性诊断。
 - 从高优先级论文出发做引用/参考文献扩展，发现关键词检索遗漏的相关论文。
 - 生成分层结果统计（`result_profile`）和人类可读审计报告（`search_audit_report`）。
+- 用 `--merge-into` 把新一轮检索机械合并进已有候选池，并输出本轮增量与跨轮次谱系。
 - 从出版商页面提取 `citation_keywords`、`citation_online_date`、`citation_funder_name` 等结构化元数据。
 - 构建 DOI/出版社页面证据队列，供 Agent 后续检查文章页面。
 
@@ -98,6 +100,18 @@ python -m litminer.engine.run_lit_search \
 
 `re:` 正则概念默认关闭。只有使用已审查的可信 profile 时，才通过 `--enable-regex-concepts` 或 MCP 的 `enable_regex_concepts` 显式开启。
 
+如果用户意图、查询或概念发生变化，不要用 `--resume`。将新一轮结果合并到已有研究目录：
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --query "new focused query" \
+  --required-concept "main=term1|term2" \
+  --merge-into .litminer/runs/litminer_run
+```
+
+`--resume` 只用于同一运行签名的中断恢复；`--merge-into` 会重跑去重、语义分流、验证排序和最终 triage，并写入增量谱系。
+
 ## 主要输出
 
 | 文件 | 用途 |
@@ -106,16 +120,21 @@ python -m litminer.engine.run_lit_search \
 | `api_candidates.csv` | API 发现候选。 |
 | `api_discovery_trace.csv` | 查询、来源、状态和失败原因追踪。 |
 | `deduped_candidates.csv` | DOI/标题去重并合并后的候选。 |
+| `pretriaged_candidates.csv` | 验证前语义排序，用于分配 Crossref 预算。 |
+| `verification_queue.csv` | DOI 优先、相关性优先的确定性书目验证队列。 |
 | `verified_candidates.csv` | Crossref 验证结果（含撤稿状态）。 |
-| `triaged_candidates.csv` | 带语义标签、优先级、引用信号和元数据状态的审查面。 |
+| `triaged_candidates.csv` | 带语义证据、书目状态、科学审查状态和工作流状态的审查面。 |
+| `concept_diagnostics.json` | 概念匹配率、来源分布和低选择性警告。 |
 | `citation_expanded_candidates.csv` | 引用/参考文献扩展候选（`--expand-citations` 启用时）。 |
-| `publisher_queue.csv` | DOI/出版社页面证据队列。 |
+| `publisher_queue.csv` | DOI/出版社页面证据队列；Crossref 已启用时默认只含书目已验证记录。 |
 | `publisher_queue_probed.csv` | 访问探测结果（`--probe-publishers` 启用时）。 |
 | `publisher_queue_html_meta.csv` | 出版商 HTML meta 字段提取（`--probe-publishers` 启用时）。 |
 | `result_profile.json` | 分层描述性统计和检索过程完整性告诫。 |
+| `delta_profile.json` | 当前轮相对既有候选池的新增数量、优先级、来源、期刊和书目验证统计。 |
+| `research_session_manifest.json` | 跨轮次查询、概念、运行状态和增量谱系。 |
 | `search_audit_report.md` | 人类可读审计报告，用于研究可复现性。 |
 | `processing_report.md` | 来源、元数据、triage、OA/access、引用扩展、HTML meta 和队列摘要。 |
-| `agent_summary.json` | Agent 优先读取的机器可读摘要（含嵌入的 result_profile 摘要）。 |
+| `agent_summary.json` | Agent 优先读取的机器可读摘要（含 capability 状态、验证分流、概念诊断和增量摘要）。 |
 | `run_manifest.json` | 阶段状态、复用记录、行数、文件指纹和运行签名。 |
 
 ## 可选 MCP

@@ -58,6 +58,7 @@ DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
         "environmental", "contaminant", "dye",
     ),
 }
+ARXIV_FIELD_RE = re.compile(r"(?i)(?:^|[\s(])(?:all|ti|abs|au|cat|id|doi|jr|co):")
 
 
 def _as_list(value: Any) -> list[str]:
@@ -156,6 +157,11 @@ def _risk_flags(
         flags.append("recommended_sources_not_selected")
     if "semantic_scholar" in selected_sources:
         flags.append("semantic_scholar_rate_limit_risk")
+    if "arxiv" in selected_sources and any(
+        query.strip() and not ARXIV_FIELD_RE.search(query)
+        for query in queries
+    ):
+        flags.append("arxiv_plain_query_will_be_compiled")
     if year_from is not None and year_from >= 2025:
         flags.append("recent_year_range_metadata_lag_risk")
     max_results = controls.get("max_results_per_query")
@@ -265,6 +271,17 @@ def build_strategy(
         if source in normalized_sources
     ]
 
+    source_priorities: dict[str, str] = {}
+    for source in normalized_sources:
+        if source == "europe_pmc" and "biomedical" in domain_tags:
+            source_priorities[source] = "primary"
+        elif source == "arxiv" and "biomedical" in domain_tags:
+            source_priorities[source] = "supplemental"
+        elif source == "semantic_scholar":
+            source_priorities[source] = "supplemental"
+        else:
+            source_priorities[source] = "primary"
+
     return {
         "schema_version": 1,
         "mode": mode,
@@ -285,6 +302,7 @@ def build_strategy(
             })
             for source in normalized_sources
         },
+        "source_priorities": source_priorities,
         "fallback_order": fallback_order,
         "request_estimate": estimate_discovery_calls(queries, normalized_sources, controls),
         "risk_flags": _risk_flags(
@@ -299,5 +317,6 @@ def build_strategy(
             "Keep selected_sources unchanged unless the Agent explicitly decides to broaden retrieval.",
             "Use missing_recommended_sources as retrieval-gap hints, not as automatic requirements.",
             "Use provider trace status before treating low result counts as scientific absence.",
+            "Inspect provider_query/provider_query_mode for arXiv rows; plain intent queries are compiled transparently.",
         ],
     }

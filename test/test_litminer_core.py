@@ -23,9 +23,11 @@ from litminer.engine import bootstrap
 from litminer.engine import build_publisher_queue
 from litminer.engine import cache as cache_helpers
 from litminer.engine import common
+from litminer.engine import concept_diagnostics
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
 from litminer.engine import journal_metrics
+from litminer.engine import merge_csv
 from litminer.engine import offline_smoke
 from litminer.engine import provenance
 from litminer.engine import publisher_adapters
@@ -35,6 +37,7 @@ from litminer.engine import processing_report
 from litminer.engine import run_lit_search
 from litminer.engine import semantic_triage
 from litminer.engine import source_strategy
+from litminer.engine import verification_queue
 from litminer.engine import websearch_import
 from litminer.engine import workspace
 from litminer.engine import workflow_state
@@ -401,7 +404,9 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(verified[0]["crossref_status"], "lookup_failed")
             with (out_dir / "triaged_candidates.csv").open(encoding="utf-8", newline="") as handle:
                 triaged = list(csv.DictReader(handle))
-            self.assertEqual(triaged[0]["metadata_status"], "blocked")
+            self.assertEqual(triaged[0]["metadata_status"], "check")
+            self.assertEqual(triaged[0]["bibliographic_status"], "lookup_failed")
+            self.assertEqual(triaged[0]["workflow_status"], "bibliographic_review")
             with (out_dir / "publisher_queue.csv").open(encoding="utf-8", newline="") as handle:
                 queue = list(csv.DictReader(handle))
             self.assertEqual(queue, [])
@@ -558,6 +563,7 @@ class LitminerCoreTests(unittest.TestCase):
             input_csv.write_text(
                 "title,doi,triage_priority,triage_score,metadata_status,candidate_status,crossref_status\n"
                 "Ready,10.1234/ready,high,7.0,ok,ready_for_verification,verified\n"
+                "Ready duplicate,https://doi.org/10.1234/ready,high,6.5,ok,ready_for_verification,verified\n"
                 "Blocked,10.1234/blocked,high,6.0,blocked,metadata_blocked,lookup_failed\n"
                 "No DOI,,high,5.0,ok,ready_for_verification,verified\n",
                 encoding="utf-8",
@@ -575,6 +581,7 @@ class LitminerCoreTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
 
         self.assertEqual(counts["queued"], 1)
+        self.assertEqual(counts["skipped_duplicate_doi"], 1)
         self.assertEqual(counts["skipped_metadata_blocked"], 1)
         self.assertEqual(counts["skipped_missing_doi"], 1)
         self.assertEqual(rows[0]["doi"], "10.1234/ready")
@@ -597,6 +604,56 @@ class LitminerCoreTests(unittest.TestCase):
                     output_csv,
                     priorities={"high"},
                 )
+
+    def test_build_publisher_queue_requires_verified_bibliography_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "triaged.csv"
+            output_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,triage_priority,metadata_status,bibliographic_status,crossref_status,crossref_verified\n"
+                "Verified,10.1234/verified,high,ok,verified,verified,true\n"
+                "Budget pending,10.1234/budget,high,check,pending_budget,skipped_budget,false\n"
+                "Provider pending,10.1234/provider,high,check,pending_provider,rate_limited,false\n"
+                "Not checked,10.1234/not-checked,high,ok,not_checked,,false\n",
+                encoding="utf-8",
+            )
+
+            counts = build_publisher_queue.build_queue(
+                input_csv,
+                output_csv,
+                priorities={"high"},
+                require_bibliographic_verification=True,
+            )
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual([row["doi"] for row in rows], ["10.1234/verified"])
+        self.assertEqual(counts["skipped_bibliographic_blocked"], 3)
+
+    def test_build_publisher_queue_fast_mode_keeps_unverified_doi_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "triaged.csv"
+            output_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,triage_priority,metadata_status,bibliographic_status,crossref_status\n"
+                "Discovery pointer,10.1234/pointer,high,ok,not_checked,\n",
+                encoding="utf-8",
+            )
+
+            counts = build_publisher_queue.build_queue(
+                input_csv,
+                output_csv,
+                priorities={"high"},
+                require_bibliographic_verification=False,
+            )
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(counts["queued"], 1)
+        self.assertEqual(rows[0]["doi"], "10.1234/pointer")
+        self.assertEqual(rows[0]["bibliographic_status"], "not_checked")
 
     def test_websearch_import_extracts_doi_from_url_and_marks_unverified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -809,6 +866,76 @@ class LitminerCoreTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 run_lit_search.run(changed_args)
 
+    def test_merge_into_writes_delta_and_session_lineage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            first_input = tmp_path / "first.csv"
+            second_input = tmp_path / "second.csv"
+            first_input.write_text(
+                "title,doi,publication_year,abstract\n"
+                "First paper,10.1234/first,2026,External validation study.\n",
+                encoding="utf-8",
+            )
+            second_input.write_text(
+                "title,doi,publication_year,abstract\n"
+                "Second paper,10.1234/second,2026,External validation study.\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+
+            def make_args(input_csv: Path, *, merge_into: Path | None = None) -> argparse.Namespace:
+                return argparse.Namespace(
+                    input_csv=input_csv,
+                    merge_into=merge_into,
+                    query=None,
+                    query_file=None,
+                    year_from=2026,
+                    year_to=None,
+                    output_dir=None if merge_into else out_dir,
+                    config=None,
+                    mode="fast",
+                    resume=False,
+                    triage_profile=None,
+                    required_concept=["validation=external validation"],
+                    optional_concept=[],
+                    negative_concept=[],
+                    exclude_article_type=[],
+                    queue_priorities="high,medium,needs_review",
+                    include_metadata_blocked=False,
+                    fields_needed=None,
+                    page_required_field=None,
+                    discovery_sources="openalex",
+                    skip_crossref=True,
+                    enrich_unpaywall=False,
+                    skip_unpaywall=True,
+                    metrics=None,
+                    min_if=None,
+                    skip_journal_metrics=True,
+                    target_count=None,
+                    queue_strict_only=False,
+                    allow_missing_doi=False,
+                    screenshot_root=tmp_path / "screens",
+                    probe_publishers=False,
+                )
+
+            run_lit_search.run(make_args(first_input))
+            run_lit_search.run(make_args(second_input, merge_into=out_dir))
+
+            delta = json.loads((out_dir / "delta_profile.json").read_text(encoding="utf-8"))
+            session = json.loads(
+                (out_dir / "research_session_manifest.json").read_text(encoding="utf-8")
+            )
+            with (out_dir / "triaged_candidates.csv").open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(delta["iteration_id"], "iteration_002")
+        self.assertEqual(delta["previous_rows"], 1)
+        self.assertEqual(delta["current_rows"], 2)
+        self.assertEqual(delta["new_rows"], 1)
+        self.assertEqual(len(session["iterations"]), 2)
+        self.assertTrue(session["iterations"][1]["merge_mode"])
+        self.assertEqual({row["doi"] for row in rows}, {"10.1234/first", "10.1234/second"})
+
     def test_runtime_defaults_use_dot_litminer_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace_root = Path(tmp)
@@ -913,6 +1040,22 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(row["authors"], "Ada Lovelace; Alan Turing")
         self.assertEqual(row["arxiv_id"], "2501.01234v1")
         self.assertEqual(row["article_type"], "preprint")
+
+    def test_arxiv_plain_query_is_compiled_and_advanced_query_is_preserved(self) -> None:
+        compiled, mode = arxiv_search.compile_query(
+            "large language model external validation"
+        )
+        advanced, advanced_mode = arxiv_search.compile_query(
+            'all:"large language model" AND cat:cs.CL'
+        )
+
+        self.assertEqual(
+            compiled,
+            "all:large AND all:language AND all:model AND all:external AND all:validation",
+        )
+        self.assertEqual(mode, "plain_and_compiled")
+        self.assertEqual(advanced, 'all:"large language model" AND cat:cs.CL')
+        self.assertEqual(advanced_mode, "advanced_raw")
 
     def test_europe_pmc_record_maps_to_uniform_row(self) -> None:
         record = {
@@ -1366,6 +1509,18 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertGreaterEqual(int(result["publisher_queue_rows"]), 1)
             self.assertTrue((output_dir / "processing_report.md").exists())
             self.assertTrue((output_dir / "publisher_queue.csv").exists())
+            audit = (output_dir / "search_audit_report.md").read_text(encoding="utf-8")
+            self.assertIn("Status: completed", audit)
+            index = json.loads((output_dir / "artifacts_index.json").read_text(encoding="utf-8"))
+            for name, filename in (
+                ("agent_summary", "agent_summary.json"),
+                ("processing_report", "processing_report.md"),
+                ("search_audit_report", "search_audit_report.md"),
+            ):
+                self.assertEqual(
+                    index["artifacts_by_name"][name]["sha256"],
+                    workflow_state.file_sha256(output_dir / filename),
+                )
 
     def test_semantic_triage_supports_expression_concepts(self) -> None:
         profile = semantic_triage.load_profile(
@@ -1403,6 +1558,25 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(triaged_true["matched_negative"], "")
         self.assertEqual(triaged_peroxide["matched_negative"], "h2o2_only")
 
+    def test_negative_concept_routes_verified_row_to_scientific_review(self) -> None:
+        profile = semantic_triage.load_profile(
+            required_specs=["clinical=clinical diagnosis"],
+            negative_specs=["review=review article"],
+        )
+        row = {
+            "title": "Clinical diagnosis review article",
+            "abstract": "A review article about clinical diagnosis systems.",
+            "doi": "10.1234/review",
+            "crossref_status": "verified",
+            "crossref_verified": "true",
+        }
+
+        triaged = semantic_triage.triage_row(row, profile)
+
+        self.assertEqual(triaged["triage_priority"], "medium")
+        self.assertEqual(triaged["scientific_review_needed"], "true")
+        self.assertEqual(triaged["workflow_status"], "scientific_review")
+
     def test_semantic_triage_regex_concepts_are_opt_in(self) -> None:
         row = {"title": "Alpha beta", "abstract": ""}
         profile = semantic_triage.load_profile(required_specs=["alpha_regex=re:alpha"])
@@ -1436,6 +1610,56 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(rows[0]["dedupe_confidence"], "high")
             self.assertEqual(rows[0]["dedupe_reason"], "exact DOI match")
             self.assertTrue(rows[0]["dedupe_key"].startswith("doi:10.1234/a"))
+
+    def test_merge_csv_uses_union_schema_and_source_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            first = tmp_path / "first.csv"
+            second = tmp_path / "second.csv"
+            output = tmp_path / "merged.csv"
+            first.write_text("title,doi\nPaper A,10.1/a\n", encoding="utf-8")
+            second.write_text("title,abstract\nPaper B,Summary B\n", encoding="utf-8")
+
+            merge_csv.merge_csv([first, second], output)
+            with output.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                rows = list(reader)
+                fields = reader.fieldnames or []
+
+        self.assertEqual(fields, ["title", "doi", "source_file", "abstract"])
+        self.assertEqual(rows[0]["source_file"], "first.csv")
+        self.assertEqual(rows[0]["abstract"], "")
+        self.assertEqual(rows[1]["source_file"], "second.csv")
+        self.assertEqual(rows[1]["doi"], "")
+
+    def test_merge_csv_skips_empty_and_missing_inputs_when_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            empty = tmp_path / "empty.csv"
+            missing = tmp_path / "missing.csv"
+            valid = tmp_path / "valid.csv"
+            output = tmp_path / "merged.csv"
+            empty.write_text("", encoding="utf-8")
+            valid.write_text("title,doi\nPaper,10.1/a\n", encoding="utf-8")
+
+            merge_csv.merge_csv([empty, missing, valid], output, allow_missing=True)
+            with output.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Paper")
+
+    def test_merge_csv_rejects_duplicate_header_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            duplicate = tmp_path / "duplicate.csv"
+            duplicate.write_text(
+                "title,doi,doi\nPaper,10.1/a,10.1/b\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit):
+                merge_csv.merge_csv([duplicate], tmp_path / "merged.csv")
 
     def test_journal_metrics_validator_flags_governance_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2168,6 +2392,11 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(first["status"], "partial")
             self.assertEqual(second["status"], "partial")
             self.assertTrue((out_dir / "publisher_queue.csv").exists())
+            session = json.loads(
+                (out_dir / "research_session_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(session["iterations"]), 1)
+            self.assertEqual(session["iterations"][0]["iteration_id"], "iteration_001")
 
     def test_budgeted_crossref_and_unpaywall_stages_are_not_reused_as_complete(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2194,9 +2423,231 @@ class LitminerCoreTests(unittest.TestCase):
             with unpaywall_out.open(encoding="utf-8", newline="") as handle:
                 unpaywall_rows = list(csv.DictReader(handle))
             self.assertEqual(crossref_rows[1]["crossref_status"], "skipped_budget")
+            self.assertEqual(crossref_rows[1]["crossref_mismatches"], "")
+            self.assertEqual(
+                crossref_rows[1]["crossref_error_code"],
+                "SKIPPED_BY_MAX_ROWS_BUDGET",
+            )
             self.assertFalse(any("10.1234/b" in key for key in crossref_cached))
             self.assertEqual(unpaywall_rows[1]["unpaywall_status"], "skipped_budget")
             self.assertFalse(any("10.1234/b" in key for key in unpaywall_cached))
+
+    def test_crossref_budget_counts_unresolved_work_not_reused_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            output_csv = tmp_path / "verified.csv"
+            input_csv.write_text(
+                "title,doi\n"
+                "Already verified,10.1234/a\n"
+                "New candidate,10.1234/b\n",
+                encoding="utf-8",
+            )
+            output_csv.write_text(
+                "title,doi,crossref_doi,crossref_title,crossref_status,crossref_verified\n"
+                "Already verified,10.1234/a,10.1234/a,Already verified,verified,true\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "litminer.sources.api.crossref_verify.verify_doi",
+                return_value={
+                    "crossref_doi": "10.1234/b",
+                    "crossref_title": "New candidate",
+                    "crossref_container": "Journal B",
+                    "crossref_type": "journal-article",
+                    "crossref_year": "2026",
+                },
+            ) as verify_doi:
+                counts = crossref_verify.verify_csv(
+                    input_csv,
+                    output_csv,
+                    max_rows=1,
+                )
+
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(verify_doi.call_count, 1)
+        self.assertEqual(counts["reused"], 1)
+        self.assertEqual(counts["budget_used"], 1)
+        self.assertEqual([row["crossref_status"] for row in rows], ["verified", "verified"])
+
+    def test_verification_queue_is_relevance_and_doi_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "triaged.csv"
+            output_csv = tmp_path / "queue.csv"
+            input_csv.write_text(
+                "title,doi,triage_priority,triage_score,metadata_status,cited_by_count\n"
+                "Low DOI,10.1234/low,low,1.0,ok,100\n"
+                "High title only,,high,9.0,check,0\n"
+                "High DOI,10.1234/high,high,8.0,check,0\n"
+                "Blocked high DOI,10.1234/blocked,high,10.0,blocked,0\n",
+                encoding="utf-8",
+            )
+
+            counts = verification_queue.build_queue(input_csv, output_csv)
+            with output_csv.open(encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+
+        self.assertEqual(counts["rows"], 4)
+        self.assertEqual(
+            [row["title"] for row in rows],
+            ["High DOI", "High title only", "Low DOI", "Blocked high DOI"],
+        )
+        self.assertEqual([row["verification_queue_rank"] for row in rows], ["1", "2", "3", "4"])
+
+    def test_verification_budget_prioritizes_relevance_and_publisher_queue_stays_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_csv = tmp_path / "input.csv"
+            input_csv.write_text(
+                "title,doi,publication_year,journal,abstract\n"
+                "Lower relevance clinical paper,10.1234/lower,2026,Journal A,A clinical model study.\n"
+                "Higher relevance clinical validation,10.1234/higher,2026,Journal B,A clinical model with external validation.\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp_path / "run"
+            args = argparse.Namespace(
+                input_csv=input_csv,
+                query=None,
+                query_file=None,
+                year_from=2026,
+                year_to=None,
+                output_dir=out_dir,
+                config=None,
+                triage_profile=None,
+                required_concept=["clinical=clinical"],
+                optional_concept=["validation=external validation"],
+                negative_concept=[],
+                exclude_article_type=[],
+                queue_priorities="high,medium,needs_review",
+                include_metadata_blocked=False,
+                fields_needed=None,
+                page_required_field=None,
+                discovery_sources="openalex",
+                skip_crossref=False,
+                enrich_unpaywall=False,
+                skip_unpaywall=True,
+                max_crossref_rows=1,
+                crossref_checkpoint_interval=0,
+                metrics=None,
+                min_if=None,
+                skip_journal_metrics=True,
+                target_count=None,
+                queue_strict_only=False,
+                allow_missing_doi=False,
+                screenshot_root=tmp_path / "screens",
+                probe_publishers=False,
+                cache_enabled=False,
+                cache_dir=tmp_path / "cache",
+            )
+
+            metadata = {
+                "10.1234/higher": {
+                    "crossref_doi": "10.1234/higher",
+                    "crossref_title": "Higher relevance clinical validation",
+                    "crossref_container": "Journal B",
+                    "crossref_type": "journal-article",
+                    "crossref_year": "2026",
+                },
+                "10.1234/lower": {
+                    "crossref_doi": "10.1234/lower",
+                    "crossref_title": "Lower relevance clinical paper",
+                    "crossref_container": "Journal A",
+                    "crossref_type": "journal-article",
+                    "crossref_year": "2026",
+                },
+            }
+            with patch(
+                "litminer.sources.api.crossref_verify.verify_doi",
+                side_effect=lambda doi, **_: metadata[doi],
+            ) as verify_doi:
+                run_lit_search.run(args)
+
+            with (out_dir / "verified_candidates.csv").open(encoding="utf-8", newline="") as handle:
+                verified_rows = list(csv.DictReader(handle))
+            with (out_dir / "publisher_queue.csv").open(encoding="utf-8", newline="") as handle:
+                publisher_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(verify_doi.call_args.args[0], "10.1234/higher")
+        self.assertEqual(
+            [row["crossref_status"] for row in verified_rows],
+            ["verified", "skipped_budget"],
+        )
+        self.assertEqual([row["doi"] for row in publisher_rows], ["10.1234/higher"])
+
+    def test_semantic_triage_keeps_budget_limited_rows_pending_not_mismatched(self) -> None:
+        row = {
+            "title": "External validation of a clinical large language model",
+            "doi": "10.1234/pending",
+            "publication_year": "2026",
+            "abstract": "Prospective clinical validation study.",
+            "crossref_status": "skipped_budget",
+            # Backward-compatibility guard for artifacts written before
+            # crossref_error_code was introduced.
+            "crossref_mismatches": "SKIPPED_BY_MAX_ROWS_BUDGET",
+        }
+        profile = semantic_triage.load_profile(
+            required_specs=["topic=large language model|clinical validation"],
+            year_from=2024,
+            year_to=2026,
+            require_doi=True,
+        )
+
+        triaged = semantic_triage.triage_row(row, profile)
+
+        self.assertEqual(triaged["triage_priority"], "high")
+        self.assertEqual(triaged["bibliographic_status"], "pending_budget")
+        self.assertEqual(triaged["metadata_status"], "check")
+        self.assertEqual(triaged["workflow_status"], "pending_bibliographic_verification")
+        self.assertIn("crossref_pending_budget", triaged["hard_filter_flags"])
+        self.assertNotIn("crossref_mismatch", triaged["hard_filter_flags"])
+        self.assertEqual(triaged["scientific_review_needed"], "false")
+        self.assertEqual(triaged["llm_review_needed"], "false")
+
+    def test_semantic_triage_records_field_level_match_evidence(self) -> None:
+        row = {
+            "title": "Clinical validation of a CADx image classifier",
+            "abstract": "The classifier was compared with ChatGPT-4o and physicians.",
+            "doi": "10.1234/evidence",
+            "publication_year": "2026",
+        }
+        profile = semantic_triage.load_profile(
+            required_specs=["llm=ChatGPT-4o|large language model"],
+            require_doi=True,
+        )
+
+        triaged = semantic_triage.triage_row(row, profile)
+
+        self.assertEqual(triaged["matched_required"], "llm")
+        self.assertIn("llm=ChatGPT-4o@abstract:", triaged["matched_required_evidence"])
+        self.assertIn("compared with ChatGPT-4o", triaged["matched_required_evidence"])
+
+    def test_concept_diagnostics_warns_for_low_selectivity_required_concept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            triaged = Path(tmp) / "triaged.csv"
+            rows = [
+                {
+                    "title": f"Paper {index}",
+                    "matched_required": "clinical",
+                    "missing_required": "",
+                    "matched_optional": "",
+                    "matched_negative": "",
+                    "triage_priority": "high",
+                    "discovery_source": "europe_pmc",
+                }
+                for index in range(10)
+            ]
+            common.write_csv_atomic(rows, triaged)
+
+            diagnostics = concept_diagnostics.build_diagnostics(triaged)
+
+        required = diagnostics["concepts"]["required"][0]
+        self.assertEqual(required["name"], "clinical")
+        self.assertEqual(required["match_rate"], 1.0)
+        self.assertIn("low selectivity", diagnostics["warnings"][0])
 
     def test_mcp_all_profile_lists_advanced_tools(self) -> None:
         with patch.dict(os.environ, {"LITMINER_MCP_TOOL_PROFILE": "all"}):
@@ -2330,6 +2781,39 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertIn("semantic_scholar", profile["completeness_caveats"]["circuit_broken_providers"])
             self.assertEqual(profile["completeness_caveats"]["rate_limited_queries"], 1)
             self.assertIn("semantic_scholar", profile["completeness_caveats"]["provider_failure_counts"])
+
+    def test_result_profile_uses_crossref_fields_for_verified_rows(self) -> None:
+        from litminer.engine import result_profile
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            triaged = tmp_path / "triaged_candidates.csv"
+            triaged.write_text(
+                "title,doi,publication_year,journal,article_type,crossref_doi,"
+                "crossref_year,crossref_container,crossref_type,crossref_status\n"
+                "Discovery title,10.1/a,2025,Unparsed arXiv journal ref,preprint,"
+                "10.1/a,2026,Verified Journal,journal-article,verified\n",
+                encoding="utf-8",
+            )
+            trace = tmp_path / "api_discovery_trace.csv"
+            trace.write_text(
+                "provider,query_id,status,status_class\n"
+                "arxiv,q001,ok,ok\n",
+                encoding="utf-8",
+            )
+            manifest = tmp_path / "run_manifest.json"
+            manifest.write_text(json.dumps({"run_status": "completed"}), encoding="utf-8")
+
+            profile = result_profile.build_profile(triaged, trace, manifest)
+
+        verified = profile["crossref_verified"]
+        self.assertEqual(verified["year_distribution"], {"2026": 1})
+        self.assertEqual(verified["top_journals"], [("Verified Journal", 1)])
+        self.assertEqual(verified["article_type_distribution"], {"journal-article": 1})
+        self.assertEqual(verified["doi_coverage"], 1.0)
+        self.assertEqual(
+            verified["canonical_field_policy"],
+            "crossref_first_for_bibliographically_verified_rows",
+        )
 
     def test_result_profile_degrades_to_failure_summary_when_empty(self) -> None:
         from litminer.engine import result_profile

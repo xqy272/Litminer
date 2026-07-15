@@ -30,6 +30,13 @@ DEFAULT_PAGE_REQUIRED_FIELDS = [
     "evidence_pointer",
 ]
 
+CROSSREF_TRUSTED_STATUSES = {"verified", "title_recovered"}
+CROSSREF_LOOKUP_BLOCKING_STATUSES = {
+    "lookup_failed",
+    "title_lookup_failed",
+    "mismatch",
+}
+
 
 def safe_name(value: str) -> str:
     value = normalize_doi(value) or value.strip().lower()
@@ -102,14 +109,37 @@ def should_queue(row: dict[str, str], priorities: set[str] | None,
     return True
 
 
-def crossref_blocking_reason(row: dict[str, str]) -> str:
+def crossref_blocking_reason(
+    row: dict[str, str],
+    require_bibliographic_verification: bool = False,
+) -> str:
     status = (row.get("crossref_status") or "").strip().lower()
+    bibliography = (row.get("bibliographic_status") or "").strip().lower()
     mismatches = (row.get("crossref_mismatches") or "").strip()
-    if mismatches:
-        return mismatches
-    if status in {"lookup_failed", "title_lookup_failed", "mismatch"}:
+    verified = (row.get("crossref_verified") or "").strip().lower() in {"true", "1", "yes"}
+
+    if status == "mismatch" or bibliography == "mismatch":
+        return mismatches or "crossref_status=mismatch"
+    if status in CROSSREF_LOOKUP_BLOCKING_STATUSES:
         return f"crossref_status={status}"
-    return ""
+    if bibliography == "lookup_failed":
+        return "bibliographic_status=lookup_failed"
+    if not status and mismatches:
+        # Legacy artifacts did not always carry crossref_status. Operational
+        # sentinels such as skipped_budget have a status and are intentionally
+        # not interpreted as metadata mismatches here.
+        return mismatches
+
+    if not require_bibliographic_verification:
+        return ""
+    if status in CROSSREF_TRUSTED_STATUSES:
+        return ""
+    if not status and (bibliography == "verified" or verified):
+        return ""
+
+    if status:
+        return f"crossref_status={status}"
+    return f"bibliographic_status={bibliography or 'not_checked'}"
 
 
 def extraction_priority(row: dict[str, str]) -> str:
@@ -144,6 +174,7 @@ def build_queue(input_path: Path, output_path: Path,
                 priorities: set[str] | None = None,
                 statuses: set[str] | None = None,
                 include_metadata_blocked: bool = False,
+                require_bibliographic_verification: bool = False,
                 fields_needed: list[str] | str | None = None,
                 page_required_fields: list[str] | str | None = None) -> dict[str, int]:
     fieldnames, rows = read_csv_rows(input_path)
@@ -174,6 +205,10 @@ def build_queue(input_path: Path, output_path: Path,
         "triage_priority",
         "triage_score",
         "candidate_status",
+        "workflow_status",
+        "bibliographic_status",
+        "bibliographic_review_needed",
+        "scientific_review_needed",
         "semantic_tags",
         "triage_reasons",
         "hard_filter_flags",
@@ -182,6 +217,7 @@ def build_queue(input_path: Path, output_path: Path,
         "crossref_verified",
         "crossref_lookup_method",
         "crossref_mismatches",
+        "crossref_error_code",
         "crossref_title_similarity",
         "crossref_recovered_doi_confidence",
         "screening_decision",
@@ -219,15 +255,19 @@ def build_queue(input_path: Path, output_path: Path,
     skipped_missing_doi = 0
     skipped_filter = 0
     skipped_metadata_blocked = 0
+    skipped_bibliographic_blocked = 0
 
     for row in rows:
         if not include_metadata_blocked and row.get("metadata_status") == "blocked":
             skipped_metadata_blocked += 1
             continue
 
-        crossref_reason = crossref_blocking_reason(row)
+        crossref_reason = crossref_blocking_reason(
+            row,
+            require_bibliographic_verification=require_bibliographic_verification,
+        )
         if crossref_reason and not include_metadata_blocked:
-            skipped_metadata_blocked += 1
+            skipped_bibliographic_blocked += 1
             continue
 
         if not should_queue(row, priorities, decisions, statuses):
@@ -257,6 +297,10 @@ def build_queue(input_path: Path, output_path: Path,
             "triage_priority": row.get("triage_priority", ""),
             "triage_score": row.get("triage_score", ""),
             "candidate_status": row.get("candidate_status", ""),
+            "workflow_status": row.get("workflow_status", ""),
+            "bibliographic_status": row.get("bibliographic_status", ""),
+            "bibliographic_review_needed": row.get("bibliographic_review_needed", ""),
+            "scientific_review_needed": row.get("scientific_review_needed", ""),
             "semantic_tags": row.get("semantic_tags", ""),
             "triage_reasons": row.get("triage_reasons", ""),
             "hard_filter_flags": row.get("hard_filter_flags", ""),
@@ -265,6 +309,7 @@ def build_queue(input_path: Path, output_path: Path,
             "crossref_verified": row.get("crossref_verified", ""),
             "crossref_lookup_method": row.get("crossref_lookup_method", ""),
             "crossref_mismatches": row.get("crossref_mismatches", ""),
+            "crossref_error_code": row.get("crossref_error_code", ""),
             "crossref_title_similarity": row.get("crossref_title_similarity", ""),
             "crossref_recovered_doi_confidence": row.get("crossref_recovered_doi_confidence", ""),
             "screening_decision": row_decision(row),
@@ -311,6 +356,19 @@ def build_queue(input_path: Path, output_path: Path,
         row.get("title", "").lower(),
     ))
 
+    unique_queue: list[dict[str, str]] = []
+    seen_dois: set[str] = set()
+    skipped_duplicate_doi = 0
+    for row in queued:
+        doi = normalize_doi(row.get("doi") or "")
+        if doi and doi in seen_dois:
+            skipped_duplicate_doi += 1
+            continue
+        if doi:
+            seen_dois.add(doi)
+        unique_queue.append(row)
+    queued = unique_queue
+
     write_csv_atomic(queued, output_path, fieldnames=output_fields)
 
     print(f"Publisher evidence queue: {len(queued)} rows -> {output_path}", file=sys.stderr)
@@ -318,6 +376,16 @@ def build_queue(input_path: Path, output_path: Path,
         print(f"Skipped {skipped_filter} row(s) outside queue selection.", file=sys.stderr)
     if skipped_metadata_blocked:
         print(f"Skipped {skipped_metadata_blocked} metadata-blocked row(s).", file=sys.stderr)
+    if skipped_bibliographic_blocked:
+        print(
+            f"Skipped {skipped_bibliographic_blocked} bibliographically unverified or blocked row(s).",
+            file=sys.stderr,
+        )
+    if skipped_duplicate_doi:
+        print(
+            f"Skipped {skipped_duplicate_doi} duplicate DOI queue row(s).",
+            file=sys.stderr,
+        )
     if skipped_missing_doi:
         print(
             f"Skipped {skipped_missing_doi} selected row(s) without DOI. "
@@ -328,6 +396,8 @@ def build_queue(input_path: Path, output_path: Path,
         "queued": len(queued),
         "skipped_filter": skipped_filter,
         "skipped_metadata_blocked": skipped_metadata_blocked,
+        "skipped_bibliographic_blocked": skipped_bibliographic_blocked,
+        "skipped_duplicate_doi": skipped_duplicate_doi,
         "skipped_missing_doi": skipped_missing_doi,
     }
 
@@ -344,6 +414,11 @@ def main() -> None:
                         help="Comma-separated candidate_status values to queue")
     parser.add_argument("--include-metadata-blocked", action="store_true",
                         help="Also queue rows marked metadata_status=blocked")
+    parser.add_argument(
+        "--require-bibliographic-verification",
+        action="store_true",
+        help="Queue only Crossref-verified rows; useful after a verification-enabled workflow",
+    )
     parser.add_argument("--fields-needed", action="append", default=None,
                         help="Task-specific field needed from publisher page; repeat or comma-separate")
     parser.add_argument("--page-required-field", action="append", default=None,
@@ -360,6 +435,7 @@ def main() -> None:
         priorities=_parse_set(args.priorities) or DEFAULT_QUEUE_PRIORITIES,
         statuses=_parse_set(args.statuses),
         include_metadata_blocked=args.include_metadata_blocked,
+        require_bibliographic_verification=args.require_bibliographic_verification,
         screenshot_root=args.screenshot_root or str(workspace.resolve_workspace_path(workspace.DEFAULT_SCREENSHOT_ROOT)),
         require_doi=not args.allow_missing_doi,
         fields_needed=args.fields_needed,

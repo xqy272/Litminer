@@ -20,6 +20,12 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
     ("artifacts_index", "primary", INDEX_NAME, "Compact artifact map grouped by Agent reading tier."),
     ("query_plan", "primary", "query_plan.json", "Queries, concepts, source strategy, and run controls."),
     ("run_manifest", "primary", "run_manifest.json", "Stage status, fingerprints, resume metadata, and run signature."),
+    (
+        "research_session_manifest",
+        "primary",
+        "research_session_manifest.json",
+        "Cross-iteration query, concept, and delta lineage for an incremental research session.",
+    ),
     ("triaged_candidates", "primary", "triaged_candidates.csv", "Semantic review surface; not final inclusion."),
     ("publisher_queue", "primary", "publisher_queue.csv", "Publisher-page inspection queue."),
     (
@@ -35,6 +41,18 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
         "Stratified descriptive statistics and search-process completeness caveats for the retrieved collection.",
     ),
     (
+        "concept_diagnostics",
+        "supporting",
+        "concept_diagnostics.json",
+        "Mechanical concept match rates, source distribution, and low-selectivity warnings.",
+    ),
+    (
+        "delta_profile",
+        "supporting",
+        "delta_profile.json",
+        "Current-iteration additions and their priority, source, journal, and bibliographic-verification counts.",
+    ),
+    (
         "search_audit_report",
         "primary",
         "search_audit_report.md",
@@ -44,6 +62,18 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
     ("field_provenance", "supporting", "field_provenance.json", "Field-level source/trust map."),
     ("api_candidates", "supporting", "api_candidates.csv", "Raw API discovery candidates."),
     ("deduped_candidates", "supporting", "deduped_candidates.csv", "Deduplicated candidate set."),
+    (
+        "pretriaged_candidates",
+        "supporting",
+        "pretriaged_candidates.csv",
+        "Pre-verification semantic ranking used to allocate bibliographic verification budget.",
+    ),
+    (
+        "verification_queue",
+        "supporting",
+        "verification_queue.csv",
+        "Deterministic DOI-first queue ordered before Crossref verification.",
+    ),
     ("verified_candidates", "supporting", "verified_candidates.csv", "Crossref verification output."),
     ("selected_candidates", "supporting", "selected_candidates.csv", "Priority-selected rows for enrichment."),
     ("oa_annotated_candidates", "supporting", "oa_annotated_candidates.csv", "Unpaywall OA/access hints."),
@@ -56,6 +86,7 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
     ("publisher_adapters", "debug", "publisher_adapters.json", "Publisher adapter capability registry."),
     ("strict_candidates", "debug", "strict_candidates.csv", "Metric-pass table when metric filtering is active."),
     ("backup_candidates", "debug", "backup_candidates.csv", "Metric-fail or metric-unverified backup table."),
+    ("merge_base_candidates", "debug", "merge_base_candidates.csv", "Snapshot of the prior candidate pool used to compute an incremental merge delta."),
 ]
 
 

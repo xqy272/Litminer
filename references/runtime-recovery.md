@@ -56,18 +56,31 @@ manual review, and always provide `--resume-mismatch-reason`.
 Crossref and Unpaywall stages checkpoint periodically. Resuming should reuse
 already annotated rows instead of starting at the first DOI again.
 
+If the request, queries, concepts, sources, or mode changed, do not force a
+resume-signature mismatch. Use `--merge-into EXISTING_OUTPUT_DIR` instead. It
+creates a new research iteration, snapshots the prior candidate pool, reruns
+downstream stages, and writes `delta_profile.json` and
+`research_session_manifest.json`. `--resume` and `--merge-into` cannot be
+combined.
+
 ## Time And Row Budgets
 
 Use these controls for long or uncertain tasks:
 
 - `--time-budget-seconds N`: stop cleanly at a stage boundary after the budget.
 - `--stop-after-stage STAGE`: intentionally produce partial artifacts.
-- `--max-crossref-rows N`: mark overflow rows as `skipped_budget`.
+- `--max-crossref-rows N`: spend the budget on unresolved rows after
+  `verification_queue.csv` ordering; reusable verified rows do not consume it,
+  and overflow rows are marked `skipped_budget`.
 - `--max-unpaywall-rows N`: mark overflow rows as `skipped_budget`.
 - `--max-publisher-probe-rows N`: cap publisher probing when `--probe-limit` is
   not set.
 
-Budgeted rows are not silently dropped. Inspect their explicit skipped status.
+Budgeted rows are not silently dropped. Inspect `verification_queue.csv`,
+`bibliographic_status=pending_budget`, and
+`workflow_status=pending_bibliographic_verification`. These rows remain in the
+candidate backlog but do not enter the publisher evidence queue when Crossref
+was enabled.
 
 ## Provider Failure Semantics
 
@@ -84,6 +97,12 @@ Discovery trace fields:
 
 Treat `network`, `auth`, and `rate_limited` as retrieval limitations. They are
 not evidence that relevant literature does not exist.
+
+Crossref operational states belong in `crossref_status` and
+`crossref_error_code`. `crossref_mismatches` is reserved for actual title,
+year, journal, or other metadata disagreements. Provider failures and budget
+exhaustion must not set `llm_review_needed`; scientific and bibliographic review
+are separate.
 
 Use `--provider-failure-threshold N` to stop repeatedly calling a provider that
 fails during the same run. Use `--provider-rate-limit-cooldown-seconds N` to
@@ -129,6 +148,12 @@ failures are not cached by default.
 transient failure. Wait for TTL or rerun with `--no-cache`.
 
 `skipped_budget`: increase the row budget or continue from current artifacts.
+The highest relevance DOI-bearing rows were attempted first; inspect
+`verification_queue_rank` before choosing the next budget.
+
+Capability count is zero: inspect `agent_summary.json.capability_statuses`.
+`not_run` means the feature was disabled/skipped, while `completed` with count
+zero means it ran and found no trusted rows.
 
 `skipped_missing_email` in Unpaywall: set `UNPAYWALL_EMAIL` or
 `LITMINER_CONTACT_EMAIL` and rerun.

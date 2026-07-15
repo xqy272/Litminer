@@ -29,7 +29,7 @@ Profiles:
 | Profile | Purpose | CI |
 |---------|---------|----|
 | `offline` | Deterministic contract tests | Yes |
-| `known_issue` | Tracked regressions (xfail) | Yes |
+| `known_issue` | Regression contracts for previously discovered defects; entries may be xfail until fixed | Yes |
 | `live` | Real API integration | No — manual |
 
 The unittest bridge in `test_agent_scenarios.py` runs both `offline` and

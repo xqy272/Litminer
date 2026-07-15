@@ -46,12 +46,13 @@ class AgentScenarioEvalTests(unittest.TestCase):
         self.assertEqual(counts.get("xpass", 0), 0)
         self.assertGreater(counts.get("pass", 0), 0)
 
-    def test_known_issue_agent_scenarios_are_tracked_as_xfail(self) -> None:
+    def test_previously_known_issue_agent_scenarios_pass(self) -> None:
         report = self.run_scenarios("--profile", "known_issue")
         counts = report["counts"]
         self.assertEqual(counts.get("fail", 0), 0)
         self.assertEqual(counts.get("xpass", 0), 0)
-        self.assertGreater(counts.get("xfail", 0), 0)
+        self.assertEqual(counts.get("xfail", 0), 0)
+        self.assertGreater(counts.get("pass", 0), 0)
 
 
 if __name__ == "__main__":

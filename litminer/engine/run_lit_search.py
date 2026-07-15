@@ -34,6 +34,7 @@ from litminer.engine import artifacts
 from litminer.engine import build_publisher_queue
 from litminer.engine import cache as cache_helpers
 from litminer.engine import citation_expand
+from litminer.engine import concept_diagnostics
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
 from litminer.engine import journal_metrics
@@ -47,11 +48,14 @@ from litminer.engine import result_profile
 from litminer.engine import search_audit_report
 from litminer.engine import semantic_triage
 from litminer.engine import query_plan
+from litminer.engine import research_session
 from litminer.engine import status_policy
 from litminer.engine import validate_stage
+from litminer.engine import verification_queue
 from litminer.engine import workspace
 from litminer.engine import workflow_state
 from litminer.engine.common import read_csv_rows, write_csv_atomic, write_text_atomic
+from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import unpaywall_lookup
 
@@ -267,6 +271,18 @@ def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     api = config.api
     cache_config = config.cache
 
+    merge_into = getattr(args, "merge_into", None)
+    if merge_into is not None:
+        merge_path = workspace.resolve_workspace_path(merge_into)
+        output_dir = getattr(args, "output_dir", None)
+        if output_dir is not None:
+            output_path = workspace.resolve_workspace_path(output_dir)
+            if output_path.resolve(strict=False) != merge_path.resolve(strict=False):
+                raise SystemExit("--output-dir and --merge-into must point to the same directory")
+        if getattr(args, "resume", False):
+            raise SystemExit("--merge-into and --resume are separate workflows and cannot be combined")
+        args.merge_into = merge_path
+        args.output_dir = merge_path
     if getattr(args, "output_dir", None) is None:
         args.output_dir = config.output_path("default_output_dir", workspace.DEFAULT_RUN_DIR)
     if getattr(args, "screenshot_root", None) is None:
@@ -423,6 +439,7 @@ def load_queries(args: argparse.Namespace) -> list[str]:
 def run_signature_payload(args: argparse.Namespace, queries: list[str]) -> dict[str, Any]:
     return {
         "input_csv": str(args.input_csv.resolve(strict=False)) if args.input_csv else "",
+        "merge_into": str(args.merge_into.resolve(strict=False)) if getattr(args, "merge_into", None) else "",
         "queries": queries,
         "year_from": args.year_from,
         "year_to": args.year_to,
@@ -468,6 +485,8 @@ def stage_files_exist(out_dir: Path) -> bool:
         "api_candidates.csv",
         "merged_candidates.csv",
         "deduped_candidates.csv",
+        "pretriaged_candidates.csv",
+        "verification_queue.csv",
         "verified_candidates.csv",
         "triaged_candidates.csv",
         "selected_candidates.csv",
@@ -828,6 +847,8 @@ def write_query_plan_artifact(
             "discovery_sources_origin": discovery_sources_origin,
             "configured_discovery_sources": None if from_input_csv else getattr(args, "discovery_sources", None),
             "input_csv": str(getattr(args, "input_csv", "") or ""),
+            "merge_into": str(getattr(args, "merge_into", "") or ""),
+            "session_iteration_id": str(getattr(args, "session_iteration_id", "") or ""),
             "skip_openalex": getattr(args, "skip_openalex", None),
             "include_semantic_scholar": getattr(args, "include_semantic_scholar", None),
             "include_arxiv": getattr(args, "include_arxiv", None),
@@ -913,9 +934,42 @@ def finalize_run(
         out_dir / "api_discovery_trace.csv",
         workflow_state.manifest_path(out_dir),
     )
+    concept_diagnostics_path = concept_diagnostics.write_diagnostics(
+        out_dir / "triaged_candidates.csv"
+    )
+    iteration_id = str(getattr(args, "session_iteration_id", "") or "iteration_001")
+    queries = list(getattr(args, "session_queries", []) or [])
+    delta_profile_path = research_session.write_delta(
+        getattr(args, "merge_base_path", None),
+        out_dir / "triaged_candidates.csv",
+        iteration_id=iteration_id,
+        queries=queries,
+    )
+    delta_profile = json.loads(delta_profile_path.read_text(encoding="utf-8"))
+    session_manifest_path = research_session.append_iteration(
+        out_dir,
+        iteration_id=iteration_id,
+        queries=queries,
+        concepts={
+            "required": list(getattr(args, "required_concept", []) or []),
+            "optional": list(getattr(args, "optional_concept", []) or []),
+            "negative": list(getattr(args, "negative_concept", []) or []),
+        },
+        delta=delta_profile,
+        run_status=final_status,
+        merge_mode=bool(getattr(args, "merge_into", None)),
+    )
+    # search_audit_report reads agent_summary.json. Refresh once after final
+    # status/profile/delta artifacts exist so the human audit cannot lag the
+    # Agent-facing state (for example, reporting Status: unknown).
+    refresh_processing_report(out_dir, warnings=warnings)
     audit_report_path = search_audit_report.build_audit_report(out_dir)
     artifact_index_path = artifacts.write_index(out_dir)
     refresh_processing_report(out_dir, warnings=warnings)
+    # The final report refresh changes agent_summary.json and
+    # processing_report.md. Rebuild the canonical index once more so their
+    # recorded hashes describe the files actually delivered to the Agent.
+    artifacts.write_index(out_dir, artifact_index_path)
     return {
         "status": final_status,
         "output_dir": str(out_dir),
@@ -924,6 +978,9 @@ def finalize_run(
         "processing_report": str(out_dir / "processing_report.md"),
         "agent_summary": str(out_dir / agent_summary.SUMMARY_NAME),
         "result_profile": str(result_profile_path),
+        "concept_diagnostics": str(concept_diagnostics_path),
+        "delta_profile": str(delta_profile_path),
+        "research_session_manifest": str(session_manifest_path),
         "search_audit_report": str(audit_report_path),
         "query_plan": str(out_dir / query_plan.PLAN_NAME),
         "field_provenance": str(out_dir / provenance.PROVENANCE_NAME),
@@ -977,7 +1034,13 @@ def make_report(out_dir: Path, counts: dict[str, int],
     ]
     for key in [
         "discovery_files",
+        "merge_base_rows",
         "deduped",
+        "pretriaged",
+        "pretriage_high",
+        "verification_queue",
+        "verification_queue_doi",
+        "verification_queue_title_lookup",
         "crossref_verified",
         "crossref_title_recovered",
         "crossref_mismatch",
@@ -1156,6 +1219,114 @@ def run_crossref_stage(input_path: Path, out_dir: Path,
         output_path=output_path,
         row_count_value=workflow_state.row_count(output_path),
         message=crossref_message,
+    )
+    return output_path
+
+
+def run_pretriage_stage(
+    input_path: Path,
+    out_dir: Path,
+    args: argparse.Namespace,
+    counts: dict[str, int],
+    manifest: dict[str, Any] | None = None,
+) -> Path:
+    """Rank candidates before spending bibliographic verification budget."""
+    output_path = out_dir / "pretriaged_candidates.csv"
+    if getattr(args, "resume", False) and workflow_state.reusable_stage(
+        manifest,
+        "pretriage",
+        output_path,
+        input_path=input_path,
+    ):
+        priority_counts = count_field_values(output_path, "triage_priority")
+        counts["pretriaged"] = workflow_state.row_count(output_path)
+        counts["pretriage_high"] = priority_counts.get("high", 0)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "pretriage",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=counts["pretriaged"],
+            message="Reused existing pretriaged_candidates.csv",
+        )
+        return output_path
+
+    pre_counts = semantic_triage.triage_csv(
+        input_path,
+        output_path,
+        profile_path=profile_path(args),
+        required_concepts=args.required_concept,
+        optional_concepts=args.optional_concept,
+        negative_concepts=args.negative_concept,
+        year_from=args.year_from,
+        year_to=args.year_to,
+        # Identifier absence must influence queue lane, not exclude a row
+        # before Crossref title recovery has a chance to run.
+        require_doi=False,
+        exclude_article_types=args.exclude_article_type,
+        allow_regex=bool(getattr(args, "allow_regex_concepts", False)),
+    )
+    counts["pretriaged"] = pre_counts["rows"]
+    counts["pretriage_high"] = pre_counts["high"]
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "pretriage",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=counts["pretriaged"],
+        message="Pre-verification semantic ranking completed",
+    )
+    return output_path
+
+
+def run_verification_queue_stage(
+    input_path: Path,
+    out_dir: Path,
+    counts: dict[str, int],
+    manifest: dict[str, Any] | None = None,
+    *,
+    resume: bool = False,
+) -> Path:
+    output_path = out_dir / "verification_queue.csv"
+    if resume and workflow_state.reusable_stage(
+        manifest,
+        "verification_queue",
+        output_path,
+        input_path=input_path,
+    ):
+        counts["verification_queue"] = workflow_state.row_count(output_path)
+        record_manifest_stage(
+            out_dir,
+            manifest,
+            "verification_queue",
+            "skipped_existing",
+            input_path=input_path,
+            output_path=output_path,
+            row_count_value=counts["verification_queue"],
+            message="Reused existing verification_queue.csv",
+        )
+        return output_path
+
+    queue_counts = verification_queue.build_queue(input_path, output_path)
+    counts["verification_queue"] = queue_counts["rows"]
+    counts["verification_queue_doi"] = queue_counts["doi_first"]
+    counts["verification_queue_title_lookup"] = queue_counts["title_lookup"]
+    record_manifest_stage(
+        out_dir,
+        manifest,
+        "verification_queue",
+        "completed",
+        input_path=input_path,
+        output_path=output_path,
+        row_count_value=queue_counts["rows"],
+        message=(
+            f"DOI-first={queue_counts['doi_first']}; "
+            f"title-lookup={queue_counts['title_lookup']}"
+        ),
     )
     return output_path
 
@@ -1430,6 +1601,7 @@ def run_queue_stage(input_path: Path, out_dir: Path,
         screenshot_root=str(args.screenshot_root),
         require_doi=not args.allow_missing_doi,
         include_metadata_blocked=args.include_metadata_blocked,
+        require_bibliographic_verification=not args.skip_crossref,
         fields_needed=args.fields_needed,
         page_required_fields=args.page_required_field,
     )
@@ -1637,10 +1809,44 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     queries = load_queries(args)
+    args.session_queries = list(queries)
+    args.session_iteration_id = (
+        research_session.resume_iteration_id(out_dir)
+        if getattr(args, "resume", False)
+        else research_session.next_iteration_id(out_dir)
+    )
+    merge_base_path: Path | None = None
+    if getattr(args, "merge_into", None):
+        existing_candidates = next(
+            (
+                path
+                for path in (
+                    out_dir / "deduped_candidates.csv",
+                    out_dir / "merged_candidates.csv",
+                    out_dir / "api_candidates.csv",
+                )
+                if path.exists()
+            ),
+            None,
+        )
+        if existing_candidates is None:
+            raise SystemExit(
+                "--merge-into requires an existing Litminer output directory "
+                "with deduped_candidates.csv, merged_candidates.csv, or api_candidates.csv"
+            )
+        merge_base_path = out_dir / "merge_base_candidates.csv"
+        shutil.copyfile(existing_candidates, merge_base_path)
+    args.merge_base_path = merge_base_path
     signature_payload = run_signature_payload(args, queries)
     signature = workflow_state.stable_fingerprint(signature_payload)
-    existing_manifest = workflow_state.load_manifest(out_dir) if getattr(args, "resume", False) else {}
+    prior_manifest = workflow_state.load_manifest(out_dir)
+    existing_manifest = prior_manifest if getattr(args, "resume", False) else {}
     validate_resume_manifest(out_dir, args, existing_manifest, signature)
+    if getattr(args, "merge_into", None) and prior_manifest:
+        existing_manifest = {
+            "run_id": prior_manifest.get("run_id", ""),
+            "created_at": prior_manifest.get("created_at", ""),
+        }
     manifest = workflow_state.new_manifest(
         args,
         existing=existing_manifest,
@@ -1671,6 +1877,17 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             sources = selected_discovery_sources(args)
         except SystemExit:
             sources = []
+    if "arxiv" in sources and any(
+        query.strip() and not arxiv_search.is_advanced_query(query)
+        for query in queries
+    ):
+        warning = (
+            "Plain arXiv queries will be compiled into explicit all-field AND semantics. "
+            "Inspect provider_query in api_candidates.csv for the effective query."
+        )
+        if warning not in warnings:
+            warnings.append(warning)
+            print(f"WARNING: {warning}", file=sys.stderr)
     write_query_plan_artifact(out_dir, args, queries, sources, manifest=manifest)
     should_stop, stop_reason = should_stop_after(args, "query_plan", started_at)
     if should_stop:
@@ -1701,6 +1918,9 @@ def run(args: argparse.Namespace) -> dict[str, str]:
     else:
         discovery_inputs = discover(args, out_dir, manifest=manifest)
     counts["discovery_files"] = len(discovery_inputs)
+    if merge_base_path is not None:
+        discovery_inputs = [merge_base_path, *discovery_inputs]
+        counts["merge_base_rows"] = workflow_state.row_count(merge_base_path)
     if not discovery_inputs:
         raise SystemExit("No discovery inputs produced. Provide --input-csv or at least one --query.")
     should_stop, stop_reason = should_stop_after(args, "discovery", started_at)
@@ -1843,7 +2063,47 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             stop_reason=stop_reason,
         )
 
-    triage_input = run_crossref_stage(deduped, out_dir, args, counts, manifest=manifest)
+    pretriaged = run_pretriage_stage(deduped, out_dir, args, counts, manifest=manifest)
+    refresh_processing_report(out_dir, warnings=warnings)
+    should_stop, stop_reason = should_stop_after(args, "pretriage", started_at)
+    if should_stop:
+        return finalize_run(
+            out_dir,
+            manifest,
+            counts,
+            args,
+            strict_path,
+            backup_path,
+            queue_priorities,
+            warnings,
+            run_status="partial",
+            stop_reason=stop_reason,
+        )
+
+    verification_input = run_verification_queue_stage(
+        pretriaged,
+        out_dir,
+        counts,
+        manifest=manifest,
+        resume=bool(getattr(args, "resume", False)),
+    )
+    refresh_processing_report(out_dir, warnings=warnings)
+    should_stop, stop_reason = should_stop_after(args, "verification_queue", started_at)
+    if should_stop:
+        return finalize_run(
+            out_dir,
+            manifest,
+            counts,
+            args,
+            strict_path,
+            backup_path,
+            queue_priorities,
+            warnings,
+            run_status="partial",
+            stop_reason=stop_reason,
+        )
+
+    triage_input = run_crossref_stage(verification_input, out_dir, args, counts, manifest=manifest)
     refresh_processing_report(out_dir, warnings=warnings)
     should_stop, stop_reason = should_stop_after(args, "crossref", started_at)
     if should_stop:
@@ -1896,8 +2156,9 @@ def run(args: argparse.Namespace) -> dict[str, str]:
         )
 
     if expanded_merged is not None:
-        # Expanded rows were merged back; restart dedupe → crossref → triage
-        # so expanded candidates go through the full verification pipeline.
+        # Expanded rows were merged back; restart dedupe → pretriage →
+        # verification queue → Crossref → final triage so new rows compete
+        # for verification budget by relevance rather than append position.
         merged = expanded_merged
         deduped = out_dir / "deduped_candidates.csv"
         dedupe_papers.dedupe(merged, deduped, "doi", "title")
@@ -1908,7 +2169,15 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             row_count_value=counts["deduped"],
             message="Re-ran after citation expansion",
         )
-        triage_input = run_crossref_stage(deduped, out_dir, args, counts, manifest=manifest)
+        pretriaged = run_pretriage_stage(deduped, out_dir, args, counts, manifest=manifest)
+        verification_input = run_verification_queue_stage(
+            pretriaged,
+            out_dir,
+            counts,
+            manifest=manifest,
+            resume=bool(getattr(args, "resume", False)),
+        )
+        triage_input = run_crossref_stage(verification_input, out_dir, args, counts, manifest=manifest)
         triaged = run_triage_stage(triage_input, out_dir, args, counts, manifest=manifest)
         refresh_processing_report(out_dir, warnings=warnings)
 
@@ -2072,6 +2341,12 @@ def main() -> None:
     parser.add_argument("--year-from", type=int, default=None)
     parser.add_argument("--year-to", type=int, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--merge-into",
+        type=Path,
+        default=None,
+        help="Merge a new discovery iteration into an existing Litminer output directory and write delta/session artifacts",
+    )
     parser.add_argument("--config", type=Path, default=None,
                         help="Runtime infrastructure config JSON: channels, API env names, limits, and outputs.")
     parser.add_argument("--mode", choices=sorted(RUN_MODE_PRESETS),
@@ -2087,7 +2362,8 @@ def main() -> None:
                         help="Stop cleanly after a stage once this run-level time budget is exhausted")
     parser.add_argument("--stop-after-stage",
                         choices=[
-                            "query_plan", "discovery", "merge", "dedupe", "crossref", "triage",
+                            "query_plan", "discovery", "merge", "dedupe", "pretriage",
+                            "verification_queue", "crossref", "triage",
                             "citation_expand", "selection", "unpaywall", "metrics", "queue",
                             "probe", "publisher_html_extract",
                         ],
@@ -2167,7 +2443,7 @@ def main() -> None:
     parser.add_argument("--unpaywall-checkpoint-interval", type=int, default=None,
                         help="Write Unpaywall batch progress every N rows; 0 disables checkpoints")
     parser.add_argument("--max-crossref-rows", type=int, default=None,
-                        help="Only verify the first N rows in Crossref; remaining rows are marked skipped_budget")
+                        help="Process at most N unresolved rows from the priority verification queue; remaining rows are marked skipped_budget")
     parser.add_argument("--max-unpaywall-rows", type=int, default=None,
                         help="Only annotate the first N rows in Unpaywall; remaining rows are marked skipped_budget")
     parser.add_argument("--metrics", type=Path, default=None)
@@ -2204,16 +2480,31 @@ def main() -> None:
                         help="Citation expansion direction: forward (cited-by), backward (references), or both")
     args = parser.parse_args()
 
-    result = run(args)
-    print(f"Litminer run complete: {result['output_dir']}", file=sys.stderr)
-    print(f"Triaged candidates: {result['triaged_candidates']}", file=sys.stderr)
-    print(f"Feasibility report: {result['feasibility_report']}", file=sys.stderr)
-    print(f"Processing report: {result['processing_report']}", file=sys.stderr)
-    print(f"Agent summary: {result['agent_summary']}", file=sys.stderr)
-    print(f"Query plan: {result['query_plan']}", file=sys.stderr)
-    print(f"Field provenance: {result['field_provenance']}", file=sys.stderr)
-    print(f"Run manifest: {result['run_manifest']}", file=sys.stderr)
-    print(f"Artifacts index: {result['artifacts_index']}", file=sys.stderr)
+    try:
+        result = run(args)
+    except ValueError as exc:
+        print(f"Litminer validation error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    status = str(result.get("status") or "unknown")
+    if status == "completed":
+        print(f"Litminer run complete: {result['output_dir']}", file=sys.stderr)
+    else:
+        print(f"Litminer run {status}: {result['output_dir']}", file=sys.stderr)
+
+    for label, key in (
+        ("Triaged candidates", "triaged_candidates"),
+        ("Feasibility report", "feasibility_report"),
+        ("Processing report", "processing_report"),
+        ("Agent summary", "agent_summary"),
+        ("Query plan", "query_plan"),
+        ("Field provenance", "field_provenance"),
+        ("Run manifest", "run_manifest"),
+        ("Artifacts index", "artifacts_index"),
+    ):
+        path = Path(result[key])
+        if path.exists():
+            print(f"{label}: {path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
