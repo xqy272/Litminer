@@ -97,8 +97,12 @@ def _next_actions(summary: dict[str, Any]) -> list[str]:
     source_strategy = summary.get("source_strategy", {})
     concept_summary = summary.get("concept_diagnostics")
     cache = summary.get("cache", {}) if isinstance(summary.get("cache"), dict) else {}
+    coverage = summary.get('coverage') if isinstance(summary.get('coverage'), dict) else {}
     if summary.get("partial"):
         actions.append("Resume the run with the same output_dir if the user request has not changed.")
+    for action in coverage.get('next_actions') or []:
+        if action not in actions:
+            actions.append(str(action))
     if provider_status_classes.get("rate_limited") or provider_statuses.get("skipped_rate_limit_cooldown"):
         actions.append(
             "Review provider retry_after_seconds in api_discovery_trace.csv "
@@ -149,6 +153,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "verification_queue": output_dir / "verification_queue.csv",
         "verified_candidates": output_dir / "verified_candidates.csv",
         "triaged_candidates": output_dir / "triaged_candidates.csv",
+        "canonical_papers": output_dir / "canonical_papers.csv",
         "selected_candidates": output_dir / "selected_candidates.csv",
         "oa_annotated_candidates": output_dir / "oa_annotated_candidates.csv",
         "metrics_annotated_candidates": output_dir / "metrics_annotated_candidates.csv",
@@ -166,10 +171,15 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "concept_diagnostics": output_dir / concept_diagnostics.DIAGNOSTICS_NAME,
         "delta_profile": output_dir / research_session.DELTA_NAME,
         "research_session_manifest": output_dir / research_session.SESSION_NAME,
+        "coverage_report": output_dir / "coverage_report.json",
+        "run_outcome": output_dir / "run_outcome.json",
+        "run_spec": output_dir / "run_spec.json",
     }
     rows = {name: read_rows(path) for name, path in paths.items() if path.suffix == ".csv"}
     manifest = workflow_state.load_manifest(output_dir)
     plan = read_json(paths["query_plan"])
+    coverage = read_json(paths['coverage_report'])
+    run_outcome = read_json(paths['run_outcome'])
     source_strategy = plan.get("source_strategy") if isinstance(plan.get("source_strategy"), dict) else {}
     run_status = str(manifest.get("run_status") or ("completed" if manifest.get("completed_at") else "unknown"))
     stop_reason = str(manifest.get("stop_reason") or "")
@@ -198,11 +208,14 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
     )
 
     summary: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "output_dir": str(output_dir),
         "run_id": manifest.get("run_id", ""),
         "mode": manifest.get("mode", ""),
         "run_status": run_status,
+        "quality": coverage.get('quality') or manifest.get('run_quality') or 'inconclusive',
+        "coverage": coverage,
+        "run_outcome": run_outcome or None,
         "partial": run_status == "partial",
         "stop_reason": stop_reason,
         "status_reason": stop_reason or run_status,
@@ -219,6 +232,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
             "metric_pass": metric_pass,
             "publisher_queue": len(rows.get("publisher_queue", [])),
             "publisher_probe_checked": publisher_probe_checked,
+            "canonical_papers": len(rows.get('canonical_papers', [])),
         },
         "trust_tier_statuses": {
             "bibliographic_verification": {

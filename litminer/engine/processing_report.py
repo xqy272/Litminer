@@ -189,6 +189,7 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "pretriaged": output_dir / "pretriaged_candidates.csv",
         "verification_queue": output_dir / "verification_queue.csv",
         "triaged": output_dir / "triaged_candidates.csv",
+        "canonical": output_dir / "canonical_papers.csv",
         "citation_expanded": output_dir / "citation_expanded_candidates.csv",
         "citation_trace": output_dir / "citation_expand_trace.csv",
         "selected": output_dir / "selected_candidates.csv",
@@ -204,12 +205,18 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         "field_provenance": output_dir / "field_provenance.json",
         "publisher_adapters": output_dir / "publisher_adapters.json",
         "agent_summary": output_dir / "agent_summary.json",
+        "coverage_report": output_dir / "coverage_report.json",
+        "run_outcome": output_dir / "run_outcome.json",
+        "export_manifest": output_dir / "export_manifest.json",
         "artifacts_index": output_dir / artifacts.INDEX_NAME,
     }
     rows = {name: read_rows(path) if path.suffix == ".csv" else [] for name, path in paths.items()}
     manifest = read_manifest(output_dir)
     query_plan = read_json_object(paths["query_plan"])
     source_strategy = query_plan.get("source_strategy") if isinstance(query_plan.get("source_strategy"), dict) else {}
+    coverage = read_json_object(paths["coverage_report"])
+    run_outcome = read_json_object(paths["run_outcome"])
+    export_manifest = read_json_object(paths["export_manifest"])
 
     candidate_rows = (
         rows["oa"] or rows["verified"] or rows["selected"] or
@@ -226,9 +233,10 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
     ]
     for name in [
         "api", "api_trace", "deduped", "pretriaged", "verification_queue",
-        "triaged", "selected", "verified",
+        "triaged", "canonical", "selected", "verified",
         "oa", "metrics", "queue", "probed", "query_plan", "field_provenance",
-        "publisher_adapters", "agent_summary", "delta_profile",
+        "publisher_adapters", "agent_summary", "coverage_report", "run_outcome",
+        "export_manifest", "delta_profile",
         "research_session_manifest",
         "artifacts_index",
     ]:
@@ -271,6 +279,64 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         lines.append(f"- duplicates_or_removed_before_dedupe: {max(0, len(rows['api']) - len(rows['deduped']))}")
 
     lines.append("")
+    if coverage:
+        ledger = coverage.get("request_ledger") if isinstance(coverage.get("request_ledger"), dict) else {}
+        discovery = coverage.get("discovery") if isinstance(coverage.get("discovery"), dict) else {}
+        lines.extend([
+            "## Coverage And Runtime Quality",
+            "",
+            f"- run_status: {run_outcome.get('status') or manifest.get('run_status') or 'unknown'}",
+            f"- quality: {coverage.get('quality', 'inconclusive')}",
+            f"- quality_reason: {coverage.get('quality_reason', '')}",
+            f"- candidate_count: {coverage.get('candidate_count', 0)}",
+            f"- discovery_healthy: {discovery.get('healthy_provider_count', 0)}",
+            f"- discovery_partial: {discovery.get('partial_provider_count', 0)}",
+            f"- discovery_unavailable: {discovery.get('unavailable_provider_count', 0)}",
+            "",
+            "### Provider Request Ledger",
+            "",
+            f"- enabled: {ledger.get('enabled', False)}",
+            f"- HTTP attempts and scheduler skips: {ledger.get('requests', 0)}",
+            f"- retry attempts: {ledger.get('retries', 0)}",
+            f"- provider wait seconds: {ledger.get('wait_seconds', 0)}",
+        ])
+        for item in ledger.get("by_provider_status") or []:
+            if isinstance(item, dict):
+                lines.append(
+                    f"- {item.get('provider', '')}/{item.get('status_class', '')}: "
+                    f"{item.get('requests', 0)}"
+                )
+        lines.extend([
+            "",
+            "Boundary: quality reports infrastructure coverage, not literature-field recall.",
+            "",
+        ])
+
+    if rows["canonical"]:
+        trusted = sum(1 for row in rows["canonical"] if (row.get("trusted_bibliography") or "").lower() == "true")
+        eligible = sum(1 for row in rows["canonical"] if (row.get("export_eligible") or "").lower() == "true")
+        lines.extend([
+            "## Canonical Bibliography Projection",
+            "",
+            f"- canonical_rows: {len(rows['canonical'])}",
+            f"- trusted_bibliography: {trusted}",
+            f"- default_export_eligible: {eligible}",
+            "- Field-level selection reasons are recorded in `canonical_provenance.json`.",
+            "",
+        ])
+
+    if export_manifest:
+        lines.extend([
+            "## Bibliography Export Audit",
+            "",
+            f"- formats: {', '.join(export_manifest.get('formats') or [])}",
+            f"- exported_rows: {export_manifest.get('exported_rows', 0)}",
+            f"- excluded_rows: {export_manifest.get('excluded_rows', 0)}",
+            f"- unverified_exported: {export_manifest.get('unverified_exported', 0)}",
+            f"- excluded_reasons: {json.dumps(export_manifest.get('excluded_reasons') or {}, ensure_ascii=False, sort_keys=True)}",
+            "",
+        ])
+
     append_trust_summary(lines, rows, manifest)
 
     lines.extend(["", "## Source Distribution", ""])
@@ -324,7 +390,10 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
         lines.append(f"- Expanded candidates: {len(rows['citation_expanded'])}")
         if rows["citation_trace"]:
             trace_ok = sum(1 for r in rows["citation_trace"] if (r.get("status") or "") == "ok")
-            trace_err = sum(1 for r in rows["citation_trace"] if (r.get("status") or "") == "error")
+            trace_err = sum(
+                1 for r in rows["citation_trace"]
+                if (r.get("status_class") or "") not in {"ok", "empty_or_missing"}
+            )
             lines.append(f"- Seed attempts: {len(rows['citation_trace'])} (ok={trace_ok}, error={trace_err})")
             for r in rows["citation_trace"][:10]:
                 seed = r.get("seed_doi", "")

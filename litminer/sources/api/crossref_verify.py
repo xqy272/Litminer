@@ -31,11 +31,14 @@ import time
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from typing import Any, Callable
 
 from litminer.engine import cache as cache_helpers
 from litminer.engine.common import normalize_doi, read_csv_rows, write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
 from litminer.sources.api.http_client import RetryPolicy, fetch_json
+from litminer.contracts.errors import ProviderCooldownError
+from litminer.runtime.provider_runtime import ProviderRuntime
 
 # Configuration
 
@@ -54,9 +57,16 @@ CROSSREF_RAISE_ON_STATUS = frozenset({400, 404, 410})
 
 
 class CrossrefRateLimitError(RuntimeError):
-    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+    def __init__(self, message: str, retry_after_seconds: float | None = None,
+                 attempts: int | None = None, request_count: int | None = None) -> None:
         super().__init__(message)
+        self.status = "rate_limited"
+        self.provider = "crossref"
+        self.http_status = 429
+        self.transient = True
         self.retry_after_seconds = retry_after_seconds
+        self.attempts = attempts
+        self.request_count = request_count
 
 
 class CrossrefRequestError(RuntimeError):
@@ -65,10 +75,34 @@ class CrossrefRequestError(RuntimeError):
         message: str,
         status: str = "provider_error",
         retry_after_seconds: float | None = None,
+        attempts: int | None = None,
+        request_count: int | None = None,
+        http_status: int | None = None,
+        transient: bool | None = None,
     ) -> None:
         super().__init__(message)
+        self.provider = "crossref"
         self.status = status
         self.retry_after_seconds = retry_after_seconds
+        self.attempts = attempts
+        self.request_count = request_count
+        self.http_status = http_status
+        self.transient = transient
+
+
+def _runtime_call(runtime: ProviderRuntime | None, operation: str, query: str,
+                  callback: Callable[[], Any]) -> Any:
+    if runtime is None:
+        return callback()
+    try:
+        return runtime.execute("crossref", operation, query, callback)
+    except ProviderCooldownError as exc:
+        raise CrossrefRateLimitError(
+            exc.envelope.message,
+            retry_after_seconds=exc.envelope.retry_after_seconds,
+            attempts=0,
+            request_count=0,
+        ) from exc
 
 
 def _user_agent() -> str:
@@ -103,11 +137,17 @@ def _fetch_json(url: str) -> dict:
             raise CrossrefRateLimitError(
                 str(exc),
                 retry_after_seconds=exc.retry_after_seconds,
+                attempts=exc.attempts,
+                request_count=exc.request_count,
             ) from exc
         raise CrossrefRequestError(
             str(exc),
             status=exc.status,
             retry_after_seconds=exc.retry_after_seconds,
+            attempts=exc.attempts,
+            request_count=exc.request_count,
+            http_status=exc.http_status,
+            transient=exc.transient,
         ) from exc
 
 
@@ -134,16 +174,42 @@ def _title_similarity(a: str, b: str) -> float:
 
 # Metadata extraction from Crossref response
 
+
+def _extract_authors(message: dict) -> str:
+    authors = message.get('author') or []
+    values: list[str] = []
+    if not isinstance(authors, list):
+        return ''
+    for author in authors:
+        if not isinstance(author, dict):
+            continue
+        family = str(author.get('family') or '').strip()
+        given = str(author.get('given') or '').strip()
+        name = str(author.get('name') or '').strip()
+        if family and given:
+            values.append(f'{family}, {given}')
+        elif family or given:
+            values.append(family or given)
+        elif name:
+            values.append(name)
+    return '; '.join(values)
+
+
 def _extract_crossref_metadata(message: dict) -> dict[str, str]:
     """Extract uniform fields from a Crossref API message."""
     return {
         "crossref_doi": normalize_doi(message.get("DOI", "")),
         "crossref_title": (message.get("title", [""]) or [""])[0].strip(),
         "crossref_container": (message.get("container-title", [""]) or [""])[0].strip(),
+        "crossref_authors": _extract_authors(message),
         "crossref_publisher": message.get("publisher", ""),
         "crossref_type": message.get("type", ""),
         "crossref_year": str(_extract_year(message)),
         "crossref_issn": (message.get("ISSN", [""]) or [""])[0],
+        "crossref_volume": str(message.get("volume", "") or ""),
+        "crossref_issue": str(message.get("issue", "") or ""),
+        "crossref_pages": str(message.get("page", "") or ""),
+        "crossref_abstract": _strip_html(str(message.get("abstract", "") or "")),
         "crossref_url": message.get("URL", ""),
         "crossref_created": _extract_date_part(message.get("created", {})),
         "crossref_published": _extract_date_part(message.get("published-print", {}) or message.get("published-online", {})),
@@ -422,7 +488,8 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                max_rows: int | None = None,
                cache_dir: Path | None = None,
                cache_ttl_days: float | None = None,
-               cache_enabled: bool = True) -> dict[str, int]:
+               cache_enabled: bool = True,
+               provider_runtime: ProviderRuntime | None = None) -> dict[str, int]:
     """Verify all DOIs in a CSV file and write augmented output."""
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
@@ -433,8 +500,9 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
 
     # Add Crossref columns
     xref_cols = [
-        "crossref_doi", "crossref_title", "crossref_container", "crossref_publisher",
+        "crossref_doi", "crossref_title", "crossref_container", "crossref_authors", "crossref_publisher",
         "crossref_type", "crossref_year", "crossref_issn", "crossref_url",
+        "crossref_volume", "crossref_issue", "crossref_pages", "crossref_abstract",
         "crossref_created", "crossref_published", "crossref_mismatches",
         "crossref_error_code",
         "crossref_lookup_method", "crossref_title_similarity",
@@ -551,7 +619,12 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
                     row["crossref_cache_status"] = "miss" if cache_obj is not None else "disabled"
                     row["crossref_cache_key"] = title_key if cache_obj is not None else ""
                     try:
-                        meta = _best_title_match(title, input_row=row, raise_transient=True)
+                        meta = _runtime_call(
+                            provider_runtime,
+                            "title_lookup",
+                            title,
+                            lambda: _best_title_match(title, input_row=row, raise_transient=True),
+                        )
                     except CrossrefRateLimitError as exc:
                         polite_pause()
                         row["crossref_mismatches"] = ""
@@ -626,7 +699,12 @@ def verify_csv(input_path: Path, output_path: Path, strict: bool = False,
             row["crossref_cache_status"] = "miss" if cache_obj is not None else "disabled"
             row["crossref_cache_key"] = doi_key if cache_obj is not None else ""
             try:
-                meta = verify_doi(doi, raise_transient=True)
+                meta = _runtime_call(
+                    provider_runtime,
+                    "doi_lookup",
+                    normalize_doi(doi),
+                    lambda: verify_doi(doi, raise_transient=True),
+                )
             except CrossrefRateLimitError as exc:
                 polite_pause()
                 row["crossref_mismatches"] = ""

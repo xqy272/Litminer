@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 from litminer.engine.common import read_csv_rows, write_csv_atomic
+from litminer.contracts.errors import classify_exception
+from litminer.runtime.provider_runtime import ProviderRuntime
 from litminer.sources.api import semantic_scholar_search
 
 
@@ -74,6 +76,7 @@ def expand_citations(
     *,
     direction: str = "both",
     max_per_seed: int = 30,
+    provider_runtime: ProviderRuntime | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     """Expand seeds via Semantic Scholar citation/reference graph.
 
@@ -88,7 +91,11 @@ def expand_citations(
     for doi in seed_dois:
         if direction in ("forward", "both"):
             try:
-                citations = semantic_scholar_search.get_citations(doi, max_results=max_per_seed)
+                callback = lambda: semantic_scholar_search.get_citations(doi, max_results=max_per_seed)
+                citations = (
+                    provider_runtime.execute("semantic_scholar", "citation_expand", doi, callback)
+                    if provider_runtime is not None else callback()
+                )
                 for row in citations:
                     row["discovery_source"] = "semantic_scholar_citation"
                 results.extend(citations)
@@ -104,21 +111,28 @@ def expand_citations(
                 })
                 print(f"  Citation expansion for {doi}: {len(citations)} rows", file=sys.stderr)
             except Exception as exc:
+                envelope = classify_exception(exc, provider="semantic_scholar", stage="citation_expand")
                 trace.append({
                     "provider": "semantic_scholar",
                     "query_id": f"citation_expand:{doi}",
                     "query_type": "citation_expand",
                     "seed_doi": doi,
-                    "status": "error",
-                    "status_class": "error",
+                    "status": envelope.code,
+                    "status_class": envelope.error_class,
                     "returned_count": "0",
-                    "error": str(exc),
+                    "error": envelope.message,
+                    "error_code": envelope.code,
+                    "retry_after_seconds": str(envelope.retry_after_seconds or ""),
                 })
                 print(f"  Citation expansion failed for {doi}: {exc}", file=sys.stderr)
 
         if direction in ("backward", "both"):
             try:
-                refs = semantic_scholar_search.get_references(doi, max_results=max_per_seed)
+                callback = lambda: semantic_scholar_search.get_references(doi, max_results=max_per_seed)
+                refs = (
+                    provider_runtime.execute("semantic_scholar", "reference_expand", doi, callback)
+                    if provider_runtime is not None else callback()
+                )
                 for row in refs:
                     row["discovery_source"] = "semantic_scholar_reference"
                 results.extend(refs)
@@ -134,15 +148,18 @@ def expand_citations(
                 })
                 print(f"  Reference expansion for {doi}: {len(refs)} rows", file=sys.stderr)
             except Exception as exc:
+                envelope = classify_exception(exc, provider="semantic_scholar", stage="reference_expand")
                 trace.append({
                     "provider": "semantic_scholar",
                     "query_id": f"reference_expand:{doi}",
                     "query_type": "reference_expand",
                     "seed_doi": doi,
-                    "status": "error",
-                    "status_class": "error",
+                    "status": envelope.code,
+                    "status_class": envelope.error_class,
                     "returned_count": "0",
-                    "error": str(exc),
+                    "error": envelope.message,
+                    "error_code": envelope.code,
+                    "retry_after_seconds": str(envelope.retry_after_seconds or ""),
                 })
                 print(f"  Reference expansion failed for {doi}: {exc}", file=sys.stderr)
 
@@ -158,6 +175,7 @@ def expand_from_triaged(
     direction: str = "both",
     max_per_seed: int = 30,
     trace_output: Path | None = None,
+    provider_runtime: ProviderRuntime | None = None,
 ) -> dict[str, Any]:
     """Run citation expansion from a triaged CSV and write expanded candidates.
 
@@ -181,7 +199,12 @@ def expand_from_triaged(
         }
 
     print(f"Citation expansion: {len(seeds)} seed(s), direction={direction}", file=sys.stderr)
-    expanded, trace = expand_citations(seeds, direction=direction, max_per_seed=max_per_seed)
+    expanded, trace = expand_citations(
+        seeds,
+        direction=direction,
+        max_per_seed=max_per_seed,
+        provider_runtime=provider_runtime,
+    )
 
     if expanded:
         fieldnames = list(expanded[0].keys())
@@ -191,7 +214,8 @@ def expand_from_triaged(
 
     if trace_output and trace:
         trace_fields = ["provider", "query_id", "query_type", "seed_doi",
-                        "status", "status_class", "returned_count", "error"]
+                        "status", "status_class", "returned_count", "error",
+                        "error_code", "retry_after_seconds"]
         write_csv_atomic(trace, trace_output, fieldnames=trace_fields)
 
     return {

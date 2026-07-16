@@ -15,6 +15,10 @@ Litminer 是一个面向 AI Agent 的科研文献信息获取 skill。它帮助 
 - 生成正交的书目状态、科学审查状态和工作流状态，并保留字段级概念匹配证据与概念选择性诊断。
 - 从高优先级论文出发做引用/参考文献扩展，发现关键词检索遗漏的相关论文。
 - 生成分层结果统计（`result_profile`）和人类可读审计报告（`search_audit_report`）。
+- 用同一 `RunSpec`/`RunOutcome` 契约统一 CLI、MCP、后台 job、错误分类和恢复动作。
+- 用 workspace-local SQLite 保存阶段状态、provider-wide cooldown、逐次 HTTP request ledger、source observations 和 canonical provenance。
+- 生成独立的 `coverage_report.json`，明确区分运行状态与 `healthy` / `degraded` / `inconclusive` 检索质量。
+- 将 raw observation 与 canonical bibliography 分层，并按可信资格导出 RIS/BibTeX 与 `export_manifest.json`。
 - 用 `--merge-into` 把新一轮检索机械合并进已有候选池，并输出本轮增量与跨轮次谱系。
 - 从出版商页面提取 `citation_keywords`、`citation_online_date`、`citation_funder_name` 等结构化元数据。
 - 构建 DOI/出版社页面证据队列，供 Agent 后续检查文章页面。
@@ -112,11 +116,29 @@ python -m litminer.engine.run_lit_search \
 
 `--resume` 只用于同一运行签名的中断恢复；`--merge-into` 会重跑去重、语义分流、验证排序和最终 triage，并写入增量谱系。
 
+在 finalize 阶段导出可信书目：
+
+```bash
+python -m litminer.engine.run_lit_search \
+  --mode balanced \
+  --input-csv candidates.csv \
+  --export ris \
+  --export bibtex \
+  --output-dir .litminer/runs/exported_run
+```
+
+默认排除未验证、撤稿和缺标题记录。只有明确使用
+`--include-unverified-export` 才会把未验证书目写入导出，并在
+`export_manifest.json` 中保留风险审计。
+
 ## 主要输出
 
 | 文件 | 用途 |
 |------|------|
 | `query_plan.json` | Agent 派生的查询、来源、概念和运行控制。 |
+| `run_spec.json` | CLI/MCP 共用的规范化类型化运行契约。 |
+| `run_outcome.json` | 独立的执行状态、检索质量、artifacts、warnings 和 next actions。 |
+| `coverage_report.json` | provider/query/verification 覆盖、quality 和 request ledger 摘要。 |
 | `api_candidates.csv` | API 发现候选。 |
 | `api_discovery_trace.csv` | 查询、来源、状态和失败原因追踪。 |
 | `deduped_candidates.csv` | DOI/标题去重并合并后的候选。 |
@@ -124,6 +146,8 @@ python -m litminer.engine.run_lit_search \
 | `verification_queue.csv` | DOI 优先、相关性优先的确定性书目验证队列。 |
 | `verified_candidates.csv` | Crossref 验证结果（含撤稿状态）。 |
 | `triaged_candidates.csv` | 带语义证据、书目状态、科学审查状态和工作流状态的审查面。 |
+| `canonical_papers.csv` | 面向交付/导出的 canonical bibliography 投影。 |
+| `canonical_provenance.json` | 每个 canonical 字段的来源、信任等级和选择理由。 |
 | `concept_diagnostics.json` | 概念匹配率、来源分布和低选择性警告。 |
 | `citation_expanded_candidates.csv` | 引用/参考文献扩展候选（`--expand-citations` 启用时）。 |
 | `publisher_queue.csv` | DOI/出版社页面证据队列；Crossref 已启用时默认只含书目已验证记录。 |
@@ -136,6 +160,8 @@ python -m litminer.engine.run_lit_search \
 | `processing_report.md` | 来源、元数据、triage、OA/access、引用扩展、HTML meta 和队列摘要。 |
 | `agent_summary.json` | Agent 优先读取的机器可读摘要（含 capability 状态、验证分流、概念诊断和增量摘要）。 |
 | `run_manifest.json` | 阶段状态、复用记录、行数、文件指纹和运行签名。 |
+| `litminer_export.ris` / `.bib` | 可选 RIS/BibTeX 交付文件。 |
+| `export_manifest.json` | 导出资格、排除原因、key 冲突和文件哈希审计。 |
 
 ## 可选 MCP
 
@@ -144,6 +170,11 @@ MCP 不是必需项；它只是把 Litminer 的能力暴露成 Agent 可调用�
 ```bash
 python -m litminer.sources.mcp.test_server
 ```
+
+默认 MCP 只公开 9 个高层工具：doctor、capabilities、plan、start、get、
+resume、cancel、read results 和 export。同步 full-run、低层 provider 和单阶段
+工具保留在 `LITMINER_MCP_TOOL_PROFILE=all`。工具级失败返回结构化
+`isError=true`/`ErrorEnvelope`，而不是要求 Agent 解析 traceback 文本。
 
 MCP 运行时建议设置：
 
@@ -163,6 +194,9 @@ LITMINER_CONTACT_EMAIL=you@example.org
 | 主流程 | `python -m litminer.engine.run_lit_search --help` |
 | 语义初筛 | `python -m litminer.engine.semantic_triage --help` |
 | MCP 自检 | `python -m litminer.sources.mcp.test_server` |
+| RIS/BibTeX 导出 | `python -m litminer.exporters.exporter --help` |
+| SQLite 状态导出 | `python -m litminer.runtime.state_store --output state_snapshot.json` |
+| 新架构 acceptance | `python -m litminer.engine.architecture_acceptance --help` |
 | 全量测试 | `python -m unittest discover -s test -p "test_*.py"` |
 
 ## 边界
@@ -205,7 +239,7 @@ Litminer/
 `-- test/
 ```
 
-`litminer/sources/api/` 是数据源 wrapper，`litminer/engine/` 是确定性处理流水线，`litminer/sources/mcp/` 是 MCP stdio 服务。
+`litminer/contracts/` 是公共 Agent 契约，`litminer/runtime/` 管理 SQLite、provider scheduler 和阶段状态，`litminer/evidence/` 分离 observations 与 canonical records，`litminer/exporters/` 负责可信书目导出；`litminer/sources/api/` 是来源 wrapper，`litminer/engine/` 保留兼容编排与确定性阶段，`litminer/sources/mcp/` 是 MCP stdio adapter。
 
 ## 许可证
 

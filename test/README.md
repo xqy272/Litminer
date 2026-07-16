@@ -5,8 +5,11 @@ deterministic and CI-mandatory. Layer 3 is manual/on-demand.
 
 ## Layer 1 — Unit (mock-isolated)
 
-97 tests in `test_litminer_core.py`. Each test mocks external dependencies and
-verifies a single function or module. Fast, no network, no subprocess.
+`test_litminer_core.py` preserves the established pipeline regressions;
+`test_next_architecture.py` covers Contract Layer parity, structured errors,
+SQLite migration/rollback/recovery, provider cooldown and HTTP ledger,
+coverage quality, canonical provenance, RIS/BibTeX, and new MCP tools. Tests are
+fast and network-isolated.
 
 ```bash
 python -m unittest discover -s test -p "test_*.py"
@@ -31,6 +34,8 @@ Profiles:
 | `offline` | Deterministic contract tests | Yes |
 | `known_issue` | Regression contracts for previously discovered defects; entries may be xfail until fixed | Yes |
 | `live` | Real API integration | No — manual |
+| `architecture` | Next-generation contract/state/evidence/export acceptance probes | Yes |
+| `failure_injection` | Deterministic provider-failure and quality semantics | Yes |
 
 The unittest bridge in `test_agent_scenarios.py` runs both `offline` and
 `known_issue` profiles so they are included in `python -m unittest discover`.
@@ -84,6 +89,7 @@ python -m ruff check litminer test
 python -m mypy litminer
 python -m unittest discover -s test -p "test_*.py"
 python -m litminer.sources.mcp.test_server
+python -m litminer.engine.architecture_acceptance --scenario degraded_coverage --output-dir .litminer/test/acceptance
 python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
 python -m litminer.engine.doctor
 python -m litminer.engine.offline_smoke

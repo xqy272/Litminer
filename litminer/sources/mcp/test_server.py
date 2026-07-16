@@ -63,21 +63,14 @@ def main():
         tool_names = [t["name"] for t in tools]
         expected = [
             "litminer_workspace_doctor",
-            "litminer_bootstrap",
-            "litminer_run_lit_search",
+            "litminer_capabilities",
+            "litminer_plan_run",
             "litminer_start_run",
-            "litminer_run_status",
+            "litminer_get_run",
             "litminer_resume_run",
             "litminer_cancel_run",
-            "litminer_discover_api",
-            "litminer_semantic_triage",
-            "litminer_build_publisher_queue",
-            "litminer_processing_report",
-            "litminer_agent_summary",
-            "litminer_result_profile",
-            "litminer_search_audit_report",
-            "litminer_citation_expand",
-            "litminer_read_csv_summary",
+            "litminer_read_results",
+            "litminer_export",
         ]
         for name in expected:
             assert name in tool_names, f"Missing tool: {name}"
@@ -96,7 +89,7 @@ def main():
             }
         })
         # Dedupe will fail because input does not exist; that is expected.
-        has_error = "error" in resp
+        has_error = bool(resp.get("result", {}).get("isError"))
         print(f"  PASS: Tool handler executed (error={has_error}, this is expected)")
 
         # Test 4: Notification (no id) should get no response

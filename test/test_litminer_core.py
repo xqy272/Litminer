@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -781,7 +782,7 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(Path(result["output_dir"]), configured_run)
             self.assertEqual(result["run_status"], "completed")
             self.assertIn("next_actions", result)
-            self.assertIn("read_agent_summary_json", result["next_actions"])
+            self.assertIn("read_coverage_and_run_outcome_with_litminer_read_results", result["next_actions"])
             self.assertNotIn("use_as_verified_for_this_stage", result["next_actions"])
             self.assertTrue((configured_run / "processing_report.md").exists())
             self.assertTrue((configured_run / "run_manifest.json").exists())
@@ -882,6 +883,7 @@ class LitminerCoreTests(unittest.TestCase):
                 encoding="utf-8",
             )
             out_dir = tmp_path / "run"
+            state_path = tmp_path / "state.sqlite3"
 
             def make_args(input_csv: Path, *, merge_into: Path | None = None) -> argparse.Namespace:
                 return argparse.Namespace(
@@ -916,10 +918,13 @@ class LitminerCoreTests(unittest.TestCase):
                     allow_missing_doi=False,
                     screenshot_root=tmp_path / "screens",
                     probe_publishers=False,
+                    state_store=state_path,
+                    state_enabled=True,
                 )
 
-            run_lit_search.run(make_args(first_input))
-            run_lit_search.run(make_args(second_input, merge_into=out_dir))
+            with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(tmp_path)}):
+                first_result = run_lit_search.run(make_args(first_input))
+                second_result = run_lit_search.run(make_args(second_input, merge_into=out_dir))
 
             delta = json.loads((out_dir / "delta_profile.json").read_text(encoding="utf-8"))
             session = json.loads(
@@ -927,6 +932,13 @@ class LitminerCoreTests(unittest.TestCase):
             )
             with (out_dir / "triaged_candidates.csv").open(encoding="utf-8", newline="") as handle:
                 rows = list(csv.DictReader(handle))
+            db = sqlite3.connect(state_path)
+            try:
+                iterations = db.execute(
+                    "SELECT iteration_id, run_id FROM iterations ORDER BY iteration_id"
+                ).fetchall()
+            finally:
+                db.close()
 
         self.assertEqual(delta["iteration_id"], "iteration_002")
         self.assertEqual(delta["previous_rows"], 1)
@@ -934,6 +946,12 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(delta["new_rows"], 1)
         self.assertEqual(len(session["iterations"]), 2)
         self.assertTrue(session["iterations"][1]["merge_mode"])
+        self.assertNotEqual(first_result["run_id"], second_result["run_id"])
+        self.assertEqual([row[0] for row in iterations], ["iteration_001", "iteration_002"])
+        self.assertEqual(
+            {row[1] for row in iterations},
+            {first_result["run_id"], second_result["run_id"]},
+        )
         self.assertEqual({row["doi"] for row in rows}, {"10.1234/first", "10.1234/second"})
 
     def test_runtime_defaults_use_dot_litminer_workspace(self) -> None:
@@ -1216,11 +1234,13 @@ class LitminerCoreTests(unittest.TestCase):
             },
         })
 
-        self.assertIn("error", response)
-        self.assertIn("escapes Litminer workspace", response["error"]["message"])
-        self.assertIn("workspace_root=", response["error"]["message"])
-        self.assertIn("resolved_path=", response["error"]["message"])
-        self.assertNotIn("data", response["error"])
+        self.assertTrue(response["result"]["isError"])
+        error = response["result"]["structuredContent"]["error"]
+        self.assertEqual(error["class"], "workspace")
+        self.assertIn("escapes Litminer workspace", error["message"])
+        self.assertIn("workspace_root=", error["message"])
+        self.assertIn("resolved_path=", error["message"])
+        self.assertNotIn("debug_trace", response["result"]["structuredContent"])
 
     def test_mcp_rejects_unsupported_protocol_version(self) -> None:
         response = mcp_server.handle_request({
@@ -1270,13 +1290,13 @@ class LitminerCoreTests(unittest.TestCase):
             })
 
         names = {tool["name"] for tool in response["result"]["tools"]}
-        self.assertIn("litminer_run_lit_search", names)
-        self.assertIn("litminer_agent_summary", names)
-        self.assertIn("litminer_read_csv_summary", names)
-        self.assertIn("litminer_workspace_doctor", names)
-        self.assertIn("litminer_result_profile", names)
-        self.assertIn("litminer_search_audit_report", names)
-        self.assertIn("litminer_citation_expand", names)
+        self.assertEqual(names, {
+            "litminer_workspace_doctor", "litminer_capabilities", "litminer_plan_run",
+            "litminer_start_run", "litminer_get_run", "litminer_resume_run",
+            "litminer_cancel_run", "litminer_read_results", "litminer_export",
+        })
+        self.assertNotIn("litminer_run_lit_search", names)
+        self.assertNotIn("litminer_read_csv_summary", names)
         self.assertNotIn("litminer_batch_verify_crossref", names)
         self.assertNotIn("litminer_search_openalex", names)
 
@@ -2690,7 +2710,8 @@ class LitminerCoreTests(unittest.TestCase):
                     "mode": "fast",
                     "stop_after_stage": "dedupe",
                 })
-                self.assertIn("poll_litminer_run_status", start["next_actions"])
+                self.assertIn("poll_litminer_get_run", start["next_actions"])
+                self.assertTrue(start["run_id"])
                 for _ in range(50):
                     status = mcp_server.tool_run_status({"job_id": start["job_id"]})
                     if status["status"] in {"completed", "partial", "failed"}:
@@ -2698,7 +2719,7 @@ class LitminerCoreTests(unittest.TestCase):
                     time.sleep(0.05)
 
                 self.assertEqual(status["status"], "partial")
-                self.assertIn("read_agent_summary_json", status["next_actions"])
+                self.assertIn("read_canonical_or_triage_results_with_litminer_read_results", status["next_actions"])
                 self.assertIn("inspect_agent_summary_next_actions_before_resume", status["next_actions"])
                 self.assertNotIn("use_as_verified_for_this_stage", status["next_actions"])
                 self.assertTrue((root / "run" / "query_plan.json").exists())

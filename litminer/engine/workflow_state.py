@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,10 @@ def new_manifest(
     signature_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prior = existing or {}
-    run_id = prior.get("run_id") or datetime.now(timezone.utc).strftime("workflow_%Y%m%dT%H%M%SZ")
+    run_id = prior.get("run_id") or getattr(args, 'run_id', None) or (
+        datetime.now(timezone.utc).strftime("workflow_%Y%m%dT%H%M%S%fZ_")
+        + uuid.uuid4().hex[:8]
+    )
     mode = getattr(args, "mode", None) or "custom/default"
     started_at = prior.get("started_at") or prior.get("created_at") or utc_now()
     return {

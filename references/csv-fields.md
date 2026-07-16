@@ -36,12 +36,39 @@ them, and how an Agent should treat them.
 | `crossref_doi` | crossref | Verified | Prefer over discovery DOI when present. |
 | `crossref_title` | crossref | Verified | Bibliographic title from Crossref. |
 | `crossref_container` | crossref | Verified | Journal/container metadata. |
+| `crossref_authors` | crossref | Verified | Structured Crossref authors serialized as `Family, Given; ...`. |
+| `crossref_publisher` | crossref | Verified | Crossref publisher metadata. |
 | `crossref_year` | crossref | Verified | Crossref publication year. |
 | `crossref_type` | crossref | Verified | Article type metadata. |
+| `crossref_volume` | crossref | Verified | Volume used by canonical export when trusted. |
+| `crossref_issue` | crossref | Verified | Issue used by canonical export when trusted. |
+| `crossref_pages` | crossref | Verified | Page range used by canonical export when trusted. |
+| `crossref_abstract` | crossref | Verified | Crossref abstract when present; HTML tags are removed. |
 | `crossref_status` | crossref | Debug | `verified`, `title_recovered`, `mismatch`, `lookup_failed`, `skipped_budget`, provider errors, etc. |
 | `crossref_verified` | crossref | Debug | String boolean for trusted Crossref status. |
 | `crossref_mismatches` | crossref | Debug | Real metadata field mismatches only; operational failures belong in status/error fields. |
 | `crossref_error_code` | crossref | Debug | Machine-readable operational or lookup failure code. |
+
+## Canonical Bibliography Fields
+
+| Field | Stage | Trust | Notes |
+|-------|-------|-------|-------|
+| `paper_id` | canonicalize | Verified/Discovery | Stable DOI identity when available; otherwise a deterministic candidate hash. |
+| `entry_type` | canonicalize | Verified/Discovery | Normalized `article`, `conference`, `preprint`, `book`, `book_chapter`, or `generic`. |
+| `title` | canonicalize | Verified/Discovery | Selected by explicit source priority; see `field_provenance_json`. |
+| `authors` | canonicalize | Verified/Discovery | Canonical semicolon-separated authors. |
+| `publication_year` | canonicalize | Verified/Discovery | Canonical four-digit year when extractable. |
+| `journal` | canonicalize | Verified/Discovery | Canonical journal/container. |
+| `doi` | canonicalize | Verified/Discovery | Normalized DOI; Crossref wins only in a trusted verification state. |
+| `url` | canonicalize | Queue | DOI resolver when DOI exists, otherwise best permitted page pointer. |
+| `trusted_bibliography` | canonicalize | Debug | True only for trusted Crossref states. |
+| `retraction_status` | canonicalize | Debug | Retraction/update status preserved independently of relevance. |
+| `export_eligible` | canonicalize | Debug | Default RIS/BibTeX eligibility: trusted, titled, and not retracted. |
+| `field_provenance_json` | canonicalize | Debug | Source field, trust class, and selection reason for every canonical value. |
+
+Scientific fields such as `triage_priority` and `scientific_review_needed`
+remain separate projections; canonical bibliographic selection never upgrades
+scientific relevance.
 
 ## Verification Queue Fields
 
@@ -99,6 +126,9 @@ described as verified papers.
 | `status_class` | discovery | Debug | Normalized status class. |
 | `http_status` | discovery | Debug | HTTP status when available. |
 | `retry_after_seconds` | discovery | Debug | Wait hint for rate limits. |
+| `attempts` | provider runtime | Debug | Highest attempt number observed for the logical provider call. |
+| `request_count` | provider runtime | Debug | Actual HTTP attempt count for the logical call. |
+| `provider_wait_seconds` | provider runtime | Debug | Provider-wide scheduler delay before the call. |
 | `transient_error` | discovery | Debug | Whether retry may succeed later. |
 | `cache_status` | discovery | Debug | Provider-failure cache status. |
 | `next_action` | discovery | Debug | Agent-facing recovery hint. |

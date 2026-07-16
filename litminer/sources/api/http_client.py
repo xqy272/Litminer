@@ -33,13 +33,18 @@ existed before extraction):
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import http.client
 import json
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -49,6 +54,28 @@ from litminer.sources.api.errors import ProviderSearchError
 _NETWORK_ERROR_MARKERS = (
     "ssl", "certificate", "cert", "dns", "name resolution", "network",
 )
+
+_REQUEST_OBSERVER = contextvars.ContextVar('litminer_http_request_observer', default=None)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+@contextmanager
+def observe_requests(observer):
+    '''Temporarily receive one structured event per actual HTTP attempt.'''
+    token = _REQUEST_OBSERVER.set(observer)
+    try:
+        yield
+    finally:
+        _REQUEST_OBSERVER.reset(token)
+
+
+def _emit_request_event(event: dict[str, Any]) -> None:
+    observer = _REQUEST_OBSERVER.get()
+    if callable(observer):
+        observer(event)
 
 
 @dataclass(frozen=True)
@@ -125,25 +152,63 @@ def _do_fetch(
     max_attempts = retry.max_retries
     rate_limit_max = retry.rate_limit_retries if retry.rate_limit_retries is not None else max_attempts
     last_error: Exception | None = None
+    attempts_made = 0
     req_headers = {"User-Agent": retry.user_agent}
     if headers:
         req_headers.update(headers)
 
     for attempt in range(max(max_attempts, rate_limit_max)):
+        attempts_made = attempt + 1
+        request_id = uuid.uuid4().hex
+        started_at = _utc_now()
+        started_monotonic = time.monotonic()
+        url_hash = hashlib.sha256(url.encode('utf-8')).hexdigest()
         try:
             req = urllib.request.Request(url, headers=req_headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
                 if parse:
-                    return json.loads(raw.decode("utf-8"))
-                return raw
+                    result = json.loads(raw.decode('utf-8'))
+                else:
+                    result = raw
+                _emit_request_event({
+                    'request_id': request_id,
+                    'attempt': attempt + 1,
+                    'started_at': started_at,
+                    'ended_at': _utc_now(),
+                    'latency_ms': (time.monotonic() - started_monotonic) * 1000.0,
+                    'http_status': getattr(resp, 'status', 200),
+                    'status_class': 'ok',
+                    'response_bytes': len(raw),
+                    'url_hash': url_hash,
+                })
+                return result
         except urllib.error.HTTPError as exc:
+            wait = retry_after_seconds(exc, attempt, retry) if exc.code == 429 or 500 <= exc.code < 600 else 0.0
+            _emit_request_event({
+                'request_id': request_id,
+                'attempt': attempt + 1,
+                'started_at': started_at,
+                'ended_at': _utc_now(),
+                'latency_ms': (time.monotonic() - started_monotonic) * 1000.0,
+                'http_status': exc.code,
+                'status_class': (
+                    'rate_limited' if exc.code == 429 else
+                    'auth' if exc.code in {401, 403} else
+                    'provider_response'
+                ),
+                'retry_after_seconds': wait or None,
+                'error_code': f'http_{exc.code}',
+                'url_hash': url_hash,
+            })
             if exc.code in raise_on_status:
                 raise ProviderSearchError(
                     f"HTTP {exc.code}: {exc.reason}",
                     status="auth_error" if exc.code in {401, 403} else f"http_{exc.code}",
                     http_status=exc.code,
                     transient=False,
+                    attempts=attempt + 1,
+                    request_count=attempt + 1,
                 ) from exc
             last_error = exc
             is_rate_limited = exc.code == 429
@@ -167,6 +232,23 @@ def _do_fetch(
             break
         except (urllib.error.URLError, json.JSONDecodeError, ET.ParseError,
                 OSError, http.client.IncompleteRead) as exc:
+            event_status = status_for_exception(exc)
+            event_class = (
+                'tls' if any(marker in str(exc).lower() for marker in ('ssl', 'certificate', 'tls')) else
+                'network' if event_status == 'network_error' else
+                'provider_response' if event_status == 'response_parse_error' else
+                'network'
+            )
+            _emit_request_event({
+                'request_id': request_id,
+                'attempt': attempt + 1,
+                'started_at': started_at,
+                'ended_at': _utc_now(),
+                'latency_ms': (time.monotonic() - started_monotonic) * 1000.0,
+                'status_class': event_class,
+                'error_code': event_status,
+                'url_hash': url_hash,
+            })
             last_error = exc
             if attempt < max_attempts - 1:
                 wait = max(retry.backoff_floor, retry.backoff_base ** attempt)
@@ -183,6 +265,8 @@ def _do_fetch(
             retry_after_seconds=retry_after_seconds(last_error, max(rate_limit_max - 1, 0), retry),
             http_status=429,
             transient=True,
+            attempts=attempts_made,
+            request_count=attempts_made,
         ) from last_error
 
     status = status_for_exception(last_error)
@@ -191,6 +275,8 @@ def _do_fetch(
         status=status,
         http_status=last_error.code if isinstance(last_error, urllib.error.HTTPError) else None,
         transient=_is_transient(status),
+        attempts=attempts_made,
+        request_count=attempts_made,
     ) from last_error
 
 

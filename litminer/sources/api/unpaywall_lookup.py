@@ -20,6 +20,8 @@ from litminer.engine import cache as cache_helpers
 from litminer.engine.common import normalize_doi, read_csv_rows, utc_now, write_csv_atomic
 from litminer.sources.api.errors import ProviderSearchError
 from litminer.sources.api.http_client import RetryPolicy, fetch_json
+from litminer.contracts.errors import ProviderCooldownError
+from litminer.runtime.provider_runtime import ProviderRuntime
 
 
 UNPAYWALL_BASE = "https://api.unpaywall.org/v2"
@@ -67,15 +69,29 @@ def resolve_email(email: str | None = None) -> str:
 
 
 class UnpaywallRateLimitError(RuntimeError):
-    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+    def __init__(self, message: str, retry_after_seconds: float | None = None,
+                 attempts: int | None = None, request_count: int | None = None) -> None:
         super().__init__(message)
+        self.status = "rate_limited"
+        self.provider = "unpaywall"
+        self.http_status = 429
+        self.transient = True
         self.retry_after_seconds = retry_after_seconds
+        self.attempts = attempts
+        self.request_count = request_count
 
 
 class UnpaywallRequestError(RuntimeError):
-    def __init__(self, message: str, status: str = "error") -> None:
+    def __init__(self, message: str, status: str = "error", *,
+                 http_status: int | None = None, transient: bool | None = None,
+                 attempts: int | None = None, request_count: int | None = None) -> None:
         super().__init__(message)
+        self.provider = "unpaywall"
         self.status = status
+        self.http_status = http_status
+        self.transient = transient
+        self.attempts = attempts
+        self.request_count = request_count
 
 
 def _request_json(url: str) -> dict[str, Any]:
@@ -100,10 +116,14 @@ def _request_json(url: str) -> dict[str, Any]:
             raise UnpaywallRateLimitError(
                 f"Unpaywall rate limit persisted after {MAX_RETRIES} attempts",
                 retry_after_seconds=exc.retry_after_seconds,
+                attempts=exc.attempts,
+                request_count=exc.request_count,
             ) from exc
         raise UnpaywallRequestError(
             f"Unpaywall request failed after {MAX_RETRIES} attempts: {exc}",
-            status=exc.status or "error",
+            status=exc.status or "error", http_status=exc.http_status,
+            transient=exc.transient, attempts=exc.attempts,
+            request_count=exc.request_count,
         ) from exc
 
 
@@ -179,10 +199,28 @@ def flatten_response(result: dict[str, Any], checked_at: str | None = None) -> d
 
 
 def annotate_row(row: dict[str, str], email: str | None = None,
-                 checked_at: str | None = None) -> dict[str, str]:
+                 checked_at: str | None = None,
+                 provider_runtime: ProviderRuntime | None = None) -> dict[str, str]:
     out = dict(row)
     doi = normalize_doi(row.get("crossref_doi") or row.get("doi") or "")
-    out.update(flatten_response(lookup_doi(doi, email=email), checked_at=checked_at))
+    if provider_runtime is not None and doi and resolve_email(email):
+        try:
+            result = provider_runtime.execute(
+                "unpaywall",
+                "doi_lookup",
+                doi,
+                lambda: lookup_doi(doi, email=email),
+            )
+        except ProviderCooldownError as exc:
+            result = {
+                "status": "rate_limited",
+                "error": exc.envelope.message,
+                "retry_after_seconds": exc.envelope.retry_after_seconds,
+                "data": None,
+            }
+    else:
+        result = lookup_doi(doi, email=email)
+    out.update(flatten_response(result, checked_at=checked_at))
     return out
 
 
@@ -247,7 +285,8 @@ def annotate_csv(input_path: Path, output_path: Path,
                  max_rows: int | None = None,
                  cache_dir: Path | None = None,
                  cache_ttl_days: float | None = None,
-                 cache_enabled: bool = True) -> dict[str, int]:
+                 cache_enabled: bool = True,
+                 provider_runtime: ProviderRuntime | None = None) -> dict[str, int]:
     fieldnames, rows = read_csv_rows(input_path)
     if not fieldnames:
         raise SystemExit("Input CSV has no header")
@@ -309,7 +348,12 @@ def annotate_csv(input_path: Path, output_path: Path,
             else:
                 if cache_obj is not None and cache_key:
                     counts["cache_miss"] = counts.get("cache_miss", 0) + 1
-                annotated = annotate_row(row, email=email, checked_at=checked_at)
+                annotated = annotate_row(
+                    row,
+                    email=email,
+                    checked_at=checked_at,
+                    provider_runtime=provider_runtime,
+                )
                 annotated["unpaywall_cache_status"] = "miss" if cache_obj is not None and cache_key else "disabled"
                 annotated["unpaywall_cache_key"] = cache_key if cache_obj is not None else ""
                 cache_value = {col: annotated.get(col, "") for col in OUTPUT_COLUMNS}

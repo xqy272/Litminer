@@ -15,6 +15,8 @@ class ProviderSearchError(RuntimeError):
         retry_after_seconds: float | None = None,
         http_status: int | None = None,
         transient: bool | None = None,
+        attempts: int | None = None,
+        request_count: int | None = None,
     ) -> None:
         super().__init__(message)
         self.partial_results = partial_results or []
@@ -22,3 +24,5 @@ class ProviderSearchError(RuntimeError):
         self.retry_after_seconds = retry_after_seconds
         self.http_status = http_status
         self.transient = transient
+        self.attempts = attempts
+        self.request_count = request_count

@@ -67,6 +67,10 @@ EXPECTED_CONFIG: dict[str, dict[str, tuple[type, ...]]] = {
         "ttl_days": (int, float),
         "provider_failure_ttl_seconds": (int, float),
     },
+    "state": {
+        "enabled": (bool,),
+        "state_store": (str,),
+    },
     "evidence": {
         "require_doi_for_queue": (bool,),
         "queue_priorities": (str,),

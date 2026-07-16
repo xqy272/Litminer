@@ -139,7 +139,11 @@ def build_audit_report(
     summary = _read_json(output_dir / "agent_summary.json")
     profile = _read_json(output_dir / "result_profile.json")
     manifest = _read_json(output_dir / "run_manifest.json")
+    coverage = _read_json(output_dir / "coverage_report.json")
+    outcome = _read_json(output_dir / "run_outcome.json")
+    export_manifest = _read_json(output_dir / "export_manifest.json")
     trace_rows = _read_csv(output_dir / "api_discovery_trace.csv")
+    canonical_rows = _read_csv(output_dir / "canonical_papers.csv")
 
     lines: list[str] = [
         "# Search Audit Report",
@@ -190,6 +194,30 @@ def build_audit_report(
     lines.append("")
     lines.extend(_format_source_health(trace_rows))
 
+    if coverage:
+        lines.extend([
+            "## Coverage Quality",
+            "",
+            f"- Run status: {outcome.get('status') or manifest.get('run_status') or 'unknown'}",
+            f"- Retrieval quality: {coverage.get('quality', 'inconclusive')}",
+            f"- Reason: {coverage.get('quality_reason', '')}",
+            f"- Candidate count: {coverage.get('candidate_count', 0)}",
+            "",
+            "This quality label describes execution of configured providers. "
+            "It is not an estimate of field-level recall or scientific completeness.",
+            "",
+        ])
+        ledger = coverage.get("request_ledger") if isinstance(coverage.get("request_ledger"), dict) else {}
+        if ledger:
+            lines.extend([
+                "### Provider Request Ledger",
+                "",
+                f"- Attempts and scheduler skips: {ledger.get('requests', 0)}",
+                f"- Retries: {ledger.get('retries', 0)}",
+                f"- Provider wait seconds: {ledger.get('wait_seconds', 0)}",
+                "",
+            ])
+
     # Exclusions / stage status
     lines.append("## Stage Status and Exclusions")
     lines.append("")
@@ -200,6 +228,31 @@ def build_audit_report(
     if trust:
         lines.append("## Trust Tiers")
         lines.append("")
+
+    if canonical_rows:
+        trusted = sum(1 for row in canonical_rows if (row.get("trusted_bibliography") or "").lower() == "true")
+        eligible = sum(1 for row in canonical_rows if (row.get("export_eligible") or "").lower() == "true")
+        lines.extend([
+            "## Canonical Bibliography And Provenance",
+            "",
+            f"- Canonical papers: {len(canonical_rows)}",
+            f"- Trusted bibliography: {trusted}",
+            f"- Default export eligible: {eligible}",
+            "- `canonical_provenance.json` records the selected source and reason for every canonical field.",
+            "",
+        ])
+
+    if export_manifest:
+        lines.extend([
+            "## Export Audit",
+            "",
+            f"- Formats: {', '.join(export_manifest.get('formats') or [])}",
+            f"- Exported rows: {export_manifest.get('exported_rows', 0)}",
+            f"- Excluded rows: {export_manifest.get('excluded_rows', 0)}",
+            f"- Unverified rows explicitly exported: {export_manifest.get('unverified_exported', 0)}",
+            f"- Exclusion reasons: {json.dumps(export_manifest.get('excluded_reasons') or {}, ensure_ascii=False, sort_keys=True)}",
+            "",
+        ])
         lines.append(f"- Discovered/deduped: {trust.get('discovered_or_deduped', 0)}")
         lines.append(f"- Crossref-verified: {trust.get('crossref_trusted', 0)}")
         lines.append(f"- Metric-pass: {trust.get('metric_pass', 0)}")

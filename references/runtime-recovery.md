@@ -43,6 +43,30 @@ python -m litminer.engine.doctor --workspace WORKSPACE_ROOT --explain-path SOME_
 
 or call `litminer_workspace_doctor` through MCP.
 
+## SQLite Runtime State
+
+By default Litminer keeps internal recovery state at
+`.litminer/state/litminer.sqlite3`. This database stores research
+session/iteration state, stage records, provider health and cooldowns, one row
+per HTTP attempt, source observations, canonical field provenance, artifact
+snapshots, background jobs, and final outcomes.
+
+The SQLite database is internal state, not the deliverable. CSV, JSON,
+Markdown, RIS, and BibTeX artifacts remain portable snapshots and can be read
+without SQLite. Disable state only when necessary with `--no-state-store`; doing
+so removes cross-process cooldown and job-recovery continuity.
+
+Use a custom workspace-local database with `--state-store PATH` or
+`LITMINER_STATE_STORE`. Export a portable diagnostic snapshot with:
+
+```bash
+python -m litminer.runtime.state_store --state-store .litminer/state/litminer.sqlite3 --output state_snapshot.json
+```
+
+The database uses migrations, foreign keys, WAL mode, transaction rollback,
+and short-lived connections so interrupted Windows processes do not leave
+normal operations permanently locked.
+
 ## Resume Rules
 
 Use `--resume` with the same `--output-dir` after a timeout or interruption.
@@ -55,6 +79,12 @@ manual review, and always provide `--resume-mismatch-reason`.
 
 Crossref and Unpaywall stages checkpoint periodically. Resuming should reuse
 already annotated rows instead of starting at the first DOI again.
+
+MCP background jobs are double-written to `.litminer/jobs/*.json` and SQLite.
+`litminer_start_run` returns both `job_id` and persistent `run_id`.
+`litminer_get_run` can recover by `job_id`, `run_id`, or `output_dir`. A
+queued/running job loaded after its worker process disappeared is reported as
+`interrupted`, never as a still-running ghost job.
 
 If the request, queries, concepts, sources, or mode changed, do not force a
 resume-signature mismatch. Use `--merge-into EXISTING_OUTPUT_DIR` instead. It
@@ -108,6 +138,18 @@ Use `--provider-failure-threshold N` to stop repeatedly calling a provider that
 fails during the same run. Use `--provider-rate-limit-cooldown-seconds N` to
 avoid immediate repeat calls after a 429 when no provider `Retry-After` is
 available.
+
+Provider cooldown is provider-wide and persisted. Crossref, Unpaywall,
+discovery providers, Semantic Scholar citation expansion, live preflight, and
+advanced MCP wrappers all use the same scheduler and request ledger. A later
+run or restarted MCP process checks `not_before` before issuing another request.
+Scheduler skips are recorded with attempt `0`, while actual HTTP attempts are
+recorded individually with hashed query/URL identifiers rather than sensitive
+raw URLs or API keys.
+
+Read `coverage_report.json.request_ledger` for aggregate attempts, retries,
+wait time, and provider/status counts. Use `processing_report.md` or
+`search_audit_report.md` for the human-readable view.
 
 ## Cache Boundary
 

@@ -6,6 +6,7 @@ import csv
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Literal
@@ -92,7 +93,14 @@ def _atomic_replace(path: Path, writer) -> None:
     tmp_path = Path(tmp_name)
     try:
         writer(tmp_path)
-        os.replace(tmp_path, path)
+        for attempt in range(6):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt >= 5:
+                    raise
+                time.sleep(0.01 * (2 ** attempt))
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -103,6 +111,15 @@ def write_text_atomic(path: Path, text: str) -> None:
 
     def _write(tmp_path: Path) -> None:
         tmp_path.write_text(text, encoding="utf-8")
+
+    _atomic_replace(path, _write)
+
+
+def write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Write bytes atomically without platform newline translation."""
+
+    def _write(tmp_path: Path) -> None:
+        tmp_path.write_bytes(payload)
 
     _atomic_replace(path, _write)
 

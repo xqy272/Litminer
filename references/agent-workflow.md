@@ -156,8 +156,10 @@ Agent artifacts, formatted for human reproducibility.
 Read `artifacts_index.json` when selecting the next local file. It is the
 canonical inventory of primary, supporting, and debug artifacts.
 
-Only then open large CSVs. In MCP mode, prefer `litminer_read_csv_summary` for
-pagination and status-count previews.
+Only then open large CSVs. In default MCP mode, prefer
+`litminer_read_results` for paginated canonical/triage rows and bounded
+coverage/outcome/report reads. `litminer_read_csv_summary` remains an
+advanced-profile compatibility tool.
 
 ## Delivery To Users
 

@@ -40,24 +40,19 @@ Listed by default:
 | Tool | Purpose |
 |------|---------|
 | `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
-| `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
-| `litminer_run_lit_search` | Run the full workflow synchronously. |
-| `litminer_start_run` | Start the full workflow as a background job and return `next_actions`. |
-| `litminer_run_status` | Poll background job state, `next_actions`, and summaries when present. |
+| `litminer_capabilities` | Read provider capability, credential/contact readiness, persisted health, and optional live preflight. |
+| `litminer_plan_run` | Validate and normalize the shared `RunSpec` without network calls or research writes. |
+| `litminer_start_run` | Start the full workflow as a background job and immediately return both `job_id` and persistent `run_id`. |
+| `litminer_get_run` | Read live/persistent status, quality, coverage, artifacts, and `next_actions` by job, run, or output directory. |
 | `litminer_resume_run` | Start a background run with resume enabled. |
 | `litminer_cancel_run` | Request cooperative job cancellation. |
-| `litminer_discover_api` | Run multi-query API discovery with trace/report outputs. |
-| `litminer_semantic_triage` | Tag and rank rows with caller-supplied concepts. |
-| `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
-| `litminer_processing_report` | Generate a compact human-readable run report. |
-| `litminer_agent_summary` | Generate machine-readable run status and next actions. |
-| `litminer_result_profile` | Generate stratified descriptive statistics with completeness caveats. |
-| `litminer_search_audit_report` | Generate a human-readable audit report for research reproducibility. |
-| `litminer_citation_expand` | Expand citations from triaged candidates via Semantic Scholar citation/reference graph. |
-| `litminer_read_csv_summary` | Read paginated CSV summaries instead of loading large files. |
+| `litminer_read_results` | Read paginated canonical/triage/queue rows or bounded JSON/Markdown artifacts. |
+| `litminer_export` | Export canonical bibliography to RIS/BibTeX with `export_manifest.json`. |
 
-Prefer `litminer_start_run` plus `litminer_run_status` for long retrieval.
-Use `litminer_run_lit_search` only when synchronous execution is acceptable.
+Prefer `litminer_start_run` plus `litminer_get_run` for retrieval. The
+synchronous `litminer_run_lit_search`, legacy `litminer_run_status`, bootstrap,
+stage tools, and direct provider tools remain available in `all` for
+compatibility and debugging.
 Follow returned `next_actions` before retrying, broadening sources, or loading
 large CSV files.
 
@@ -75,6 +70,27 @@ Advertised only with `LITMINER_MCP_TOOL_PROFILE=all`:
   `litminer_probe_publishers`, `litminer_import_websearch`
 - governance/debug tools: `litminer_validate_journal_metrics`,
   `litminer_field_provenance`, `litminer_publisher_adapters`
+- compatibility workflow tools: `litminer_run_lit_search`,
+  `litminer_run_status`, `litminer_bootstrap`, `litminer_agent_summary`,
+  `litminer_read_csv_summary`, and individual stage helpers
+
+Provider search wrappers return `page`, `page_size`, `total_found`, `has_more`,
+and `truncated`. They no longer silently discard everything after the first 20
+rows.
+
+## Shared Contract And Errors
+
+`litminer_start_run`, `litminer_resume_run`, `litminer_plan_run`, and the CLI
+use the same `RunSpec` definitions. Discovery input (`queries`/`query_file`) and
+import input (`input_csv`) are mutually exclusive. JSON Schema validation runs
+before a handler executes.
+
+Tool failures are MCP tool results with `isError=true` and a structured
+`ErrorEnvelope` under `structuredContent.error`. Stable fields include
+`class`, `code`, `message`, `provider`, `http_status`, `transient`,
+`retry_after_seconds`, `attempts`, and `next_actions`. JSON-RPC errors are
+reserved for protocol/method failures. Tracebacks are omitted unless
+`LITMINER_MCP_DEBUG_ERRORS` is explicitly enabled.
 
 ## Workspace Configuration
 
@@ -113,7 +129,7 @@ virtualenv Python if the default `python` command is unreliable.
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "litminer_run_lit_search",
+    "name": "litminer_start_run",
     "arguments": {
       "queries": ["machine learning enzyme stability external validation"],
       "mode": "fast",
@@ -126,6 +142,8 @@ virtualenv Python if the default `python` command is unreliable.
 }
 ```
 
-After a timeout, call `litminer_resume_run` with the same `output_dir` if the
-request has not changed. Inspect `agent_summary.json`, `processing_report.md`,
-and `api_discovery_trace.csv` before changing sources or rerunning broadly.
+Poll `litminer_get_run` with the returned `job_id` or `run_id`. After an
+interruption, call `litminer_resume_run` with the same input family,
+`output_dir`, and run signature only if the request has not changed. Use
+`litminer_read_results` for canonical rows, coverage, outcome, and reports
+before changing sources or rerunning broadly.

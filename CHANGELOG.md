@@ -8,6 +8,27 @@ when you want a stable version.
 
 ### Added
 
+- Added a typed Contract Layer with shared `RunSpec`, `RunOutcome`, JSON-Schema
+  validation, stable `ErrorEnvelope` classes, and generated MCP descriptions.
+- Added workspace-local SQLite runtime state for sessions, iterations, stages,
+  provider health/cooldown, one-row-per-attempt request ledger, source
+  observations, canonical papers/provenance, artifacts, jobs, and outcomes,
+  including migration rollback and portable state export.
+- Added a provider-wide scheduler/runtime used by discovery, Crossref,
+  Unpaywall, Semantic Scholar citation expansion, live preflight, and advanced
+  MCP wrappers. Cooldowns survive later runs and MCP restarts.
+- Added `coverage_report.json` with independent `healthy`, `degraded`, and
+  `inconclusive` retrieval quality plus verification and request-ledger data.
+- Added `canonical_papers.csv` and `canonical_provenance.json`, keeping raw
+  source observations separate from canonical bibliography and scientific
+  annotations.
+- Added audited RIS and BibTeX export, stable collision handling,
+  Unicode/ASCII-LaTeX modes, default trust/retraction exclusions, and
+  `export_manifest.json`.
+- Added `litminer-export`, `litminer-state-export`, and deterministic
+  next-architecture acceptance entry points plus Agent scenarios for degraded
+  coverage, all-provider failure, persisted cooldown, invalid MCP input, and
+  export exclusion.
 - Added a two-pass `dedupe -> pretriage -> verification_queue -> Crossref ->
   final triage` workflow so limited verification budgets are spent on the most
   relevant DOI-bearing rows first, including after citation expansion.
@@ -35,6 +56,17 @@ when you want a stable version.
 
 ### Changed
 
+- Reduced the default MCP surface to nine high-level tools: doctor,
+  capabilities, plan, start, get, resume, cancel, read results, and export.
+  Synchronous full-run, low-level provider, legacy status/summary, and stage
+  tools remain in the advanced profile.
+- MCP schemas now come directly from the Contract Layer, express mutually
+  exclusive input modes and ranges, validate before execution, and expose
+  explicit provider/result pagination.
+- MCP tool failures now return `isError=true` with structured error data;
+  JSON-RPC errors are reserved for protocol/method failures.
+- Processing and search-audit reports now include run quality, coverage,
+  request-ledger, canonical provenance, and bibliography export sections.
 - Crossref-verified `result_profile` statistics now use Crossref DOI, year,
   container, and article type as canonical fields.
 - When Crossref is enabled, the publisher evidence queue now defaults to
@@ -52,6 +84,19 @@ when you want a stable version.
 
 ### Fixed
 
+- Closed SQLite initialization connections explicitly on Windows, made
+  migration application transactional, and prevented callback/thread objects
+  from entering serialized `RunSpec` output.
+- Made MCP background jobs preallocate a persistent `run_id`, double-write job
+  state to JSON/SQLite, classify background `SystemExit`, and report abandoned
+  queued/running jobs as `interrupted` after worker loss.
+- Made `litminer_get_run` prefer SQLite state for active/new runs, avoid reading
+  artifacts while a background writer is active, and retry short-lived Windows
+  atomic-replace locks instead of failing the run.
+- Rejected export prefixes containing path/alternate-stream or reserved
+  filename characters at both MCP schema and exporter boundaries.
+- Made BibTeX keys deterministic and unique even when malformed canonical input
+  repeats a `paper_id`.
 - Reserved `crossref_mismatches` for real metadata disagreements and moved row
   budgets, provider failures, and lookup failures to status/error fields.
 - Made Crossref row budgets count unresolved work rather than reusable verified

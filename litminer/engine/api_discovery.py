@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -27,6 +28,9 @@ from litminer.sources.api import semantic_scholar_search
 from litminer.engine import cache as cache_helpers
 from litminer.engine import status_policy
 from litminer.engine.common import utc_now, write_csv_atomic, write_text_atomic
+from litminer.contracts.errors import ProviderCooldownError
+from litminer.runtime.provider_runtime import ProviderRuntime
+from litminer.runtime.state_store import StateStore, default_state_store_path
 
 
 DEFAULT_OUTPUT_FIELDS = [
@@ -82,6 +86,9 @@ TRACE_FIELDS = [
     "error",
     "started_at",
     "ended_at",
+    "request_count",
+    "attempts",
+    "provider_wait_seconds",
 ]
 
 def provider_capability_rows(names: list[str] | None = None) -> list[dict[str, str]]:
@@ -89,7 +96,7 @@ def provider_capability_rows(names: list[str] | None = None) -> list[dict[str, s
 
 
 def make_run_id() -> str:
-    return datetime.now(timezone.utc).strftime("litminer_%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("litminer_%Y%m%dT%H%M%S%fZ_") + uuid.uuid4().hex[:8]
 
 
 def load_queries(query: list[str] | None = None,
@@ -243,6 +250,59 @@ def _run_provider_call(
     }
 
 
+def _run_provider_runtime_call(
+    runtime: ProviderRuntime,
+    provider: str,
+    query_id: str,
+    query: str,
+    year_from: int | None,
+    year_to: int | None,
+    provider_max: int,
+    openalex_api_key: str | None,
+    openalex_mailto: str | None,
+    openalex_work_types: str | list[str] | None,
+) -> dict[str, Any]:
+    try:
+        return runtime.execute(
+            provider,
+            'discovery_search',
+            query,
+            lambda: _run_provider_call(
+                provider,
+                query_id,
+                query,
+                year_from,
+                year_to,
+                provider_max,
+                openalex_api_key,
+                openalex_mailto,
+                openalex_work_types,
+            ),
+        )
+    except ProviderCooldownError as exc:
+        now = utc_now()
+        envelope = exc.envelope
+        return {
+            'provider': provider,
+            'provider_max': provider_max,
+            'rows': [],
+            'status': 'skipped_persisted_provider_cooldown',
+            'status_class': 'rate_limited',
+            'http_status': '',
+            'transient_error': 'true',
+            'retry_after_seconds': str(envelope.retry_after_seconds or ''),
+            'next_action': 'resume_after_retry_after_or_continue_with_healthy_sources',
+            'cache_status': 'persistent_health',
+            'cache_key': provider,
+            'error': envelope.message,
+            'started_at': now,
+            'ended_at': now,
+            'request_count': 0,
+            'attempts': 0,
+            'provider_wait_seconds': 0,
+        }
+
+
 def _skipped_provider_call(provider: str, provider_max: int, failure_count: int) -> dict[str, Any]:
     now = utc_now()
     return {
@@ -393,10 +453,22 @@ def discover_api(queries: list[str],
                   provider_failure_cache_ttl_seconds: float | None = None,
                   trace_csv: Path | None = None,
                   report_md: Path | None = None,
-                  run_id: str | None = None) -> dict[str, object]:
+                  run_id: str | None = None,
+                  iteration_id: str = '',
+                  state_store_path: Path | None = None,
+                  state_enabled: bool = False) -> dict[str, object]:
     providers = parse_sources(sources)
     run_id = run_id or make_run_id()
     retrieved_at = utc_now()
+    state_store = StateStore(
+        state_store_path or default_state_store_path(),
+        enabled=state_enabled,
+    )
+    provider_runtime = ProviderRuntime(
+        state_store,
+        run_id=run_id,
+        iteration_id=iteration_id,
+    )
     rate_limit_cooldown_default = (
         60.0
         if provider_rate_limit_cooldown_seconds is None
@@ -466,7 +538,8 @@ def discover_api(queries: list[str],
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = [
                     executor.submit(
-                        _run_provider_call,
+                        _run_provider_runtime_call,
+                        provider_runtime,
                         provider,
                         query_id,
                         query,
@@ -483,7 +556,8 @@ def discover_api(queries: list[str],
                     provider_results[idx] = future.result()
         else:
             for idx, provider, provider_max in runnable_plan:
-                provider_results[idx] = _run_provider_call(
+                provider_results[idx] = _run_provider_runtime_call(
+                    provider_runtime,
                     provider,
                     query_id,
                     query,
@@ -538,6 +612,9 @@ def discover_api(queries: list[str],
                 "error": str(provider_result["error"]),
                 "started_at": str(provider_result["started_at"]),
                 "ended_at": str(provider_result["ended_at"]),
+                "request_count": str(provider_result.get("request_count", 0)),
+                "attempts": str(provider_result.get("attempts", 0)),
+                "provider_wait_seconds": str(provider_result.get("provider_wait_seconds", 0)),
             }
             if failure_cache is not None and _is_cacheable_provider_failure(provider_result):
                 cache_key = _provider_failure_cache_key(
@@ -597,6 +674,8 @@ def discover_api(queries: list[str],
         "provider_status_classes": dict(Counter(trace["status_class"] for trace in traces)),
         "provider_failures": provider_failures,
         "provider_failure_cache": failure_cache.stats() if failure_cache is not None else {"enabled": False},
+        "provider_request_ledger": state_store.request_summary(run_id),
+        "state_store": str(state_store.path) if state_store.enabled else "",
         "output_csv": str(output_csv),
         "trace_csv": str(trace_csv) if trace_csv else "",
         "report_md": str(report_md) if report_md else "",

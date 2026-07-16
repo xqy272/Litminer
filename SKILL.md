@@ -190,15 +190,17 @@ the change must be deliberate, not incidental.
    - `balanced`: normal discovery plus Crossref/Unpaywall verification.
    - `expanded` / `full`: deeper recall with Semantic Scholar and higher
      rate-limit risk.
-4. Prefer the full runner over assembling stages manually.
+4. Prefer the full runner or high-level MCP tools over assembling stages manually.
 5. After timeout or interruption, resume with the same `--output-dir` only when
    the run signature and user intent are unchanged.
 6. When queries, concepts, sources, or the user request change, start a new
    iteration with `--merge-into`; do not bypass resume-signature protection.
-7. Read `agent_summary.json` and `processing_report.md` before scanning large
-   CSVs.
-8. Deliver counts, trust tiers, capability states, artifact paths, known gaps,
-   iteration deltas, and next actions.
+7. Read `run_outcome.json`, `coverage_report.json`, and `agent_summary.json`
+   before scanning large CSVs. Use `canonical_papers.csv` for bibliographic
+   delivery and `triaged_candidates.csv` for scientific review.
+8. Deliver execution status and retrieval quality separately, plus counts,
+   trust tiers, capability states, artifact paths, known gaps, iteration deltas,
+   export exclusions, and next actions.
 
 ## Minimal Commands
 
@@ -324,48 +326,59 @@ advanced arXiv field syntax is preserved unchanged.
 
 Read outputs in this order:
 
-1. `agent_summary.json`: machine-readable run status, trust tiers, provider
+1. `run_outcome.json`: stable execution status, independent retrieval quality,
+   artifacts, coverage, warnings, and next actions.
+2. `coverage_report.json`: provider/query/verification coverage and aggregate
+   request ledger. `healthy`, `degraded`, and `inconclusive` are infrastructure
+   quality labels, never field-level recall estimates.
+3. `agent_summary.json`: machine-readable run status, trust tiers, provider
    health, artifact read order, embedded `result_profile` summary, and next
    actions.
-2. `result_profile.json`: stratified descriptive statistics (all rows +
+4. `canonical_papers.csv` and `canonical_provenance.json`: canonical
+   bibliography plus direct source/trust/reason for every selected field.
+5. `result_profile.json`: stratified descriptive statistics (all rows +
    Crossref-verified) with `completeness_caveats` reporting search-process
    failures. Crossref-trusted rows use Crossref DOI/year/container/type as the
    canonical bibliographic fields. Degraded to `failure_summary` on 0-result
    runs.
-3. `research_session_manifest.json` and `delta_profile.json`: iteration lineage
+6. `research_session_manifest.json` and `delta_profile.json`: iteration lineage
    and the current iteration's mechanical additions. Use them when
    `--merge-into` was used.
-4. `concept_diagnostics.json`: mechanical concept match rates and low-
+7. `concept_diagnostics.json`: mechanical concept match rates and low-
    selectivity/zero-match warnings. It does not recommend scientific criteria.
-5. `processing_report.md`: compact human-readable counts, status classes,
+8. `processing_report.md`: compact human-readable counts, status classes,
    metadata health, cache/recovery notes, queue summary, and appended
    result profile section.
-6. `search_audit_report.md`: human-readable audit report for research
+9. `search_audit_report.md`: human-readable audit report for research
    reproducibility — same information as Agent artifacts, formatted for
    a researcher to explain "how did you find these papers?".
-7. `artifacts_index.json`: canonical artifact inventory grouped by primary,
+10. `artifacts_index.json`: canonical artifact inventory grouped by primary,
    supporting, and debug roles.
-8. `query_plan.json`: runtime queries, concepts, sources, budgets, session
+11. `run_spec.json` and `query_plan.json`: typed execution contract plus runtime
+    queries, concepts, sources, budgets, session
    iteration id, merge target, and advisory source strategy.
-9. `run_manifest.json`: stage status, fingerprints, resume signature, cache
+12. `run_manifest.json`: stage status, fingerprints, resume signature, cache
    config, and reused/skipped stages.
-10. `verification_queue.csv`: relevance- and DOI-aware ordering used before
+13. `verification_queue.csv`: relevance- and DOI-aware ordering used before
     Crossref consumes row budget.
-11. `triaged_candidates.csv`: semantic review surface with orthogonal
+14. `triaged_candidates.csv`: semantic review surface with orthogonal
     scientific, bibliographic, and workflow states.
-12. `publisher_queue.csv`: article-page inspection queue. When Crossref ran,
+15. `publisher_queue.csv`: article-page inspection queue. When Crossref ran,
     only bibliographically verified rows enter by default; when Crossref was
     intentionally disabled, DOI-bearing discovery pointers may remain
     unverified and must be labeled as such.
-13. `publisher_queue_probed.csv`: probed queue with access/PDF/SI status
+16. `publisher_queue_probed.csv`: probed queue with access/PDF/SI status
     (when publisher probing is enabled).
-14. `publisher_queue_html_meta.csv`: publisher HTML meta extraction output
+17. `publisher_queue_html_meta.csv`: publisher HTML meta extraction output
     (when publisher probing is enabled; contains `citation_keywords`,
     `citation_online_date`, `citation_funder_name`, etc.).
-15. `api_discovery_trace.csv`: provider/query/status trail for failures.
+18. `api_discovery_trace.csv`: provider/query/status trail for failures.
+19. `export_manifest.json` plus optional `.ris`/`.bib`: audited bibliography
+    delivery. Unverified and retracted rows are excluded by default.
 
-Use `litminer_read_csv_summary` in MCP mode when a CSV is too large for direct
-context loading.
+Use `litminer_read_results` in default MCP mode when a CSV or JSON/Markdown
+artifact is too large for direct context loading. The legacy
+`litminer_read_csv_summary` remains available in the advanced profile.
 
 ### Article Link Delivery
 
@@ -395,6 +408,11 @@ metadata, not the primary article link.
   fixed and retried, not hidden by cache.
 - After fixing network, proxy, certificate, key, or contact email setup, rerun
   with `--no-cache` if stale failure state may affect the current run.
+- Provider-wide cooldown and one-row-per-HTTP-attempt telemetry are persisted
+  in `.litminer/state/litminer.sqlite3`; a restarted process must honor
+  `not_before` and may not rotate identities or increase concurrency to evade it.
+- Raw source observations, canonical bibliography, and scientific annotations
+  are separate layers. Never overwrite raw observations with canonical values.
 
 ## External Content Safety
 
@@ -419,18 +437,20 @@ debug tools.
 Primary workflow tools in the default profile:
 
 - `litminer_workspace_doctor`
-- `litminer_bootstrap`
-- `litminer_run_lit_search`
+- `litminer_capabilities`
+- `litminer_plan_run`
 - `litminer_start_run`
-- `litminer_run_status`
+- `litminer_get_run`
 - `litminer_resume_run`
 - `litminer_cancel_run`
-- `litminer_discover_api`
-- `litminer_semantic_triage`
-- `litminer_build_publisher_queue`
-- `litminer_processing_report`
-- `litminer_agent_summary`
-- `litminer_read_csv_summary`
+- `litminer_read_results`
+- `litminer_export`
+
+`start_run`, `resume_run`, `plan_run`, and the CLI share the same `RunSpec`
+schema. Tool-level validation/workspace/provider/internal failures return
+`isError=true` with a structured `ErrorEnvelope`. The synchronous full runner,
+legacy status/summary tools, provider wrappers, and stage tools remain in the
+advanced profile for compatibility.
 
 ## References
 

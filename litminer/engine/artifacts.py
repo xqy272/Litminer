@@ -15,7 +15,10 @@ INDEX_NAME = "artifacts_index.json"
 
 
 ARTIFACTS: list[tuple[str, str, str, str]] = [
+    ("run_outcome", "primary", "run_outcome.json", "Stable execution status, retrieval quality, artifacts, and next actions."),
     ("agent_summary", "primary", "agent_summary.json", "Machine-readable run state and next actions."),
+    ("coverage_report", "primary", "coverage_report.json", "Provider/query/verification coverage and healthy, degraded, or inconclusive quality."),
+    ("canonical_papers", "primary", "canonical_papers.csv", "Canonical bibliography projection with trusted-field selection."),
     ("processing_report", "primary", "processing_report.md", "Human-readable status and trust-tier summary."),
     ("artifacts_index", "primary", INDEX_NAME, "Compact artifact map grouped by Agent reading tier."),
     ("query_plan", "primary", "query_plan.json", "Queries, concepts, source strategy, and run controls."),
@@ -60,6 +63,11 @@ ARTIFACTS: list[tuple[str, str, str, str]] = [
     ),
     ("feasibility_report", "supporting", "feasibility_report.md", "Constraint feasibility and blocking reasons."),
     ("field_provenance", "supporting", "field_provenance.json", "Field-level source/trust map."),
+    ("canonical_provenance", "supporting", "canonical_provenance.json", "Direct source, trust class, and selection reason for canonical bibliography fields."),
+    ("run_spec", "supporting", "run_spec.json", "Normalized typed input contract shared by CLI and MCP."),
+    ("export_manifest", "supporting", "export_manifest.json", "Audited RIS/BibTeX export inputs, exclusions, conflicts, and hashes."),
+    ("export_ris", "supporting", "litminer_export.ris", "RIS bibliography export when requested."),
+    ("export_bibtex", "supporting", "litminer_export.bib", "BibTeX bibliography export when requested."),
     ("api_candidates", "supporting", "api_candidates.csv", "Raw API discovery candidates."),
     ("deduped_candidates", "supporting", "deduped_candidates.csv", "Deduplicated candidate set."),
     (

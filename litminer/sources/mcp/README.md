@@ -37,22 +37,20 @@ you need lower-level source, stage, or debug tools.
 
 | Tool | Purpose |
 |------|---------|
-| `litminer_discover_api` | Run multi-query API discovery with candidate, trace, and report outputs. |
-| `litminer_run_lit_search` | Run discovery, triage, verification, OA annotation, metric annotation, queueing, and reporting. |
-| `litminer_start_run` | Start a long workflow in the background and return a job ID. |
-| `litminer_run_status` | Poll background workflow status, `next_actions`, and `agent_summary.json` when present. |
+| `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
+| `litminer_capabilities` | Inspect provider capability, credentials/contact readiness, persisted health, and optional live preflight. |
+| `litminer_plan_run` | Validate/normalize shared `RunSpec` without network calls or research writes. |
+| `litminer_start_run` | Start a long workflow and return `job_id`, persistent `run_id`, quality, and next actions. |
+| `litminer_get_run` | Read live/persistent status, quality, coverage, artifacts, and next actions. |
 | `litminer_resume_run` | Start a background workflow with resume enabled. |
 | `litminer_cancel_run` | Request cooperative cancellation for a background workflow. |
-| `litminer_semantic_triage` | Tag and rank rows with Agent-supplied concepts. |
-| `litminer_build_publisher_queue` | Build DOI/publisher-page evidence queues. |
-| `litminer_processing_report` | Generate a compact source, metadata, triage, access, and queue summary. |
-| `litminer_agent_summary` | Generate machine-readable run status, trust tiers, source strategy, artifacts, and next actions. |
-| `litminer_result_profile` | Generate stratified descriptive statistics (all rows + Crossref-verified) with completeness caveats. |
-| `litminer_search_audit_report` | Generate a human-readable audit report (Markdown) for research reproducibility. |
-| `litminer_citation_expand` | Expand citations from triaged candidates via Semantic Scholar citation/reference graph. |
-| `litminer_read_csv_summary` | Return filtered, paginated CSV rows plus status counts for Agent review. |
-| `litminer_workspace_doctor` | Diagnose workspace root, writability, and path mapping. |
-| `litminer_bootstrap` | Generate first-run Python/workspace/contact-email reports. |
+| `litminer_read_results` | Read paginated canonical/triage/queue rows and bounded JSON/Markdown artifacts. |
+| `litminer_export` | Export canonical RIS/BibTeX with an audited manifest. |
+
+The synchronous full runner, legacy `run_status`, bootstrap/summary helpers,
+individual stages, and provider wrappers remain in `all` for compatibility.
+Provider searches expose explicit `page`, `page_size`, `total_found`, and
+`has_more` fields.
 
 ## Stage-Specific And Debug Tools
 
@@ -85,11 +83,10 @@ These are advertised only with `LITMINER_MCP_TOOL_PROFILE=all`.
   "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "litminer_run_lit_search",
+    "name": "litminer_start_run",
     "arguments": {
       "queries": ["machine learning enzyme stability external validation"],
       "mode": "fast",
-      "resume": true,
       "year_from": 2026,
       "required_concepts": ["validation=external validation|prospective validation"],
       "optional_concepts": ["benchmark=benchmark|dataset"],
@@ -123,18 +120,25 @@ avoid an immediate repeated call; fix the environment and set
 `no_cache`/`cache_enabled=false`, or wait for the TTL. Auth and generic errors
 are not cached by default because they should be fixed and retried.
 
-For long runs, prefer `litminer_start_run` and poll with
-`litminer_run_status`. The workflow writes `query_plan.json`,
-`run_manifest.json`, `processing_report.md`, `agent_summary.json`, and
-`artifacts_index.json` as it progresses or finalizes. Use
+For long runs, use `litminer_start_run` and poll with `litminer_get_run`.
+Read canonical/coverage/outcome artifacts with `litminer_read_results`. The
+workflow writes `run_spec.json`, `run_outcome.json`, `coverage_report.json`,
+`canonical_papers.csv`, `canonical_provenance.json`, `query_plan.json`,
+`run_manifest.json`, reports, and `artifacts_index.json`. Use
 `time_budget_seconds`, `stop_after_stage`,
 `max_crossref_rows`, `max_unpaywall_rows`, and `max_publisher_probe_rows` to
 bound cost and latency.
 Inspect `query_plan.json.source_strategy` for missing recommended sources and
 retrieval risk flags before deciding whether to broaden a search.
-Follow `next_actions` returned by `litminer_run_lit_search` and
-`litminer_run_status` before retrying, broadening sources, or scanning large
+Follow `next_actions` returned by `litminer_start_run` and `litminer_get_run`
+before retrying, broadening sources, or scanning large
 CSV files.
+
+The CLI and high-level run tools share one JSON Schema source. Tool-level
+validation, workspace, provider, and internal failures return `isError=true`
+with `structuredContent.error`; JSON-RPC errors are reserved for protocol and
+unknown-method failures. Provider cooldown and per-attempt request telemetry
+are persisted in workspace-local SQLite and survive MCP process restarts.
 
 ## Workspace Diagnostics
 

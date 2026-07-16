@@ -373,6 +373,81 @@
       }
     },
     {
+      "id": "degraded_provider_coverage_is_explicit",
+      "profiles": ["offline", "architecture", "failure_injection"],
+      "user_prompt": "Two sources worked and two failed. Preserve useful candidates but report degraded retrieval coverage.",
+      "dimensions": ["coverage", "degraded", "provider_failure"],
+      "command": ["{python}", "-m", "litminer.engine.architecture_acceptance", "--scenario", "degraded_coverage", "--output-dir", "{output_dir}"],
+      "expect": {
+        "exit_code": 0,
+        "files_exist": ["{output_dir}/acceptance_result.json", "{output_dir}/coverage_report.json"],
+        "json": [
+          {"path": "{output_dir}/acceptance_result.json", "checks": [{"path": "passed", "equals": true}, {"path": "quality", "equals": "degraded"}]},
+          {"path": "{output_dir}/coverage_report.json", "checks": [{"path": "quality", "equals": "degraded"}, {"path": "discovery.unavailable_provider_count", "equals": 2}]}
+        ]
+      }
+    },
+    {
+      "id": "all_provider_failures_are_inconclusive",
+      "profiles": ["offline", "architecture", "failure_injection"],
+      "user_prompt": "All configured providers failed. Do not claim that no literature exists.",
+      "dimensions": ["coverage", "inconclusive", "zero_result_safety"],
+      "command": ["{python}", "-m", "litminer.engine.architecture_acceptance", "--scenario", "inconclusive_coverage", "--output-dir", "{output_dir}"],
+      "expect": {
+        "exit_code": 0,
+        "files_exist": ["{output_dir}/acceptance_result.json", "{output_dir}/coverage_report.json"],
+        "json": [
+          {"path": "{output_dir}/acceptance_result.json", "checks": [{"path": "passed", "equals": true}, {"path": "quality", "equals": "inconclusive"}]},
+          {"path": "{output_dir}/coverage_report.json", "checks": [{"path": "candidate_count", "equals": 0}, {"path": "quality", "equals": "inconclusive"}]}
+        ]
+      }
+    },
+    {
+      "id": "persisted_provider_cooldown_blocks_immediate_retry",
+      "profiles": ["offline", "architecture", "recovery"],
+      "user_prompt": "A previous run hit 429. A new process must honor the provider-wide cooldown.",
+      "dimensions": ["sqlite", "cooldown", "request_ledger"],
+      "command": ["{python}", "-m", "litminer.engine.architecture_acceptance", "--scenario", "persisted_cooldown", "--output-dir", "{output_dir}"],
+      "expect": {
+        "exit_code": 0,
+        "files_exist": ["{output_dir}/acceptance_result.json", "{output_dir}/request_ledger.json", "{output_dir}/state.sqlite3"],
+        "json": [
+          {"path": "{output_dir}/acceptance_result.json", "checks": [{"path": "passed", "equals": true}, {"path": "blocked", "equals": true}]},
+          {"path": "{output_dir}/request_ledger.json", "checks": [{"path": "requests", "equals": 1}]}
+        ]
+      }
+    },
+    {
+      "id": "invalid_mcp_input_is_structured",
+      "profiles": ["offline", "architecture", "mcp"],
+      "user_prompt": "Call start_run without an input family. The Agent should receive a validation envelope before execution.",
+      "dimensions": ["mcp", "schema", "structured_error"],
+      "command": ["{python}", "-m", "litminer.engine.architecture_acceptance", "--scenario", "invalid_mcp_input", "--output-dir", "{output_dir}"],
+      "expect": {
+        "exit_code": 0,
+        "files_exist": ["{output_dir}/acceptance_result.json", "{output_dir}/mcp_response.json"],
+        "json": [
+          {"path": "{output_dir}/acceptance_result.json", "checks": [{"path": "passed", "equals": true}, {"path": "error_class", "equals": "validation"}]},
+          {"path": "{output_dir}/mcp_response.json", "checks": [{"path": "result.isError", "equals": true}, {"path": "result.structuredContent.error.class", "equals": "validation"}]}
+        ]
+      }
+    },
+    {
+      "id": "default_export_excludes_untrusted_and_retracted",
+      "profiles": ["offline", "architecture", "export"],
+      "user_prompt": "Export a bibliography, excluding unverified and retracted records by default and audit every exclusion.",
+      "dimensions": ["ris", "bibtex", "export_manifest", "trust_boundary"],
+      "command": ["{python}", "-m", "litminer.engine.architecture_acceptance", "--scenario", "export_exclusion", "--output-dir", "{output_dir}"],
+      "expect": {
+        "exit_code": 0,
+        "files_exist": ["{output_dir}/acceptance_result.json", "{output_dir}/export_manifest.json", "{output_dir}/litminer_export.ris", "{output_dir}/litminer_export.bib"],
+        "json": [
+          {"path": "{output_dir}/acceptance_result.json", "checks": [{"path": "passed", "equals": true}, {"path": "exported_rows", "equals": 1}]},
+          {"path": "{output_dir}/export_manifest.json", "checks": [{"path": "exported_rows", "equals": 1}, {"path": "excluded_reasons.unverified", "equals": 1}, {"path": "excluded_reasons.retracted", "equals": 1}]}
+        ]
+      }
+    },
+    {
       "id": "live_openalex_response_parses",
       "profiles": ["live"],
       "user_prompt": "Run a minimal OpenAlex query to verify that real API responses can be parsed correctly.",

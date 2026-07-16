@@ -12,6 +12,75 @@ not be renamed without a changelog entry.
 | Extensible | New fields may be added; consumers should ignore unknown keys. |
 | Debug | Useful for troubleshooting, not a primary contract. |
 
+## `run_spec.json`
+
+Level: Stable, extensible.
+
+Purpose: normalized typed input contract shared by CLI, MCP, planning, and the
+runtime. It separates `input`, `retrieval`, `verification`, `concepts`,
+`output`, and `controls`; it never serializes process callbacks or thread
+objects.
+
+Agent rule: compare this artifact before resume. Changed queries, sources,
+concepts, input mode, or material controls require a new iteration rather than
+silent reuse.
+
+## `run_outcome.json`
+
+Level: Stable, extensible.
+
+Purpose: common final execution result for background jobs and artifacts.
+
+Stable keys: `run_id`, `status`, `quality`, `output_dir`, `artifacts`,
+`coverage`, `warnings`, `next_actions`, `ok`, and optional structured `error`.
+
+Agent rule: `status` describes execution (`completed`, `partial`, `failed`,
+etc.); `quality` independently describes retrieval coverage (`healthy`,
+`degraded`, `inconclusive`). Never collapse these dimensions.
+
+## `coverage_report.json`
+
+Level: Stable, extensible.
+
+Purpose: provider/query/verification coverage plus the request-ledger summary.
+
+Stable keys include `quality`, `quality_reason`, `candidate_count`,
+`configured_sources`, `providers`, `discovery`, `verification`,
+`request_ledger`, `next_actions`, and `boundary`.
+
+Agent rule: a healthy zero-result run means configured providers successfully
+returned no candidates for those queries. An inconclusive zero-result run means
+providers did not establish a usable result. Neither is a field-level recall
+estimate.
+
+## `canonical_papers.csv` And `canonical_provenance.json`
+
+Level: Stable, extensible.
+
+Purpose: separate immutable source observations from the canonical
+bibliographic projection used for delivery and export.
+
+`canonical_papers.csv` contains `paper_id`, bibliographic fields,
+`bibliographic_status`, `trusted_bibliography`, `retraction_status`,
+`export_eligible`, scientific/workflow annotations, and compact
+`field_provenance_json`. `canonical_provenance.json` records the selected
+source field, trust class, and reason for every canonical field.
+
+Agent rule: canonicalization chooses bibliographic values; it does not decide
+scientific inclusion. Raw observations remain in the SQLite evidence ledger.
+
+## `export_manifest.json`, RIS, And BibTeX
+
+Level: Stable, extensible.
+
+Purpose: audited bibliography delivery. Stable fields include input/output
+hashes, formats, input/exported/excluded counts, exclusion reasons,
+`include_unverified`, `unverified_exported`, `ascii_latex`, BibTeX conflict
+count, and output paths/hashes.
+
+Default policy excludes missing-title, retracted, and bibliographically
+untrusted rows. Explicit unverified export does not upgrade their trust status.
+
 ## `agent_summary.json`
 
 Level: Stable, extensible.
@@ -212,6 +281,9 @@ Stable fields:
 - `status_class`
 - `http_status`
 - `retry_after_seconds`
+- `attempts`
+- `request_count`
+- `provider_wait_seconds`
 - `transient_error`
 - `cache_status`
 - `next_action`
@@ -233,10 +305,12 @@ Stable fields:
 - `query_id` (e.g. `citation_expand:10.xxx`)
 - `query_type` (`citation_expand` or `reference_expand`)
 - `seed_doi`
-- `status` (`ok` or `error`)
+- `status` (provider result or stable error code)
 - `status_class`
 - `returned_count`
 - `error`
+- `error_code`
+- `retry_after_seconds`
 
 Agent rule: if any seed has `status=error`, the expansion is partial.
 Check `completeness_caveats` in `result_profile.json` for the aggregated

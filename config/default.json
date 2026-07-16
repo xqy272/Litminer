@@ -46,6 +46,10 @@
     "ttl_days": 30.0,
     "provider_failure_ttl_seconds": 300.0
   },
+  "state": {
+    "enabled": true,
+    "state_store": ".litminer/state/litminer.sqlite3"
+  },
   "evidence": {
     "require_doi_for_queue": true,
     "queue_priorities": "high,medium,needs_review",

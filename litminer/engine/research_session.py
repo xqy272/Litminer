@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
@@ -58,6 +59,15 @@ def next_iteration_id(output_dir: Path) -> str:
     iterations = session.get("iterations", [])
     count = len(iterations) if isinstance(iterations, list) else 0
     return f"iteration_{count + 1:03d}"
+
+
+def session_id(output_dir: Path) -> str:
+    session = _read_json(output_dir / SESSION_NAME)
+    existing = str(session.get('session_id') or '').strip()
+    if existing:
+        return existing
+    identity = str(output_dir.resolve(strict=False)).lower()
+    return 'litminer_session_' + hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]
 
 
 def resume_iteration_id(output_dir: Path) -> str:
@@ -162,7 +172,7 @@ def append_iteration(
     if not session:
         session = {
             "schema_version": 1,
-            "session_id": f"litminer_session_{utc_now().replace(':', '').replace('-', '')}",
+            "session_id": session_id(output_dir),
             "created_at": utc_now(),
             "iterations": [],
         }
