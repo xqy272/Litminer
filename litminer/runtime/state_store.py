@@ -32,6 +32,21 @@ def default_state_store_path(workspace_root: Path | str | None = None) -> Path:
     return Path(workspace_root or Path.cwd()) / DEFAULT_STATE_PATH
 
 
+def _canonical_path(value: Path | str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    expanded = Path(raw).expanduser()
+    try:
+        return str(expanded.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return os.path.abspath(str(expanded))
+
+
+def _path_identity(value: Path | str | None) -> str:
+    return os.path.normcase(_canonical_path(value))
+
+
 def query_fingerprint(value: str) -> str:
     return hashlib.sha256((value or "").encode("utf-8")).hexdigest()
 
@@ -365,6 +380,8 @@ class StateStore:
     def upsert_session(self, session_id: str, *, workspace_root: str, output_dir: str) -> None:
         if not self.enabled:
             return
+        workspace_root = _canonical_path(workspace_root)
+        output_dir = _canonical_path(output_dir)
         now = utc_now()
         with self.connect() as db:
             db.execute(
@@ -741,6 +758,10 @@ class StateStore:
     def record_outcome(self, outcome: dict[str, Any]) -> None:
         if not self.enabled:
             return
+        stored_outcome = dict(outcome)
+        output_dir = _canonical_path(stored_outcome.get("output_dir"))
+        if output_dir:
+            stored_outcome["output_dir"] = output_dir
         with self.connect() as db:
             db.execute(
                 """
@@ -748,12 +769,14 @@ class StateStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    outcome.get("run_id", ""), outcome.get("output_dir", ""), outcome.get("status", "unknown"),
-                    outcome.get("quality", "inconclusive"), self._json(outcome), utc_now(),
+                    stored_outcome.get("run_id", ""), output_dir,
+                    stored_outcome.get("status", "unknown"),
+                    stored_outcome.get("quality", "inconclusive"),
+                    self._json(stored_outcome), utc_now(),
                 ),
             )
-            run_id = str(outcome.get("run_id", ""))
-            outcome_status = str(outcome.get("status", "unknown"))
+            run_id = str(stored_outcome.get("run_id", ""))
+            outcome_status = str(stored_outcome.get("status", "unknown"))
             self._record_event_db(
                 db,
                 entity_type="run",
@@ -762,25 +785,43 @@ class StateStore:
                 event_type="outcome_recorded",
                 status=outcome_status,
                 payload={
-                    "quality": outcome.get("quality", "inconclusive"),
-                    "output_dir": outcome.get("output_dir", ""),
+                    "quality": stored_outcome.get("quality", "inconclusive"),
+                    "output_dir": output_dir,
                 },
             )
 
     def get_run(self, *, run_id: str = "", output_dir: str = "") -> dict[str, Any]:
         if not self.enabled:
             return {}
+        output_dir = _canonical_path(output_dir)
+        output_identity = _path_identity(output_dir)
         with self.connect() as db:
             if run_id:
-                row = db.execute("SELECT outcome_json FROM run_outcomes WHERE run_id=?", (run_id,)).fetchone()
+                row = db.execute(
+                    "SELECT output_dir, outcome_json FROM run_outcomes WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
             else:
                 row = db.execute(
-                    "SELECT outcome_json FROM run_outcomes WHERE output_dir=? ORDER BY updated_at DESC LIMIT 1",
+                    "SELECT output_dir, outcome_json FROM run_outcomes "
+                    "WHERE output_dir=? ORDER BY updated_at DESC LIMIT 1",
                     (output_dir,),
                 ).fetchone()
+                if row is None and output_identity:
+                    candidates = db.execute(
+                        "SELECT output_dir, outcome_json FROM run_outcomes "
+                        "ORDER BY updated_at DESC"
+                    ).fetchall()
+                    row = next(
+                        (
+                            item for item in candidates
+                            if _path_identity(item["output_dir"]) == output_identity
+                        ),
+                        None,
+                    )
             if row is not None:
                 try:
-                    value = json.loads(row[0])
+                    value = json.loads(row["outcome_json"])
                 except json.JSONDecodeError:
                     value = {}
                 if isinstance(value, dict):
@@ -804,6 +845,21 @@ class StateStore:
                     """,
                     (output_dir,),
                 ).fetchone()
+                if iteration is None and output_identity:
+                    candidates = db.execute(
+                        """
+                        SELECT i.*, s.output_dir FROM iterations i
+                        JOIN research_sessions s ON s.session_id=i.session_id
+                        ORDER BY i.created_at DESC
+                        """
+                    ).fetchall()
+                    iteration = next(
+                        (
+                            item for item in candidates
+                            if _path_identity(item["output_dir"]) == output_identity
+                        ),
+                        None,
+                    )
             if iteration is None:
                 if run_id:
                     job_only = db.execute(

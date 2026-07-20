@@ -102,6 +102,13 @@ when you want a stable version.
 
 ### Fixed
 
+- Made Python 3.10 Agent acceptance validate the Codex TOML template without
+  adding a third-party runtime dependency.
+- Canonicalized SQLite run-path identity and made path assertions alias-aware,
+  covering GitHub Runner short paths on Windows and `/var` versus
+  `/private/var` on macOS.
+- Isolated the missing-Unpaywall-email regression from user-level contact
+  environment variables.
 - Restored the exact feasibility-report Markdown contract after finalizer
   extraction, including inline-code markers used by existing Agent tests.
 - Made real Codex acceptance compatible with current Windows npm `.CMD`

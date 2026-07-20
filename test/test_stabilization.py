@@ -132,6 +132,26 @@ class RuntimeSoakPathTests(unittest.TestCase):
 
 
 class AgentClientAcceptanceTests(unittest.TestCase):
+    def test_python_310_toml_fallback_validates_codex_template(self) -> None:
+        template = agent_client_acceptance.PROJECT_ROOT / "config" / "mcp.codex.example.toml"
+        with patch.object(agent_client_acceptance, "_tomllib", None):
+            payload = agent_client_acceptance._validate_template(template)
+        litminer = payload["mcp_servers"]["litminer"]
+        self.assertEqual(litminer["command"], "python")
+        self.assertIn("LITMINER_WORKSPACE_ROOT", litminer["env"])
+        self.assertIn("UNPAYWALL_EMAIL", litminer["env_vars"])
+
+    def test_python_310_toml_fallback_rejects_incomplete_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            template = Path(tmp) / "incomplete.toml"
+            template.write_text(
+                '[mcp_servers.litminer]\ncommand = "python"\n',
+                encoding="utf-8",
+            )
+            with patch.object(agent_client_acceptance, "_tomllib", None):
+                with self.assertRaisesRegex(ValueError, "missing TOML keys"):
+                    agent_client_acceptance._validate_template(template)
+
     def test_contract_payload_parser_handles_claude_result_envelope(self) -> None:
         raw = json.dumps({
             "type": "result",

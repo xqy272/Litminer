@@ -53,6 +53,12 @@ from litminer.sources.mcp import server as mcp_server
 
 
 class LitminerCoreTests(unittest.TestCase):
+    def assert_same_path(self, actual: str | Path, expected: str | Path) -> None:
+        self.assertEqual(
+            Path(actual).resolve(strict=False),
+            Path(expected).resolve(strict=False),
+        )
+
     def test_api_discovery_records_provider_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -729,8 +735,8 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertTrue(normalized.include_metadata_blocked)
             self.assertTrue(normalized.allow_missing_doi)
             self.assertFalse(normalized.queue_strict_only)
-            self.assertEqual(normalized.output_dir, tmp_path / "configured_run")
-            self.assertEqual(normalized.screenshot_root, tmp_path / "shots")
+            self.assert_same_path(normalized.output_dir, tmp_path / "configured_run")
+            self.assert_same_path(normalized.screenshot_root, tmp_path / "shots")
 
     def test_min_if_defaults_to_strict_metric_queue(self) -> None:
         args = argparse.Namespace(config=None, min_if=5.0)
@@ -779,7 +785,7 @@ class LitminerCoreTests(unittest.TestCase):
                     "include_semantic_scholar": True,
                 })
 
-            self.assertEqual(Path(result["output_dir"]), configured_run)
+            self.assert_same_path(result["output_dir"], configured_run)
             self.assertEqual(result["run_status"], "completed")
             self.assertIn("next_actions", result)
             self.assertIn("read_coverage_and_run_outcome_with_litminer_read_results", result["next_actions"])
@@ -962,8 +968,14 @@ class LitminerCoreTests(unittest.TestCase):
             with patch.dict(os.environ, {"LITMINER_WORKSPACE_ROOT": str(workspace_root)}):
                 normalized = run_lit_search.normalize_args(args)
 
-            self.assertEqual(normalized.output_dir, workspace_root / ".litminer" / "runs" / "litminer_run")
-            self.assertEqual(normalized.screenshot_root, workspace_root / ".litminer" / "screenshots")
+            self.assert_same_path(
+                normalized.output_dir,
+                workspace_root / ".litminer" / "runs" / "litminer_run",
+            )
+            self.assert_same_path(
+                normalized.screenshot_root,
+                workspace_root / ".litminer" / "screenshots",
+            )
 
     def test_workspace_path_falls_back_to_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2320,7 +2332,14 @@ class LitminerCoreTests(unittest.TestCase):
                 cache_enabled=True,
             )
 
-            run_lit_search.run_unpaywall_stage(input_csv, out_dir, args, counts, manifest=manifest)
+            with patch.dict(
+                os.environ,
+                {"UNPAYWALL_EMAIL": "", "LITMINER_CONTACT_EMAIL": ""},
+                clear=False,
+            ):
+                run_lit_search.run_unpaywall_stage(
+                    input_csv, out_dir, args, counts, manifest=manifest,
+                )
 
             unpaywall = [stage for stage in manifest["stages"] if stage["name"] == "unpaywall"][-1]
             self.assertEqual(unpaywall["status"], "partial_auth")
@@ -2728,7 +2747,7 @@ class LitminerCoreTests(unittest.TestCase):
                     mcp_server.JOBS.pop(start["job_id"], None)
                 persisted = mcp_server.tool_run_status({"job_id": start["job_id"]})
                 self.assertEqual(persisted["status"], "partial")
-                self.assertEqual(Path(persisted["output_dir"]), root / "run")
+                self.assert_same_path(persisted["output_dir"], root / "run")
 
     def test_mcp_cancel_run_stops_at_stage_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3092,7 +3111,7 @@ class LitminerCoreTests(unittest.TestCase):
 
             manifest = json.loads((out_dir / "run_manifest.json").read_text(encoding="utf-8"))
             latest_merge = [stage for stage in manifest["stages"] if stage["name"] == "merge"][-1]
-            self.assertEqual(Path(latest_merge["output_path"]), merged)
+            self.assert_same_path(latest_merge["output_path"], merged)
             self.assertNotEqual(Path(latest_merge["output_path"]), input_csv)
 
     def test_search_audit_report_generates_markdown(self) -> None:

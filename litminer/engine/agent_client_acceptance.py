@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib as _tomllib
+except ModuleNotFoundError:  # Python 3.10
+    _tomllib = None
 
 from litminer.contracts import tool_contracts
 from litminer.sources.mcp import server as mcp_server
@@ -33,14 +39,113 @@ def _check(condition: bool, code: str, message: str, checks: list[dict[str, Any]
     checks.append({"code": code, "passed": bool(condition), "message": message})
 
 
+def _balanced_toml_value(value: str) -> bool:
+    return (
+        value.count("[") == value.count("]")
+        and value.count("{") == value.count("}")
+    )
+
+
+def _toml_assignment_map(raw: str, section_name: str) -> dict[str, str]:
+    """Read the small MCP template subset used by Litminer on Python 3.10."""
+    assignments: dict[str, str] = {}
+    lines = raw.splitlines()
+    current_section = ""
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        index += 1
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current_section = stripped[1:-1].strip()
+            continue
+        if current_section != section_name:
+            continue
+        if "=" not in stripped:
+            raise ValueError(f"invalid TOML assignment in [{section_name}]: {stripped}")
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        while not _balanced_toml_value(value) and index < len(lines):
+            value += "\n" + lines[index].strip()
+            index += 1
+        if not _balanced_toml_value(value):
+            raise ValueError(f"unbalanced TOML value for {key}")
+        assignments[key] = value
+    return assignments
+
+
+def _parse_inline_string_table(value: str) -> dict[str, str]:
+    stripped = value.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        raise ValueError("expected TOML inline table")
+    body = stripped[1:-1]
+    pattern = re.compile(
+        r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\"(?:\\.|[^\"])*\")"
+    )
+    parsed: dict[str, str] = {}
+    consumed: list[tuple[int, int]] = []
+    for match in pattern.finditer(body):
+        parsed[match.group(1)] = ast.literal_eval(match.group(2))
+        consumed.append(match.span())
+    remainder_parts: list[str] = []
+    cursor = 0
+    for start, end in consumed:
+        remainder_parts.append(body[cursor:start])
+        cursor = end
+    remainder_parts.append(body[cursor:])
+    remainder = "".join(remainder_parts).replace(",", "").strip()
+    if remainder or not parsed:
+        raise ValueError("unsupported TOML inline table value")
+    return parsed
+
+
+def _load_toml_template_compat(raw: str) -> dict[str, Any]:
+    section = "mcp_servers.litminer"
+    assignments = _toml_assignment_map(raw, section)
+    required = {"command", "args", "cwd", "env"}
+    missing = sorted(required - assignments.keys())
+    if missing:
+        raise ValueError(f"missing TOML keys in [{section}]: {', '.join(missing)}")
+    command = ast.literal_eval(assignments["command"])
+    args = ast.literal_eval(assignments["args"])
+    cwd = ast.literal_eval(assignments["cwd"])
+    env = _parse_inline_string_table(assignments["env"])
+    env_vars = ast.literal_eval(assignments.get("env_vars", "[]"))
+    if not isinstance(command, str) or not command:
+        raise ValueError("MCP command must be a non-empty string")
+    if not isinstance(cwd, str) or not cwd:
+        raise ValueError("MCP cwd must be a non-empty string")
+    if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+        raise ValueError("MCP args must be a string list")
+    if not isinstance(env_vars, list) or not all(isinstance(item, str) for item in env_vars):
+        raise ValueError("MCP env_vars must be a string list")
+    return {
+        "mcp_servers": {
+            "litminer": {
+                "command": command,
+                "args": args,
+                "cwd": cwd,
+                "env": env,
+                "env_vars": env_vars,
+            }
+        }
+    }
+
+
 def _validate_template(path: Path) -> dict[str, Any]:
+    raw = path.read_text(encoding="utf-8")
     if path.suffix == ".json":
         payload = _load_json(path)
     elif path.suffix == ".toml":
-        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        payload = (
+            _tomllib.loads(raw)
+            if _tomllib is not None
+            else _load_toml_template_compat(raw)
+        )
     else:
         raise ValueError(f"unsupported Agent template: {path}")
-    raw = path.read_text(encoding="utf-8")
     if "sk-" in raw or "api_key=" in raw.lower():
         raise ValueError(f"possible committed secret in {path}")
     return payload

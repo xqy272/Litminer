@@ -256,7 +256,12 @@ class NextArchitectureTests(unittest.TestCase):
             run_dir.mkdir()
             state_path = root / "state.sqlite3"
             store = StateStore(state_path)
-            store.upsert_session("session-1", workspace_root=str(root), output_dir=str(run_dir))
+            aliased_run_dir = root / "unused" / ".." / "run"
+            store.upsert_session(
+                "session-1",
+                workspace_root=str(root / "unused" / ".."),
+                output_dir=str(aliased_run_dir),
+            )
             store.start_iteration(
                 session_id="session-1", iteration_id="iteration_001", run_id="run-live",
                 input_mode="discover", spec={"schema_version": 1},
@@ -269,6 +274,10 @@ class NextArchitectureTests(unittest.TestCase):
             self.assertEqual(current["status"], "running")
             self.assertEqual(current["quality"], "inconclusive")
             self.assertEqual(current["state_source"], "sqlite_runtime")
+            self.assertEqual(
+                Path(current["output_dir"]).resolve(strict=False),
+                run_dir.resolve(strict=False),
+            )
             env = {
                 "LITMINER_WORKSPACE_ROOT": str(root),
                 "LITMINER_STATE_STORE": str(state_path),
