@@ -2,14 +2,28 @@
   "schema_version": 1,
   "contract_version": 1,
   "supported_systems": ["Windows", "Darwin"],
+  "supported_mcp_protocol_versions": [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25"
+  ],
+  "client_schema_forbidden_top_level_keywords": [
+    "allOf",
+    "anyOf",
+    "not",
+    "oneOf"
+  ],
   "primary_clients": {
     "codex": {
       "guide": "AGENTS.md",
+      "last_tested_version": "codex-cli 0.144.0",
       "skill_install_roots": [".agents/skills/litminer", "~/.agents/skills/litminer"],
       "mcp_template": "config/mcp.codex.example.toml"
     },
     "claude": {
       "guide": "CLAUDE.md",
+      "last_tested_version": "Claude Code 2.1.195",
       "skill_install_roots": [".claude/skills/litminer", "~/.claude/skills/litminer"],
       "mcp_template": "config/mcp.claude.example.json"
     }

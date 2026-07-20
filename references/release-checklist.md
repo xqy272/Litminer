@@ -11,7 +11,8 @@ on a tested repository checkout.
   `test-macos` plus release-appropriate `live-macos`/`soak-macos`
   jobs on `macos-latest` are the native macOS evidence.
 - Confirm Codex and Claude Code adapters still list the same default nine MCP
-  tools and artifact order.
+  tools, compatible declaration schemas, supported protocol matrix, and
+  artifact order.
 - Update `CHANGELOG.md`.
 - Confirm `pyproject.toml` version if the release changes package metadata.
 - Check README examples for stale commands or nonexistent tags.
@@ -38,22 +39,31 @@ python -m ruff check litminer test scripts
 python -m mypy litminer scripts
 ```
 
-- Run controlled live provider acceptance on native Windows:
+- Run the release provider gate on native Windows:
 
 ```powershell
-python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release
 ```
 
-- Run at least the core provider profile on native macOS.
+- Run the same release provider gate in the GitHub Actions `live-macos` job.
+  OpenAlex and Crossref must succeed. Optional providers may degrade only for
+  structured transient rate-limit, network, TLS, timeout, or HTTP 5xx errors.
+  Missing contact data, auth, parser, and internal errors block release.
+- Use `--profile full` separately when a strict all-six diagnostic is needed;
+  do not use `--allow-skipped` as release evidence.
 - Run standard soak on Windows and quick or standard soak on macOS.
-- Optionally run installed real clients:
+- Run installed real clients on Windows:
 
 ```bash
-python -m litminer.engine.agent_client_acceptance --agent all --real --allow-missing-client --output-dir .litminer/acceptance/real-agents
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
 ```
 
-- Import one generated RIS and BibTeX file into Zotero and/or JabRef before a
-  release that changes exporters.
+  Both clients must actually connect and complete doctor plus plan. Client
+  auth, regional access, or network failure means the evidence is incomplete;
+  it is not permission to substitute a documentation-only check.
+
+- Import one generated RIS and BibTeX file into a literature manager such as
+  Zotero or JabRef before a release that changes exporters.
 
 ## Tag
 

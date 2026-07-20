@@ -88,17 +88,20 @@ The provider acceptance CLI uses each real parser and a shared request ledger:
 
 ```bash
 python -m litminer.engine.provider_acceptance --profile core --output-dir .litminer/test/providers
-python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/test/providers-full --allow-skipped
+python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/test/providers-release
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/test/providers-full
 ```
 
-`core` is OpenAlex plus Crossref. `full` adds Semantic Scholar, arXiv, Europe
-PMC, and Unpaywall; missing Unpaywall contact email is a structured skip only
-when `--allow-skipped` is explicit.
+`core` is OpenAlex plus Crossref. `full` is a strict all-six diagnostic.
+`release` probes all six, requires OpenAlex/Crossref success, and accepts
+optional-source degradation only for structured transient infrastructure
+failures. Missing contact data, auth, parser, and internal errors fail it.
+`--allow-skipped` is only for explicit non-release diagnostics.
 
-Optional installed-client acceptance:
+Installed-client acceptance:
 
 ```bash
-python -m litminer.engine.agent_client_acceptance --agent all --real --allow-missing-client --output-dir .litminer/test/real-agents
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/test/real-agents
 ```
 
 ## Full verification

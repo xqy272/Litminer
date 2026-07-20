@@ -48,10 +48,11 @@ def main():
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
-            "params": {"protocolVersion": "2025-11-25"},
+            # Codex CLI 0.144.0 negotiates this MCP revision.
+            "params": {"protocolVersion": "2025-06-18"},
         })
         assert resp.get("result", {}).get("serverInfo", {}).get("name") == "litminer"
-        assert resp.get("result", {}).get("protocolVersion") == "2025-11-25"
+        assert resp.get("result", {}).get("protocolVersion") == "2025-06-18"
         print("  PASS: Server identifies as litminer")
 
         # Test 2: List tools

@@ -1,5 +1,10 @@
 # Litminer 项目全面审查报告
 
+> **历史快照：** 本报告只审查 2026-06-20 的 commit `208cb7b`，其中的
+> 文件规模、测试数量、风险清单和路线图不代表当前主线状态。当前架构、
+> 已完成修复和发布门分别以 `litminer_next_architecture_design.md`、
+> `CHANGELOG.md` 和 `references/release-checklist.md` 为准。
+>
 > 审查日期：2026-06-20
 > 审查范围：架构设计、安全性、代码质量、性能与可扩展性、测试覆盖、API 设计与开发者体验
 > 代码版本：v0.1.0 (commit 208cb7b)

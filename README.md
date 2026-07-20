@@ -184,12 +184,28 @@ resume、cancel、read results 和 export。同步 full-run、低层 provider �
 工具保留在 `LITMINER_MCP_TOOL_PROFILE=all`。工具级失败返回结构化
 `isError=true`/`ErrorEnvelope`，而不是要求 Agent 解析 traceback 文本。
 
-MCP 运行时建议设置：
+Windows PowerShell 注册示例：
 
-```bash
-LITMINER_WORKSPACE_ROOT=/path/to/your/project
-LITMINER_CONTACT_EMAIL=you@example.org
+```powershell
+$workspace = "D:/path/to/your/project"
+$python = (Get-Command python).Source
+$codexServer = "C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"
+$claudeServer = "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $codexServer
+
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $claudeServer
 ```
+
+邮箱和 API key 不要写入 MCP JSON 或注册命令；在启动 Codex/Claude Code
+前通过系统或 shell 环境提供。当前真实验收版本记录在
+`config/agent_clients.json`。
 
 更完整的 MCP 配置见 [litminer/sources/mcp/README.md](litminer/sources/mcp/README.md) 和 [references/mcp-surface.md](references/mcp-surface.md)。
 
@@ -206,7 +222,9 @@ LITMINER_CONTACT_EMAIL=you@example.org
 | SQLite 状态导出 | `python -m litminer.runtime.state_store --output state_snapshot.json` |
 | 新架构 acceptance | `python -m litminer.engine.architecture_acceptance --help` |
 | Codex/Claude 契约验收 | `python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents` |
-| Provider live 验收 | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped` |
+| 真实 Codex/Claude MCP 验收 | `python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents` |
+| Provider 发布门 | `python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release` |
+| 六源严格 Provider 诊断 | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers-full` |
 | Crash/migration/restart 验收 | `python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience` |
 | Quick runtime soak | `python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak` |
 | 统一快速 CI | `powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 quick` |

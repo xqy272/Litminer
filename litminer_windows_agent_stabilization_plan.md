@@ -1,12 +1,18 @@
 # Litminer Windows-First Agent Stabilization And Decomposition Plan
 
-> Status: Implemented and validated
+> Status: Implemented; Windows validated; current macOS evidence needs refresh
 > Baseline: 8c19225 feat: implement next-generation Litminer architecture
 > Date: 2026-07-16
-> Windows evidence: full CI, real Codex/Claude Code, full provider acceptance,
-> and a 180-second standard soak
-> macOS evidence path: native GitHub Actions `macos-latest` jobs after
-> commit and push
+> Windows evidence: full CI with 169 tests, real Codex/Claude Code, a healthy
+> strict six-provider release gate, and a 185.95-second standard soak with 120
+> iterations, 9 pipeline cycles, zero failures/lock retries, SQLite integrity
+> `ok`, and WAL mode
+> macOS evidence: `test-macos` passed on Python 3.10/3.12/3.14 at commit
+> `e404555`; the current uncommitted changes plus `live-macos`/`soak-macos`
+> require commit, push, and native GitHub Actions runs
+> Evidence note: this is the implementation record. Every release must
+> regenerate current evidence under `references/release-checklist.md`; these
+> historical runs are not a permanent green badge.
 
 ## 1. Decision
 
@@ -40,7 +46,8 @@ The repository already has:
 - deterministic unit, Agent scenario, MCP, and architecture acceptance tests
 - compatibility with existing CLI arguments and run artifacts
 
-The remaining work is stabilization and boundary completion:
+At baseline commit 8c19225, the remaining work was stabilization and boundary
+completion:
 
 - CI still treats Ubuntu as the primary environment
 - Windows-specific behavior is not a first-class CI gate
@@ -118,8 +125,8 @@ Required jobs:
 
 Manual jobs:
 
-- Windows full provider live acceptance
-- macOS core provider live smoke
+- Windows release provider gate
+- macOS release provider gate
 - Windows runtime soak
 - macOS short runtime soak
 
@@ -190,10 +197,12 @@ A deterministic harness validates both adapters without requiring an LLM:
 - path boundary behavior
 - partial and degraded result semantics
 
-An optional real-Agent profile invokes installed Codex and Claude Code CLIs in
-a disposable workspace. It checks machine-observable invariants and artifacts,
-not exact natural-language wording. Missing clients are reported as skipped,
-never passed.
+A real-Agent profile invokes installed Codex and Claude Code CLIs against the
+project checkout with a read-only client sandbox and per-invocation MCP
+configuration. It checks machine-observable tool calls and structured results,
+not exact natural-language wording. Missing clients fail by default;
+--allow-missing-client is only a developer diagnostic and is never release
+evidence.
 
 ## 6. Provider Live Acceptance
 
@@ -201,6 +210,7 @@ The provider acceptance command supports:
 
     python -m litminer.engine.provider_acceptance --profile core
     python -m litminer.engine.provider_acceptance --profile full
+    python -m litminer.engine.provider_acceptance --profile release
     python -m litminer.engine.provider_acceptance --provider openalex
 
 Core profile:
@@ -215,7 +225,16 @@ Full profile:
 - Semantic Scholar
 - arXiv
 - Europe PMC
-- Unpaywall when a contact email is configured
+- Unpaywall
+
+Release profile:
+
+- probes the same six providers
+- requires OpenAlex and Crossref success
+- allows optional providers to degrade only for structured transient
+  rate-limit, network, TLS, timeout, or HTTP 5xx failures
+- rejects missing contact data, auth, parser, validation, and internal errors
+- never accepts `--allow-skipped`
 
 Each provider probe must:
 
@@ -358,12 +377,12 @@ Required deterministic checks:
 
 Manual or scheduled checks:
 
-- Windows full provider live acceptance
-- macOS core provider live acceptance
-- optional real Codex CLI acceptance
-- optional real Claude Code acceptance
+- Windows provider release gate
+- macOS provider release gate
+- real Codex CLI MCP acceptance on Windows
+- real Claude Code MCP acceptance on Windows
 - Windows standard/long soak
-- macOS standard soak
+- macOS quick/standard soak
 - RIS import in Zotero
 - BibTeX import in JabRef or Zotero
 

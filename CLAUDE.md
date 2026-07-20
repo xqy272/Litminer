@@ -83,6 +83,21 @@ Do not scan large CSVs before checking status and coverage.
 Use config/mcp.claude.example.json as a template. Keep credentials in the
 environment and never commit them into JSON.
 
+Last tested: Claude Code 2.1.195.
+
+```powershell
+$workspace = "D:/path/to/project"
+$python = "C:/Users/your-name/.claude/skills/litminer/.venv/Scripts/python.exe"
+$server = "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $server
+```
+
+Provider contact emails and API keys must be inherited from the environment;
+do not pass them as `-e` values or store them in JSON.
+
 Windows virtual-environment Python:
 
     .venv/Scripts/python.exe

@@ -89,7 +89,15 @@ class NextArchitectureTests(unittest.TestCase):
     def test_mcp_tools_list_uses_contract_and_invalid_input_is_structured(self) -> None:
         response = mcp_server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         tools = {item["name"]: item for item in response["result"]["tools"]}
-        self.assertEqual(tools["litminer_start_run"]["inputSchema"], tool_contracts.schema_for("litminer_start_run"))
+        self.assertEqual(
+            tools["litminer_start_run"]["inputSchema"],
+            tool_contracts.client_schema_for("litminer_start_run"),
+        )
+        self.assertNotIn("oneOf", tools["litminer_start_run"]["inputSchema"])
+        self.assertIn(
+            "oneOf",
+            tool_contracts.schema_for("litminer_start_run") or {},
+        )
         invalid = mcp_server.handle_request({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "litminer_plan_run", "arguments": {}},
@@ -488,6 +496,7 @@ class NextArchitectureTests(unittest.TestCase):
 
     def test_error_classification_carries_provider_retry_metadata(self) -> None:
         exc = urllib.error.HTTPError("https://example.test", 429, "Too Many Requests", None, None)
+        self.addCleanup(exc.close)
         exc.retry_after_seconds = 12
         envelope = classify_exception(exc, provider="openalex", stage="search")
         self.assertEqual(envelope.error_class, "rate_limited")

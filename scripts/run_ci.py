@@ -165,7 +165,6 @@ def live_steps(run_root: Path, provider_profile: str) -> list[Step]:
                 provider_profile,
                 "--output-dir",
                 str(run_root / "provider_live"),
-                "--allow-skipped",
             ),
             "live",
         )
@@ -252,7 +251,11 @@ def main() -> None:
         choices=["quick", "quality", "test", "full", "live", "soak"],
         default="quick",
     )
-    parser.add_argument("--provider-profile", choices=["core", "full"], default="full")
+    parser.add_argument(
+        "--provider-profile",
+        choices=["core", "full", "release"],
+        default="release",
+    )
     parser.add_argument("--soak-profile", choices=["quick", "standard", "long"], default="standard")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--list", action="store_true")
@@ -305,9 +308,13 @@ def main() -> None:
         "LITMINER_WORKSPACE_ROOT": str(PROJECT_ROOT),
     }
     if os.name == "nt":
-        default_temp = PROJECT_ROOT / ".litminer" / "tmp"
-        env.setdefault("TEMP", str(Path(os.environ.get("TEMP") or default_temp)))
-        env.setdefault("TMP", env["TEMP"])
+        ci_temp = Path(
+            os.environ.get("LITMINER_CI_TEMP")
+            or PROJECT_ROOT / ".litminer" / "tmp"
+        ).resolve()
+        ci_temp.mkdir(parents=True, exist_ok=True)
+        env["TEMP"] = str(ci_temp)
+        env["TMP"] = str(ci_temp)
 
     started = time.monotonic()
     results: list[dict[str, object]] = []

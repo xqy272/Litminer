@@ -78,8 +78,8 @@ jobs:
           python-version: "3.14"
       - name: Install
         run: python -m pip install -e .
-      - name: Full provider acceptance
-        run: python scripts/run_ci.py --profile live --provider-profile full
+      - name: Release provider gate
+        run: python scripts/run_ci.py --profile live --provider-profile release
 
   live-macos:
     if: github.event_name == 'workflow_dispatch' && inputs.run_live
@@ -88,6 +88,8 @@ jobs:
       OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
       OPENALEX_MAILTO: ${{ secrets.OPENALEX_MAILTO }}
       CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
+      SEMANTIC_SCHOLAR_API_KEY: ${{ secrets.SEMANTIC_SCHOLAR_API_KEY }}
+      UNPAYWALL_EMAIL: ${{ secrets.UNPAYWALL_EMAIL }}
       LITMINER_CONTACT_EMAIL: ${{ secrets.LITMINER_CONTACT_EMAIL }}
     steps:
       - uses: actions/checkout@v7
@@ -96,8 +98,8 @@ jobs:
           python-version: "3.14"
       - name: Install
         run: python -m pip install -e .
-      - name: Core provider acceptance
-        run: python scripts/run_ci.py --profile live --provider-profile core
+      - name: Release provider gate
+        run: python scripts/run_ci.py --profile live --provider-profile release
 
   soak-windows:
     if: github.event_name == 'workflow_dispatch' && inputs.run_soak

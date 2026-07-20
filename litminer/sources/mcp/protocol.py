@@ -18,6 +18,8 @@ DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     DEFAULT_PROTOCOL_VERSION,
     "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
 }
 DEFAULT_MAX_STDIN_LINE_BYTES = 16 * 1024 * 1024
 
@@ -62,6 +64,18 @@ def input_schema(
     tool_name: str,
     tool: dict[str, Any],
 ) -> dict[str, Any]:
+    """Return the client-compatible schema advertised by ``tools/list``."""
+    return (
+        tool_contracts.client_schema_for(tool_name)
+        or legacy_input_schema(tool)
+    )
+
+
+def validation_schema(
+    tool_name: str,
+    tool: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the strict schema used before a tool handler is invoked."""
     return (
         tool_contracts.schema_for(tool_name)
         or legacy_input_schema(tool)
@@ -139,7 +153,7 @@ def handle_request(
             tool = tools[tool_name]
             validate_json_schema(
                 arguments,
-                input_schema(tool_name, tool),
+                validation_schema(tool_name, tool),
             )
             result = tool["handler"](arguments)
             return mcp_tool_response(request, result)

@@ -227,6 +227,8 @@ env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
   "CROSSREF_MAILTO",
+  "SEMANTIC_SCHOLAR_API_KEY",
+  "S2_API_KEY",
   "UNPAYWALL_EMAIL",
   "LITMINER_CONTACT_EMAIL",
 ]
@@ -236,6 +238,28 @@ env_vars = [
 
 - [config/mcp.codex.example.toml](../config/mcp.codex.example.toml)
 - [config/mcp.claude.example.json](../config/mcp.claude.example.json)
+
+Windows PowerShell 可直接注册两个客户端：
+
+```powershell
+$workspace = "D:/path/to/your/project"
+$python = (Get-Command python).Source
+$codexServer = "C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"
+$claudeServer = "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $codexServer
+
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $claudeServer
+```
+
+`LITMINER_CONTACT_EMAIL`、provider 邮箱和 API key 必须由启动 Agent
+时的环境继承，不要作为 `--env`/`-e` 值或 JSON 字段持久化。
 
 更多工具说明见 [MCP surface reference](mcp-surface.md) 和 [MCP README](../litminer/sources/mcp/README.md)。
 
@@ -252,14 +276,17 @@ powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 full
 
 ```powershell
 python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
-python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
+python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release
 python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
 python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
 ```
 
 Provider live 只在手动或定时任务中运行。`core` 验收 OpenAlex/Crossref；
-`full` 覆盖六个 provider。Unpaywall 没有联系邮箱时只会在明确传入
-`--allow-skipped` 后作为结构化 skip 接受。
+`full` 严格要求六个 provider 全部成功；`release` 同样探测六源，但要求
+OpenAlex/Crossref 必须成功，其他来源只允许结构化的临时限流、网络、TLS、
+超时或 HTTP 5xx 降级。缺邮箱、鉴权、解析器和内部错误都会阻断发布。
+`--allow-skipped` 仅用于非发布诊断。
 
 ## 常见问题
 

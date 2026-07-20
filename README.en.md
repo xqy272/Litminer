@@ -205,12 +205,28 @@ full-run, provider wrappers, and individual stage tools remain in
 `LITMINER_MCP_TOOL_PROFILE=all`. Tool failures return structured
 `isError=true`/`ErrorEnvelope` results instead of requiring traceback parsing.
 
-Recommended MCP environment:
+Windows PowerShell registration example:
 
-```bash
-LITMINER_WORKSPACE_ROOT=/path/to/your/project
-LITMINER_CONTACT_EMAIL=you@example.org
+```powershell
+$workspace = "D:/path/to/your/project"
+$python = (Get-Command python).Source
+$codexServer = "C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"
+$claudeServer = "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $codexServer
+
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $claudeServer
 ```
+
+Do not persist provider contact emails or API keys in MCP JSON or registration
+commands. Set them in the environment before launching Codex or Claude Code.
+Last-tested client versions are recorded in `config/agent_clients.json`.
 
 See [litminer/sources/mcp/README.md](litminer/sources/mcp/README.md) and
 [references/mcp-surface.md](references/mcp-surface.md).
@@ -228,7 +244,9 @@ See [litminer/sources/mcp/README.md](litminer/sources/mcp/README.md) and
 | SQLite state export | `python -m litminer.runtime.state_store --output state_snapshot.json` |
 | Architecture acceptance | `python -m litminer.engine.architecture_acceptance --help` |
 | Codex/Claude acceptance | `python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents` |
-| Provider live acceptance | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped` |
+| Real Codex/Claude MCP acceptance | `python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents` |
+| Provider release gate | `python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release` |
+| Strict six-provider diagnostic | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers-full` |
 | Crash/migration/restart acceptance | `python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience` |
 | Quick runtime soak | `python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak` |
 | Unified Windows quick CI | `powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 quick` |

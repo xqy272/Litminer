@@ -77,6 +77,23 @@ Do not enable the advanced profile unless the task specifically needs it.
 12. run_spec.json
 13. query_plan.json
 
+## MCP Registration
+
+Last tested: Codex CLI 0.144.0. Prefer an absolute project-venv Python path.
+
+```powershell
+$workspace = "D:/path/to/project"
+$python = "C:/Users/your-name/.agents/skills/litminer/.venv/Scripts/python.exe"
+$server = "C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $server
+```
+
+Provider contact emails and API keys must be inherited from the environment;
+do not persist their values in the MCP registration.
+
 ## Windows Notes
 
 - Prefer scripts/run_ci.ps1 for local validation.

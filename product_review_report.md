@@ -1,5 +1,10 @@
 # Litminer 产品审查与演进方案
 
+> **历史快照：** 本文记录 2026-06-20 的产品视角，不是当前功能清单或
+> 未完成 backlog。后续已落地的 canonical evidence、可信导出、共享
+> Contract Layer、SQLite runtime 和九工具 MCP，以
+> `litminer_next_architecture_design.md` 与 `CHANGELOG.md` 为准。
+>
 > 审查日期：2026-06-20
 > 视角：产品定位、用户价值、能力边界、演进方向
 > 性质：如果我来做这个产品，我会怎么想、怎么做

@@ -13,9 +13,17 @@ when you want a stable version.
   release acceptance targets.
 - Added shared Codex/Claude Code operating contracts, root client adapters,
   deterministic adapter acceptance, and optional real-client CLI acceptance.
+- Added real-client MCP acceptance that uses per-invocation Codex MCP overrides
+  and a temporary strict Claude MCP configuration, calls workspace doctor and
+  plan, and verifies machine-observable tool completion rather than accepting
+  a documentation summary as evidence.
 - Added controlled parser-level live acceptance for OpenAlex, Crossref,
   Semantic Scholar, arXiv, Europe PMC, and Unpaywall, with structured skips and
   an isolated SQLite request ledger.
+- Added a provider `release` gate: OpenAlex/Crossref are mandatory, while
+  optional providers may degrade only for structured transient infrastructure
+  failures; auth, missing contact data, parser, validation, and internal errors
+  remain release blockers.
 - Added SQLite schema migration 2 with append-only `runtime_events`, v1 upgrade
   acceptance, idempotency checks, and deliberately broken migration rollback.
 - Added native subprocess crash/restart acceptance for CLI stage recovery and
@@ -81,6 +89,11 @@ when you want a stable version.
 - MCP schemas now come directly from the Contract Layer, express mutually
   exclusive input modes and ranges, validate before execution, and expose
   explicit provider/result pagination.
+- MCP `tools/list` now advertises a conservative primary-client schema view
+  without unsupported top-level composition keywords, while `tools/call`
+  continues to validate against the unchanged strict schema.
+- MCP protocol negotiation now covers `2024-11-05`, `2025-03-26`,
+  `2025-06-18`, and `2025-11-25`.
 - MCP tool failures now return `isError=true` with structured error data;
   JSON-RPC errors are reserved for protocol/method failures.
 - Processing and search-audit reports now include run quality, coverage,
@@ -118,6 +131,41 @@ when you want a stable version.
 - Made real Codex acceptance compatible with current Windows npm `.CMD`
   launchers by placing global approval flags before `exec` and sending the
   long prompt over stdin; Claude JSON envelopes remain supported.
+- Codex acceptance now preserves the user's model/provider route while
+  temporarily disabling user-configured MCP servers and approving only
+  doctor/plan for that invocation. Claude acceptance keeps ToolSearch
+  available for deferred MCP tools, auto-allows only doctor/plan, and rejects
+  skipped, failed, or unexpected tool calls.
+- Real Codex evidence now verifies the actual structured result, exact call
+  count/order, and MCP server identity; an existing user server named
+  litminer no longer disables the temporary acceptance server. Raw Claude
+  debug logs are reduced to bounded Litminer-only evidence in the JSON report
+  and removed after parsing. Claude-qualified MCP tool names are normalized
+  before response-contract comparison, and gateway HTML/network metadata is
+  omitted from bounded client stderr evidence.
+- Fixed Claude Code dropping five workflow tools by removing unsupported
+  top-level `oneOf`/`anyOf` declarations from the client view without
+  weakening server-side validation.
+- Corrected the Claude MCP template to the real `mcpServers.litminer` file
+  shape and removed persisted contact-email placeholders. Template acceptance
+  now rejects provider API-key/email/mailto values in MCP `env`.
+- Corrected every Claude Code `mcp add` example so the server name precedes the
+  variadic `-e` arguments; the previous ordering made Claude parse `litminer`
+  as an invalid environment-variable token.
+- Replaced permissive live-CI skips with the explicit provider release gate on
+  both Windows and native GitHub Actions macOS jobs.
+- Made the programmatic provider release policy require the complete registered
+  provider set, rejecting subsets, duplicates, and unexpected provider names.
+- Projected non-exception provider results such as Unpaywall rate limits into
+  the shared `ErrorEnvelope`, so optional transient failures can degrade the
+  release gate exactly as documented while contact, parser, and auth failures
+  still block it.
+- Added SEMANTIC_SCHOLAR_API_KEY and S2_API_KEY to Codex MCP environment
+  inheritance so an optional key configured before Agent launch reaches
+  Litminer without being persisted in the template.
+- Closed HTTP error response objects in the shared retry client, Unpaywall, and
+  publisher probing paths to prevent connection or handle accumulation during
+  rate limits and long-running provider work.
 - Aligned Crossref live acceptance with the parser's
   `crossref_doi`/`crossref_title` fields and fixed Unpaywall's direct
   DOI CLI JSON import plus no-contact live preflight handling.

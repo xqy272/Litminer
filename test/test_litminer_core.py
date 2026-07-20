@@ -42,6 +42,7 @@ from litminer.engine import verification_queue
 from litminer.engine import websearch_import
 from litminer.engine import workspace
 from litminer.engine import workflow_state
+from litminer.contracts import tool_contracts
 from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import europe_pmc_search
@@ -282,6 +283,7 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.retry_after_seconds, 0.0)
         self.assertEqual(caught.exception.http_status, 429)
         self.assertEqual(sleep.call_count, semantic_scholar_search.RATE_LIMIT_RETRIES - 1)
+        self.assertTrue(error.closed)
 
     def test_preflight_warnings_surface_configuration_gaps(self) -> None:
         args = argparse.Namespace(
@@ -1191,6 +1193,27 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertEqual(flat["unpaywall_retry_after_seconds"], "0.0")
         self.assertIn("rate limit", result["error"])
         self.assertEqual(sleep.call_count, unpaywall_lookup.MAX_RETRIES - 1)
+        self.assertTrue(error.closed)
+
+    def test_unpaywall_closes_direct_http_error_response(self) -> None:
+        error = urllib.error.HTTPError(
+            url="https://api.unpaywall.org/v2/10.1234/missing",
+            code=404,
+            msg="Not Found",
+            hdrs=Message(),
+            fp=None,
+        )
+        with patch(
+            "litminer.sources.api.unpaywall_lookup._request_json",
+            side_effect=error,
+        ):
+            result = unpaywall_lookup.lookup_doi(
+                "10.1234/missing",
+                email="agent@example.org",
+            )
+
+        self.assertEqual(result["status"], "not_found")
+        self.assertTrue(error.closed)
 
     def test_unpaywall_rate_limited_rows_are_not_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1265,6 +1288,17 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertIn("error", response)
         self.assertEqual(response["error"]["code"], -32602)
 
+    def test_mcp_accepts_primary_client_protocol_versions(self) -> None:
+        for version in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
+            with self.subTest(protocol_version=version):
+                response = mcp_server.handle_request({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": version},
+                })
+                self.assertEqual(response["result"]["protocolVersion"], version)
+
     def test_mcp_uses_configured_workspace_root_for_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -1311,6 +1345,34 @@ class LitminerCoreTests(unittest.TestCase):
         self.assertNotIn("litminer_read_csv_summary", names)
         self.assertNotIn("litminer_batch_verify_crossref", names)
         self.assertNotIn("litminer_search_openalex", names)
+
+        for tool in response["result"]["tools"]:
+            self.assertEqual(
+                tool_contracts.client_schema_issues(tool["inputSchema"]),
+                [],
+                msg=f"client-incompatible schema for {tool['name']}",
+            )
+
+    def test_mcp_client_schema_is_broad_but_runtime_validation_stays_strict(self) -> None:
+        advertised = tool_contracts.client_schema_for("litminer_start_run") or {}
+        strict = tool_contracts.schema_for("litminer_start_run") or {}
+        self.assertNotIn("oneOf", advertised)
+        self.assertIn("oneOf", strict)
+
+        response = mcp_server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "litminer_start_run",
+                "arguments": {},
+            },
+        })
+        self.assertTrue(response["result"]["isError"])
+        self.assertEqual(
+            response["result"]["structuredContent"]["error"]["class"],
+            "validation",
+        )
 
     def test_doctor_workspace_report_explains_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1462,6 +1524,7 @@ class LitminerCoreTests(unittest.TestCase):
 
         self.assertEqual(data["message"]["DOI"], "10.1234/example")
         sleep.assert_called_once_with(0.0)
+        self.assertTrue(first.closed)
 
     def test_crossref_rate_limited_rows_are_not_reused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1502,6 +1565,27 @@ class LitminerCoreTests(unittest.TestCase):
             publisher_probe.validate_public_http_url("https://example.org/b")
 
         getaddrinfo.assert_called_once_with("example.org", None)
+
+    def test_publisher_probe_closes_http_error_response(self) -> None:
+        error = urllib.error.HTTPError(
+            url="https://example.org/paper",
+            code=403,
+            msg="Forbidden",
+            hdrs=Message(),
+            fp=None,
+        )
+        with patch.object(
+            publisher_probe,
+            "validate_public_http_url",
+        ), patch.object(
+            publisher_probe.SAFE_OPENER,
+            "open",
+            side_effect=error,
+        ):
+            result = publisher_probe.request_url("https://example.org/paper")
+
+        self.assertEqual(result["status"], "403")
+        self.assertTrue(error.closed)
 
     def test_doctor_validates_config_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2965,6 +3049,7 @@ class LitminerCoreTests(unittest.TestCase):
             self.assertEqual(caught.exception.status, "rate_limited")
             self.assertEqual(caught.exception.http_status, 429)
             self.assertEqual(sleep.call_count, 1)
+            self.assertTrue(error.closed)
 
     def test_http_client_raise_on_status_raises_immediately(self) -> None:
         from litminer.sources.api.http_client import RetryPolicy, fetch_json
@@ -2984,6 +3069,7 @@ class LitminerCoreTests(unittest.TestCase):
                 )
             self.assertEqual(caught.exception.status, "auth_error")
             self.assertEqual(caught.exception.http_status, 403)
+            self.assertTrue(error.closed)
 
     def test_citation_expand_selects_seeds_mechanically(self) -> None:
         from litminer.engine.citation_expand import select_seeds

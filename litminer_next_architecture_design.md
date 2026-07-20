@@ -1,9 +1,13 @@
 # Litminer 下一代架构设计方案
 
-> 状态：Proposed
+> 状态：Implemented architecture record
 > 基线：`5157395 Improve verification workflow and research iterations`
 > 日期：2026-07-15
 > 性质：独立设计，不是 `iteration_plan.md` 的续写、补丁或重新排序
+> 落地说明：截至 2026-07-20，Milestone A—E 的核心契约、SQLite runtime、
+> provider scheduler/ledger、coverage、canonical evidence、RIS/BibTeX、
+> 九工具 MCP、恢复/soak/Agent acceptance 均已进入主线。本文现作为设计
+> 依据和边界记录；具体发版证据以 `references/release-checklist.md` 为准。
 
 ## 1. 核心结论
 
@@ -1038,11 +1042,17 @@ Live 测试必须：
 
 本方案不继承旧计划的“第几轮”结构，也不以 4.1、4.4 为起点。
 
-旧 `iteration_plan.md` 应保留为历史决策和已完成工作记录；从 commit `5157395` 之后的未来架构、实施顺序和验收标准，以本方案为新的候选路线图。
+旧 `iteration_plan.md` 保留为历史决策和已完成工作记录。本方案已从候选
+路线图转为当前架构记录；后续演进不得回退已经落地的共享契约、状态、
+证据和恢复语义。
 
-旧计划中尚未实施但仍有价值的事项，只有在满足本方案的前置契约时才进入实施：
+旧计划中的两个关键事项已经按本方案重新定义并完成：
 
-- MCP 描述补全被重新定义为 Contract Layer 的一部分，而不是文档润色。
-- RIS/BibTeX 被重新定义为 Canonical Evidence Model 的下游 exporter，而不是任意 CSV 文本模板。
+- MCP 描述补全成为 Contract Layer、客户端兼容 Schema 和真实 Agent
+  acceptance 的组合，而不是文档润色。
+- RIS/BibTeX 成为 Canonical Evidence Model 的下游 exporter，并带独立
+  `export_manifest.json`，而不是任意 CSV 文本模板。
 
-这保证已经完成的工作继续作为地基，同时避免旧 backlog 的局部假设继续限制下一阶段设计。
+当前剩余工作属于持续发布工程：保持 Codex/Claude、provider、Windows 和
+macOS 原生证据绿色，并按现有模块边界继续降低兼容 runner/MCP 入口的
+集中度；它们不是重新开启一次架构重写。

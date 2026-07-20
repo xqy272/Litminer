@@ -412,31 +412,27 @@ def status_for_exception(exc: Exception) -> str: ...
 
 ---
 
-## 第四轮：可用性补全 ⏳ 部分完成（4.2、4.3 已完成）
+## 第四轮：可用性补全 ✅ 已完成
 
-> 依赖前三轮完成。可在发版后按需推进。
+> 4.1—4.4 均已按后续 Canonical Evidence/Contract Layer 设计落地。
 
-### 4.1 RIS/BibTeX 导出
+### 4.1 RIS/BibTeX 导出 ✅ 已完成
 
-**新增文件：** `litminer/engine/export.py`
+**实际落点：** `litminer/exporters/`、`litminer-export`、
+`litminer_export` MCP 工具和 finalize 的 `--export`。
 
-**范围：** 从任何阶段的 CSV 生成标准文献管理格式。RIS 和 BibTeX 都是纯文本格式，stdlib 完全可以处理。
+原设想“从任何阶段 CSV 直接套文本模板”已被更严格的实现取代：
+导出只消费 canonical bibliography，默认排除未验证、撤稿和缺标题记录。
+显式包含未验证记录时不会提升其信任等级，并由
+`export_manifest.json` 记录风险、排除原因、冲突和输出哈希。
 
-```python
-def export_ris(csv_path: Path, output_path: Path, *,
-               min_priority: str | None = None) -> int:
-    """返回导出的条目数"""
+- RIS/BibTeX 字段映射、Unicode/ASCII-LaTeX 模式和稳定 cite key 已实现
+- CLI、runner finalize 与 MCP 共用同一 exporter
+- 默认资格由书目信任和撤稿状态决定，不用科学 priority 替代书目可信度
+- fixture、冲突稳定性、路径安全和导出审计已有自动化测试
 
-def export_bibtex(csv_path: Path, output_path: Path, *,
-                  min_priority: str | None = None) -> int:
-    """返回导出的条目数"""
-```
-
-- 在 `run_lit_search.py` 的 finalize 阶段可选调用（`--export ris` / `--export bibtex`）
-- MCP 工具 `litminer_export` 暴露此能力
-- 支持 `min_priority` 过滤（只导出 high + medium）
-
-**为什么做这个：** 这是人类研究者从"能看结果"到"能用结果"的桥梁。实现量很小（RIS 是固定格式的文本模板），但用户感知价值高。
+**设计结论：** 这是从“能看结果”到“能交付可信书目”的桥梁，但不是
+通用文献管理器，也不扩张 Litminer 的科学判断边界。
 
 ### 4.2 增量合并能力（`--merge-into`）✅ 已完成
 
@@ -474,15 +470,18 @@ python -m litminer.engine.run_lit_search --query "water splitting catalyst" \
 
 **为什么必须做：** 没有 delta，`--merge-into` 在产品层是黑盒。研究者做迭代检索的真实场景是问 Agent"第二轮新找到了什么"——不是"现在总共有多少论文"。Agent 如果只能说"现在总共有 240 篇"而说不出"新增了 53 篇，其中 12 篇高优先级"，那迭代检索的价值就打了折扣。差集计算是机械操作（manifest 里已有每轮的时间戳和查询），不增加新 API 调用。
 
-### 4.4 MCP 工具描述补全
+### 4.4 MCP 工具描述补全 ✅ 已完成
 
-当前多个 MCP 工具的 description 过于简短，Agent 不知道必须提供什么参数。逐个补全：
+该项已升级为 Contract Layer，而不是只润色 description：
 
-- `litminer_run_lit_search`：说明 `queries` 或 `input_csv` 必须提供其一
-- `litminer_start_run` / `litminer_resume_run`：在声明处直接填写参数 schema（而非在 1377 行 mutation）
-- `litminer_search_openalex`：说明 20 条截断和 `truncated` 标志
-- `litminer_search_semantic_scholar`：说明必须提供 `query`/`citation_expand`/`reference_expand` 之一
-- 所有工具的错误响应：添加 `error_class` 字段区分验证错误 vs 网络错误
+- 默认 MCP 面收敛为九个高层工具，低层工具进入 advanced profile
+- CLI/MCP 共享 `RunSpec` 与严格 JSON Schema
+- 客户端声明 Schema 与服务端严格 Schema 分离，兼容 Claude Code，同时
+  不放宽运行时输入约束
+- 支持当前 Codex/Claude 所需的 MCP 协议版本矩阵
+- provider 分页、截断、workspace、安全和错误字段均在描述/Schema 中公开
+- 工具失败返回 `isError=true` 与结构化 `ErrorEnvelope`
+- 确定性及真实 Codex/Claude MCP acceptance 防止“文档存在但工具不可用”的假绿
 
 ---
 
@@ -772,7 +771,7 @@ compliance assessment.
 第一轮：修真 bug + 边界文档化        ✅ → 让现有功能可靠 + 产品定义写下来
 第二轮：分层统计 + 完整性告诫 + 撤稿  ✅ → 让现有产出有用且诚实
 第三轮：HTTP 统一 + 引用扩展 + 审计性 + HTML meta ✅ → 强化核心检索能力 + 补全边界内缺失
-第四轮：导出 ⏳ + 增量合并/delta ✅    → 4.2、4.3 已完成，4.1、4.4 仍待推进
+第四轮：可信导出 + 增量合并/delta + MCP Contract ✅ → 4.1—4.4 全部完成
 按需：不预设，等触发                  ⏳ → 不为未来抽象，用真实需求验证
 ```
 

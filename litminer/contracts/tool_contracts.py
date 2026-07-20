@@ -1,9 +1,24 @@
-"""Single source for Agent-facing tool JSON schemas and descriptions."""
+"""Single source for Agent-facing tool JSON schemas and descriptions.
+
+The strict schemas are Litminer's executable contract. Some Agent clients
+accept only a conservative JSON-Schema subset for tool declarations, so the
+schema advertised over MCP is derived from the strict schema without
+top-level composition keywords. Runtime validation always uses the strict
+schema and therefore keeps the input-family and identifier constraints.
+"""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+
+
+CLIENT_UNSUPPORTED_TOP_LEVEL_KEYWORDS = frozenset({
+    "allOf",
+    "anyOf",
+    "not",
+    "oneOf",
+})
 
 
 def _s(description: str, **extra: Any) -> dict[str, Any]:
@@ -217,8 +232,31 @@ TOOL_DESCRIPTIONS = {
 
 
 def schema_for(tool_name: str) -> dict[str, Any] | None:
+    """Return the strict server-side validation schema for a tool."""
     schema = TOOL_SCHEMAS.get(tool_name)
     return deepcopy(schema) if schema is not None else None
+
+
+def client_schema_for(tool_name: str) -> dict[str, Any] | None:
+    """Return a cross-client MCP declaration schema.
+
+    Claude Code currently rejects tools whose *top-level* input schema uses
+    composition keywords such as ``oneOf`` or ``anyOf``. Removing those
+    declaration-only keywords broadens what the client may propose, but does
+    not broaden what Litminer accepts: ``protocol.handle_request`` validates
+    every call against :func:`schema_for` before invoking a handler.
+    """
+    schema = schema_for(tool_name)
+    if schema is None:
+        return None
+    for keyword in CLIENT_UNSUPPORTED_TOP_LEVEL_KEYWORDS:
+        schema.pop(keyword, None)
+    return schema
+
+
+def client_schema_issues(schema: dict[str, Any]) -> list[str]:
+    """Return top-level keywords known to make primary clients drop a tool."""
+    return sorted(CLIENT_UNSUPPORTED_TOP_LEVEL_KEYWORDS.intersection(schema))
 
 
 def description_for(tool_name: str, fallback: str = "") -> str:

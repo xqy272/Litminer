@@ -184,52 +184,72 @@ def _do_fetch(
                 })
                 return result
         except urllib.error.HTTPError as exc:
-            wait = retry_after_seconds(exc, attempt, retry) if exc.code == 429 or 500 <= exc.code < 600 else 0.0
-            _emit_request_event({
-                'request_id': request_id,
-                'attempt': attempt + 1,
-                'started_at': started_at,
-                'ended_at': _utc_now(),
-                'latency_ms': (time.monotonic() - started_monotonic) * 1000.0,
-                'http_status': exc.code,
-                'status_class': (
-                    'rate_limited' if exc.code == 429 else
-                    'auth' if exc.code in {401, 403} else
-                    'provider_response'
-                ),
-                'retry_after_seconds': wait or None,
-                'error_code': f'http_{exc.code}',
-                'url_hash': url_hash,
-            })
-            if exc.code in raise_on_status:
-                raise ProviderSearchError(
-                    f"HTTP {exc.code}: {exc.reason}",
-                    status="auth_error" if exc.code in {401, 403} else f"http_{exc.code}",
-                    http_status=exc.code,
-                    transient=False,
-                    attempts=attempt + 1,
-                    request_count=attempt + 1,
-                ) from exc
-            last_error = exc
-            is_rate_limited = exc.code == 429
-            is_server_error = 500 <= exc.code < 600
-            if is_rate_limited and attempt < rate_limit_max - 1:
-                wait = retry_after_seconds(exc, attempt, retry)
-                print(f"  Rate limited (429). Retry {attempt + 1}/{rate_limit_max} after {wait:g}s", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            if is_server_error and attempt < max_attempts - 1:
-                wait = retry_after_seconds(exc, attempt, retry)
-                print(f"  Retry {attempt + 1}/{max_attempts} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            if not is_rate_limited and not is_server_error and attempt < max_attempts - 1:
-                wait = max(retry.backoff_floor, retry.backoff_base ** attempt)
-                wait = min(wait, retry.max_wait_seconds)
-                print(f"  Retry {attempt + 1}/{max_attempts} after {wait:g}s: {exc}", file=sys.stderr)
-                time.sleep(wait)
-                continue
-            break
+            try:
+                wait = retry_after_seconds(
+                    exc,
+                    attempt,
+                    retry,
+                ) if exc.code == 429 or 500 <= exc.code < 600 else 0.0
+                _emit_request_event({
+                    'request_id': request_id,
+                    'attempt': attempt + 1,
+                    'started_at': started_at,
+                    'ended_at': _utc_now(),
+                    'latency_ms': (time.monotonic() - started_monotonic) * 1000.0,
+                    'http_status': exc.code,
+                    'status_class': (
+                        'rate_limited' if exc.code == 429 else
+                        'auth' if exc.code in {401, 403} else
+                        'provider_response'
+                    ),
+                    'retry_after_seconds': wait or None,
+                    'error_code': f'http_{exc.code}',
+                    'url_hash': url_hash,
+                })
+                if exc.code in raise_on_status:
+                    raise ProviderSearchError(
+                        f"HTTP {exc.code}: {exc.reason}",
+                        status="auth_error" if exc.code in {401, 403} else f"http_{exc.code}",
+                        http_status=exc.code,
+                        transient=False,
+                        attempts=attempt + 1,
+                        request_count=attempt + 1,
+                    ) from exc
+                last_error = exc
+                is_rate_limited = exc.code == 429
+                is_server_error = 500 <= exc.code < 600
+                if is_rate_limited and attempt < rate_limit_max - 1:
+                    wait = retry_after_seconds(exc, attempt, retry)
+                    print(
+                        f"  Rate limited (429). Retry {attempt + 1}/{rate_limit_max} "
+                        f"after {wait:g}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                if is_server_error and attempt < max_attempts - 1:
+                    wait = retry_after_seconds(exc, attempt, retry)
+                    print(
+                        f"  Retry {attempt + 1}/{max_attempts} after {wait:g}s: {exc}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                if not is_rate_limited and not is_server_error and attempt < max_attempts - 1:
+                    wait = max(retry.backoff_floor, retry.backoff_base ** attempt)
+                    wait = min(wait, retry.max_wait_seconds)
+                    print(
+                        f"  Retry {attempt + 1}/{max_attempts} after {wait:g}s: {exc}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                break
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
         except (urllib.error.URLError, json.JSONDecodeError, ET.ParseError,
                 OSError, http.client.IncompleteRead) as exc:
             event_status = status_for_exception(exc)

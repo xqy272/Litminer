@@ -158,9 +158,20 @@ def lookup_doi(doi: str, email: str | None = None) -> dict[str, Any]:
     except UnpaywallRequestError as exc:
         return {"status": exc.status, "error": str(exc), "data": None}
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return {"status": "not_found", "error": "DOI not found in Unpaywall", "data": None}
-        return {"status": "error", "error": f"HTTP {exc.code}: {exc.reason}", "data": None}
+        try:
+            if exc.code == 404:
+                return {
+                    "status": "not_found",
+                    "error": "DOI not found in Unpaywall",
+                    "data": None,
+                }
+            return {
+                "status": "error",
+                "error": f"HTTP {exc.code}: {exc.reason}",
+                "data": None,
+            }
+        finally:
+            exc.close()
     except Exception as exc:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}", "data": None}
 

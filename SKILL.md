@@ -467,7 +467,8 @@ Native acceptance entry points:
 
 ```bash
 python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
-python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
+python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release
 python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
 python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
 ```

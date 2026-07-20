@@ -41,7 +41,14 @@ Client contract acceptance:
 
 ```bash
 python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
 ```
+
+The server accepts MCP protocol versions `2024-11-05`, `2025-03-26`,
+`2025-06-18`, and `2025-11-25`. `tools/list` uses a conservative
+primary-client declaration schema that removes unsupported top-level
+composition keywords. `tools/call` always validates against the full strict
+schema, so client compatibility does not weaken input or workspace safety.
 
 ## Primary Tools
 

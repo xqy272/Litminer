@@ -190,19 +190,27 @@ def request_url(url: str, max_bytes: int = HTML_LIMIT) -> dict[str, str]:
                 "error": "",
             }
     except urllib.error.HTTPError as exc:
-        body = ""
         try:
-            body = exc.read(min(max_bytes, 100_000)).decode("utf-8", errors="replace")
-        except Exception:
             body = ""
-        return {
-            "ok": "false",
-            "status": str(exc.code),
-            "url": exc.geturl() or url,
-            "content_type": exc.headers.get("Content-Type", "") if exc.headers else "",
-            "body": body,
-            "error": f"HTTP {exc.code}: {exc.reason}",
-        }
+            try:
+                body = exc.read(min(max_bytes, 100_000)).decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                body = ""
+            return {
+                "ok": "false",
+                "status": str(exc.code),
+                "url": exc.geturl() or url,
+                "content_type": (
+                    exc.headers.get("Content-Type", "") if exc.headers else ""
+                ),
+                "body": body,
+                "error": f"HTTP {exc.code}: {exc.reason}",
+            }
+        finally:
+            exc.close()
     except Exception as exc:
         return {
             "ok": "false",

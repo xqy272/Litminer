@@ -136,10 +136,35 @@ env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
   "CROSSREF_MAILTO",
+  "SEMANTIC_SCHOLAR_API_KEY",
+  "S2_API_KEY",
   "UNPAYWALL_EMAIL",
   "LITMINER_CONTACT_EMAIL",
 ]
 ```
+
+Windows PowerShell registration:
+
+```powershell
+$workspace = "D:/path/to/your/project"
+$python = (Get-Command python).Source
+$codexServer = "C:/Users/your-name/.agents/skills/litminer/litminer/sources/mcp/server.py"
+$claudeServer = "C:/Users/your-name/.claude/skills/litminer/litminer/sources/mcp/server.py"
+
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $codexServer
+
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $claudeServer
+```
+
+Provider contact emails and API keys must be inherited from the environment
+that launches the Agent. Do not persist them as `--env`/`-e` values or JSON
+fields.
 
 ## Development And Acceptance
 
@@ -154,15 +179,19 @@ Focused acceptance:
 
 ```bash
 python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
-python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
+python -m litminer.engine.provider_acceptance --profile release --output-dir .litminer/acceptance/providers-release
 python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
 python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
 ```
 
 Provider live acceptance is manual or scheduled. The core profile checks
-OpenAlex/Crossref; full covers all six registered providers. A missing
-Unpaywall contact email is accepted only as an explicit structured skip with
-`--allow-skipped`.
+OpenAlex/Crossref; full strictly requires all six registered providers.
+The release profile probes all six, requires OpenAlex/Crossref success, and
+allows optional providers to degrade only for structured transient rate-limit,
+network, TLS, timeout, or HTTP 5xx failures. Missing contact data, auth,
+parser, and internal errors fail the release gate. `--allow-skipped` is for
+non-release diagnostics only.
 
 ## Troubleshooting
 

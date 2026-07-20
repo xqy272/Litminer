@@ -37,6 +37,23 @@ The server still implements the advanced handlers internally; the profile
 controls the advertised surface so ordinary Agents are not distracted by every
 stage tool.
 
+## Protocol And Client Schema Compatibility
+
+The stdio server accepts MCP protocol versions `2024-11-05`, `2025-03-26`,
+`2025-06-18`, and `2025-11-25`. This covers the current primary-client
+matrix, including Codex CLI 0.144.0.
+
+The Contract Layer keeps two schema views:
+
+- the strict server schema, used for every `tools/call` validation
+- the client declaration schema, used only in `tools/list`
+
+Claude Code 2.1.195 drops tools whose top-level input schema contains
+`allOf`, `anyOf`, `not`, or `oneOf`. Litminer removes only those
+top-level declaration keywords from the client view. Nested property schemas
+remain intact, and the strict schema still enforces input-family, identifier,
+range, and path constraints before any handler runs.
+
 The stdio compatibility entry point is `server.py`. JSON-RPC construction lives
 in `protocol.py`, in-memory/persisted jobs live in `job_registry.py`, and
 high-level run/read/export/recovery helpers live in `workflow_tools.py`. This
@@ -122,6 +139,8 @@ env_vars = [
   "OPENALEX_API_KEY",
   "OPENALEX_MAILTO",
   "CROSSREF_MAILTO",
+  "SEMANTIC_SCHOLAR_API_KEY",
+  "S2_API_KEY",
   "UNPAYWALL_EMAIL",
   "LITMINER_CONTACT_EMAIL"
 ]
@@ -130,16 +149,62 @@ env_vars = [
 On Windows, prefer an absolute Python executable path or a project-local
 virtualenv Python if the default `python` command is unreliable.
 
+Claude Code project/user MCP file shape:
+
+```json
+{
+  "mcpServers": {
+    "litminer": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "C:/Users/you/.claude/skills/litminer/litminer/sources/mcp/server.py"
+      ],
+      "cwd": "D:/path/to/project",
+      "env": {
+        "LITMINER_WORKSPACE_ROOT": "D:/path/to/project",
+        "LITMINER_MCP_TOOL_PROFILE": "workflow"
+      }
+    }
+  }
+}
+```
+
+Do not persist provider API keys, contact emails, callbacks, or thread objects
+inside either client configuration. Codex `env_vars` inherits named values
+from the launch environment; Claude Code should be launched from an environment
+where those values are already set.
+
+Windows PowerShell registration:
+
+```powershell
+$workspace = "D:/path/to/project"
+$python = (Get-Command python).Source
+$codexServer = "C:/Users/you/.agents/skills/litminer/litminer/sources/mcp/server.py"
+$claudeServer = "C:/Users/you/.claude/skills/litminer/litminer/sources/mcp/server.py"
+
+codex mcp add `
+  --env "LITMINER_WORKSPACE_ROOT=$workspace" `
+  --env "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  litminer -- $python $codexServer
+
+claude mcp add --scope user litminer `
+  -e "LITMINER_WORKSPACE_ROOT=$workspace" `
+  -e "LITMINER_MCP_TOOL_PROFILE=workflow" `
+  -- $python $claudeServer
+```
+
 Validate the actual client adapters and MCP surface with:
 
 ```bash
 python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.engine.agent_client_acceptance --agent all --real --output-dir .litminer/acceptance/real-agents
 python -m litminer.sources.mcp.test_server
 ```
 
-Add `--real --allow-missing-client` to the first command only for an optional
-installed Codex/Claude Code CLI check. Deterministic acceptance remains the
-required contract gate.
+Deterministic acceptance is the portable contract gate. A Windows release also
+requires the real installed-client run; `--allow-missing-client` is only for
+developer diagnostics and is not release evidence.
 
 ## JSON-RPC Example
 
