@@ -251,7 +251,7 @@ def _real_prompt(agent: str) -> str:
 
 
 def _executable_command(executable: str, arguments: list[str]) -> list[str]:
-    suffix = Path(executable).suffix.lower()
+    suffix = os.path.splitext(executable)[1].lower()
     if os.name == "nt" and suffix in {".cmd", ".bat"}:
         command_line = subprocess.list2cmdline([executable, *arguments])
         return [

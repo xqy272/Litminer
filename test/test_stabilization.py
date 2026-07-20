@@ -176,6 +176,10 @@ class AgentClientAcceptanceTests(unittest.TestCase):
             os.environ,
             {"COMSPEC": "cmd.exe"},
             clear=False,
+        ), patch.object(
+            agent_client_acceptance,
+            "Path",
+            side_effect=AssertionError("launcher suffix detection must be host-neutral"),
         ):
             command = agent_client_acceptance._executable_command(
                 r"C:\tools\codex.CMD",

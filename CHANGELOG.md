@@ -103,7 +103,8 @@ when you want a stable version.
 ### Fixed
 
 - Made Python 3.10 Agent acceptance validate the Codex TOML template without
-  adding a third-party runtime dependency.
+  adding a third-party runtime dependency, and made Windows launcher detection
+  safe to exercise from native macOS Python 3.10.
 - Canonicalized SQLite run-path identity and made path assertions alias-aware,
   covering GitHub Runner short paths on Windows and `/var` versus
   `/private/var` on macOS.
