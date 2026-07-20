@@ -20,8 +20,8 @@ jobs:
   quality-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install development tools
@@ -36,8 +36,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
@@ -52,8 +52,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.12", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
@@ -72,8 +72,8 @@ jobs:
       UNPAYWALL_EMAIL: ${{ secrets.UNPAYWALL_EMAIL }}
       LITMINER_CONTACT_EMAIL: ${{ secrets.LITMINER_CONTACT_EMAIL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install
@@ -90,8 +90,8 @@ jobs:
       CROSSREF_MAILTO: ${{ secrets.CROSSREF_MAILTO }}
       LITMINER_CONTACT_EMAIL: ${{ secrets.LITMINER_CONTACT_EMAIL }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install
@@ -103,8 +103,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.run_soak
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install
@@ -116,8 +116,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.run_soak
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - name: Install

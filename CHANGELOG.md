@@ -99,6 +99,9 @@ when you want a stable version.
 - Made `query_plan.json.source_strategy` more explicit about selected sources,
   recommendation gaps, and why recommended sources were not enabled.
 - Added MCP `next_actions` to direct and background workflow responses.
+- Upgraded official GitHub checkout and Python setup actions to v7 so native
+  Windows/macOS validation no longer depends on the deprecated Node 20 action
+  runtime.
 
 ### Fixed
 
