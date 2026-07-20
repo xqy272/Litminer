@@ -280,8 +280,10 @@ def write_report(output_dir: Path, output_path: Path | None = None) -> Path:
 
     lines.append("")
     if coverage:
-        ledger = coverage.get("request_ledger") if isinstance(coverage.get("request_ledger"), dict) else {}
-        discovery = coverage.get("discovery") if isinstance(coverage.get("discovery"), dict) else {}
+        ledger_value = coverage.get("request_ledger")
+        ledger = ledger_value if isinstance(ledger_value, dict) else {}
+        discovery_value = coverage.get("discovery")
+        discovery = discovery_value if isinstance(discovery_value, dict) else {}
         lines.extend([
             "## Coverage And Runtime Quality",
             "",

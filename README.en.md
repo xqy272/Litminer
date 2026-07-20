@@ -11,6 +11,17 @@ It is not a review writer, PDF reader, or knowledge base. Litminer makes
 retrieval, verification, failure logging, and evidence handoff repeatable; the
 Agent and user still make the final scientific judgement.
 
+## Supported Targets
+
+- Windows is the primary platform and the strongest release gate.
+- macOS is the secondary platform and is validated on native macOS runners,
+  including GitHub Actions `macos-latest` when no local Mac is available.
+- Linux and Docker are not release targets; container results do not replace
+  native Windows or macOS acceptance.
+- Codex and Claude Code are the primary Agent clients and share one RunSpec,
+  MCP, artifact, recovery, and safety contract.
+- Runtime requires Python 3.10+ and remains stdlib-only.
+
 ## What It Does
 
 - Discover candidates from OpenAlex, Semantic Scholar, arXiv, Europe PMC, and similar sources.
@@ -216,6 +227,12 @@ See [litminer/sources/mcp/README.md](litminer/sources/mcp/README.md) and
 | RIS/BibTeX export | `python -m litminer.exporters.exporter --help` |
 | SQLite state export | `python -m litminer.runtime.state_store --output state_snapshot.json` |
 | Architecture acceptance | `python -m litminer.engine.architecture_acceptance --help` |
+| Codex/Claude acceptance | `python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents` |
+| Provider live acceptance | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped` |
+| Crash/migration/restart acceptance | `python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience` |
+| Quick runtime soak | `python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak` |
+| Unified Windows quick CI | `powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 quick` |
+| Unified full CI | `python scripts/run_ci.py --profile full` |
 | Unit tests | `python -m unittest discover -s test -p "test_*.py"` |
 
 ## Boundaries
@@ -257,11 +274,11 @@ Litminer/
 `-- test/
 ```
 
-`litminer/contracts/` owns Agent-facing contracts; `litminer/runtime/` owns
-SQLite, provider scheduling, and stage state; `litminer/evidence/` separates
-observations from canonical papers; `litminer/exporters/` owns trusted
-bibliography delivery. `litminer/engine/` retains deterministic stages and the
-compatibility orchestrator, while `litminer/sources/mcp/` is the stdio adapter.
+`litminer/contracts/` owns Agent-facing contracts. `litminer/runtime/` owns
+SQLite, provider scheduling, run lifecycle initialization, and stage state.
+`run_lit_search.py` retains the compatibility CLI and stage order while
+`run_finalizer.py` owns final artifacts and outcomes. MCP protocol, persisted
+job registry, and high-level workflow tools are separate adapter modules.
 
 ## License
 

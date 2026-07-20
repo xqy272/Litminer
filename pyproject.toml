@@ -25,6 +25,10 @@ litminer-journal-metrics = "litminer.engine.journal_metrics:main"
 litminer-export = "litminer.exporters.exporter:main"
 litminer-state-export = "litminer.runtime.state_store:main"
 litminer-architecture-acceptance = "litminer.engine.architecture_acceptance:main"
+litminer-agent-client-acceptance = "litminer.engine.agent_client_acceptance:main"
+litminer-provider-acceptance = "litminer.engine.provider_acceptance:main"
+litminer-runtime-resilience = "litminer.engine.runtime_resilience:main"
+litminer-runtime-soak = "litminer.engine.runtime_soak:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10"]

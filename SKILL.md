@@ -20,6 +20,17 @@ The Agent owns the scientific intent. Litminer owns repeatable mechanics:
 retrieval, metadata normalization, deduplication, verification, status flags,
 reports, summaries, and evidence queues.
 
+## Supported Targets
+
+- Windows is the primary supported and release-gating platform.
+- macOS is the secondary supported and release-gating platform.
+- Native GitHub Actions `macos-latest` runners count as macOS release
+  evidence when no local Mac is available.
+- Linux and Docker are not release acceptance targets.
+- Codex and Claude Code are the primary clients. They use the same shared
+  operating contract, default nine-tool MCP surface, and artifact order.
+- Use `scripts/run_ci.ps1` on Windows and `scripts/run_ci.sh` on macOS.
+
 ## Core Boundary
 
 Use Litminer when a user asks for current or recent literature discovery,
@@ -451,6 +462,15 @@ schema. Tool-level validation/workspace/provider/internal failures return
 `isError=true` with a structured `ErrorEnvelope`. The synchronous full runner,
 legacy status/summary tools, provider wrappers, and stage tools remain in the
 advanced profile for compatibility.
+
+Native acceptance entry points:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
+python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
+```
 
 ## References
 

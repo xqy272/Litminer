@@ -11,6 +11,10 @@ MCP is an execution surface for the Litminer skill, not a replacement for
 the active user request, use the lightest adequate workflow mode, and report
 Trust Tiers rather than treating every discovered row as verified evidence.
 
+Windows is the primary supported MCP host and macOS is secondary. Codex and
+Claude Code are the primary clients. Linux and Docker are not release
+acceptance targets.
+
 File path arguments are resolved relative to `LITMINER_WORKSPACE_ROOT`. If that
 environment variable is unset, they resolve relative to the MCP process `cwd`.
 Paths are rejected if they escape the workspace root. Default workflow outputs
@@ -27,6 +31,16 @@ Smoke test:
 
 ```bash
 python -m litminer.sources.mcp.test_server
+```
+
+The public entry point remains `server.py`. Transport/protocol handling lives
+in `protocol.py`, job persistence in `job_registry.py`, and high-level
+run/read/export/recovery behavior in `workflow_tools.py`.
+
+Client contract acceptance:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
 ```
 
 ## Primary Tools

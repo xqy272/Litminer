@@ -4,6 +4,15 @@ This guide holds details that do not belong in the README entry page:
 installation locations, updates, Python setup, configuration, MCP, run modes,
 and troubleshooting.
 
+## Supported Platforms And Agents
+
+- Windows is primary; use `scripts/run_ci.ps1` for local validation.
+- macOS is secondary; use `scripts/run_ci.sh` and validate natively.
+- Linux and Docker are not release support targets.
+- Codex and Claude Code are the primary clients. `AGENTS.md` and `CLAUDE.md`
+  are thin adapters; `SKILL.md` and the shared Agent operating contract define
+  common behavior.
+
 ## Distribution
 
 Litminer is distributed as a full repository skill bundle. Clone the repository
@@ -131,6 +140,29 @@ env_vars = [
   "LITMINER_CONTACT_EMAIL",
 ]
 ```
+
+## Development And Acceptance
+
+Unified validation:
+
+```bash
+python scripts/run_ci.py --profile quick
+python scripts/run_ci.py --profile full
+```
+
+Focused acceptance:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
+python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
+```
+
+Provider live acceptance is manual or scheduled. The core profile checks
+OpenAlex/Crossref; full covers all six registered providers. A missing
+Unpaywall contact email is accepted only as an explicit structured skip with
+`--allow-skipped`.
 
 ## Troubleshooting
 

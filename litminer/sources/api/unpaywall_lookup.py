@@ -8,11 +8,13 @@ PDFs and does not bypass access controls.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.parse
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -109,7 +111,7 @@ def _request_json(url: str) -> dict[str, Any]:
                 url=url,
                 code=404,
                 msg="Not Found",
-                hdrs=None,
+                hdrs=Message(),
                 fp=None,
             ) from exc
         if exc.status == "rate_limited":

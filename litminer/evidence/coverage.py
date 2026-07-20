@@ -61,7 +61,7 @@ def build_coverage_report(
             contribution = "partial"
         else:
             contribution = "unavailable"
-        next_actions = list(dict.fromkeys(
+        provider_next_actions = list(dict.fromkeys(
             row.get("next_action", "") for row in rows if row.get("next_action", "")
         ))
         providers.append({
@@ -76,7 +76,7 @@ def build_coverage_report(
             "status_classes": dict(sorted(status_classes.items())),
             "statuses": dict(sorted(statuses.items())),
             "coverage_contribution": contribution,
-            "next_actions": next_actions,
+            "next_actions": provider_next_actions,
         })
 
     if input_mode == "import" and not configured:

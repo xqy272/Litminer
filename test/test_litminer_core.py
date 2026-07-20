@@ -2884,7 +2884,7 @@ class LitminerCoreTests(unittest.TestCase):
             "abstract": "text",
             "retraction_status": "retracted",
         }
-        from litminer.engine.semantic_triage import Concept, TriageProfile, _apply_retraction_demotion
+        from litminer.engine.semantic_triage import _apply_retraction_demotion
         self.assertEqual(_apply_retraction_demotion(row, "high"), "medium")
         self.assertEqual(_apply_retraction_demotion(row, "medium"), "needs_review")
         self.assertEqual(_apply_retraction_demotion(row, "low"), "low")

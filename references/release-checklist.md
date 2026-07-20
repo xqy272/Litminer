@@ -5,25 +5,55 @@ on a tested repository checkout.
 
 ## Before Tagging
 
+- Release from native Windows first and native macOS second. Do not substitute
+  Linux or Docker evidence for either platform.
+- When no physical Mac is available, successful GitHub Actions
+  `test-macos` plus release-appropriate `live-macos`/`soak-macos`
+  jobs on `macos-latest` are the native macOS evidence.
+- Confirm Codex and Claude Code adapters still list the same default nine MCP
+  tools and artifact order.
 - Update `CHANGELOG.md`.
 - Confirm `pyproject.toml` version if the release changes package metadata.
 - Check README examples for stale commands or nonexistent tags.
 - Run:
 
-```bash
-python -m compileall litminer -q
-python -m unittest discover -s test -p "test_*.py"
-python -m litminer.sources.mcp.test_server
-python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
-python -m litminer.engine.offline_smoke
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 full
 ```
+
+On macOS:
+
+```bash
+sh scripts/run_ci.sh full
+```
+
+The full profile includes compile, unit tests, MCP, offline/known-issue Agent
+scenarios, deterministic Codex/Claude acceptance, architecture probes, runtime
+resilience, and quick soak.
 
 - If dev tools are installed, also run:
 
 ```bash
-python -m ruff check litminer test
-python -m mypy litminer
+python -m ruff check litminer test scripts
+python -m mypy litminer scripts
 ```
+
+- Run controlled live provider acceptance on native Windows:
+
+```powershell
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+```
+
+- Run at least the core provider profile on native macOS.
+- Run standard soak on Windows and quick or standard soak on macOS.
+- Optionally run installed real clients:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --real --allow-missing-client --output-dir .litminer/acceptance/real-agents
+```
+
+- Import one generated RIS and BibTeX file into Zotero and/or JabRef before a
+  release that changes exporters.
 
 ## Tag
 

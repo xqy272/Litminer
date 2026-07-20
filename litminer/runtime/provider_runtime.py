@@ -159,9 +159,10 @@ class ProviderRuntime:
     def live_preflight(self, provider: str) -> dict[str, Any]:
         from litminer.sources.api.http_client import RetryPolicy, fetch_bytes
 
-        contact = (
+        contact = str(
             os.environ.get('UNPAYWALL_EMAIL')
             or os.environ.get('LITMINER_CONTACT_EMAIL')
+            or ''
         )
         if provider == 'unpaywall' and not contact:
             return {

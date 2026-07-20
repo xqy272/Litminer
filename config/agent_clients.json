@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "contract_version": 1,
+  "supported_systems": ["Windows", "Darwin"],
+  "primary_clients": {
+    "codex": {
+      "guide": "AGENTS.md",
+      "skill_install_roots": [".agents/skills/litminer", "~/.agents/skills/litminer"],
+      "mcp_template": "config/mcp.codex.example.toml"
+    },
+    "claude": {
+      "guide": "CLAUDE.md",
+      "skill_install_roots": [".claude/skills/litminer", "~/.claude/skills/litminer"],
+      "mcp_template": "config/mcp.claude.example.json"
+    }
+  },
+  "shared_contract": "references/agent-operating-contract.md",
+  "default_mcp_tools": [
+    "litminer_workspace_doctor",
+    "litminer_capabilities",
+    "litminer_plan_run",
+    "litminer_start_run",
+    "litminer_get_run",
+    "litminer_resume_run",
+    "litminer_cancel_run",
+    "litminer_read_results",
+    "litminer_export"
+  ],
+  "artifact_read_order": [
+    "run_outcome.json",
+    "coverage_report.json",
+    "agent_summary.json",
+    "canonical_papers.csv",
+    "canonical_provenance.json",
+    "result_profile.json",
+    "research_session_manifest.json",
+    "delta_profile.json",
+    "processing_report.md",
+    "search_audit_report.md",
+    "artifacts_index.json",
+    "run_spec.json",
+    "query_plan.json"
+  ]
+}

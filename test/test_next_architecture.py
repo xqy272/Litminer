@@ -14,7 +14,7 @@ from litminer.contracts.run_spec import RunSpec
 from litminer.contracts.schema_validation import validate_json_schema
 from litminer.contracts import tool_contracts
 from litminer.engine import common
-from litminer.engine.common import read_csv_rows, write_csv_atomic
+from litminer.engine.common import write_csv_atomic
 from litminer.evidence.canonicalize import canonicalize_row
 from litminer.evidence.coverage import build_coverage_report
 from litminer.exporters import bibtex
@@ -118,20 +118,136 @@ class NextArchitectureTests(unittest.TestCase):
             with store.connect() as db:
                 self.assertIsNone(db.execute("SELECT provider FROM provider_health WHERE provider='rollback'").fetchone())
 
-            broken = state_store_module.MIGRATIONS + ((2, "CREATE TABLE rollback_probe(id INTEGER); INVALID SQL;"),)
+            broken_version = state_store_module.CURRENT_SCHEMA_VERSION + 1
+            broken = state_store_module.MIGRATIONS + ((
+                broken_version,
+                "CREATE TABLE rollback_probe(id INTEGER); INVALID SQL;",
+            ),)
             with patch.object(state_store_module, "MIGRATIONS", broken):
                 with self.assertRaises(sqlite3.Error):
                     StateStore(path)
             db = sqlite3.connect(path)
             try:
                 self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='rollback_probe'").fetchone())
-                self.assertIsNone(db.execute("SELECT version FROM schema_migrations WHERE version=2").fetchone())
+                self.assertIsNone(db.execute(
+                    "SELECT version FROM schema_migrations WHERE version=?",
+                    (broken_version,),
+                ).fetchone())
             finally:
                 db.close()
 
             exported = store.export_state(Path(tmp) / "state.json")
             payload = json.loads(exported.read_text(encoding="utf-8"))
             self.assertIn("provider_requests", payload["tables"])
+            self.assertIn("runtime_events", payload["tables"])
+            self.assertEqual(
+                payload["schema_version"],
+                state_store_module.CURRENT_SCHEMA_VERSION,
+            )
+
+    def test_state_store_v1_fixture_upgrades_to_v2_without_data_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state-v1.sqlite3"
+            db = sqlite3.connect(path)
+            try:
+                db.executescript(state_store_module.MIGRATIONS[0][1])
+                db.execute(
+                    "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+                )
+                db.execute("INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00Z')")
+                db.execute(
+                    "INSERT INTO research_sessions VALUES (?, ?, ?, ?, ?)",
+                    ("session-v1", str(Path(tmp)), str(Path(tmp) / "run"), "created", "updated"),
+                )
+                db.execute(
+                    "INSERT INTO iterations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "iteration_001",
+                        "session-v1",
+                        "run-v1",
+                        "import",
+                        "completed",
+                        "healthy",
+                        '{"schema_version": 1}',
+                        "created",
+                        "completed",
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
+                    ("job-v1", "run-v1", "completed", '{"job_id":"job-v1","status":"completed"}', "updated"),
+                )
+                db.execute(
+                    "INSERT INTO run_outcomes VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        "run-v1",
+                        str(Path(tmp) / "run"),
+                        "completed",
+                        "healthy",
+                        '{"run_id":"run-v1","status":"completed","quality":"healthy"}',
+                        "updated",
+                    ),
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            store = StateStore(path)
+            self.assertEqual(store.get_job("job-v1")["status"], "completed")
+            self.assertEqual(store.get_run(run_id="run-v1")["quality"], "healthy")
+            with store.connect() as upgraded:
+                versions = [
+                    row[0]
+                    for row in upgraded.execute(
+                        "SELECT version FROM schema_migrations ORDER BY version"
+                    )
+                ]
+                self.assertEqual(versions, [1, 2])
+                self.assertIsNotNone(upgraded.execute(
+                    "SELECT name FROM sqlite_master WHERE name='runtime_events'"
+                ).fetchone())
+
+            StateStore(path)
+            with store.connect() as upgraded:
+                self.assertEqual(
+                    upgraded.execute(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version=2"
+                    ).fetchone()[0],
+                    1,
+                )
+
+    def test_runtime_event_ledger_is_append_only_across_transitions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.sqlite3"
+            store = StateStore(path)
+            store.upsert_session(
+                "session-events",
+                workspace_root=tmp,
+                output_dir=str(Path(tmp) / "run"),
+            )
+            store.start_iteration(
+                session_id="session-events",
+                iteration_id="iteration_001",
+                run_id="run-events",
+                input_mode="import",
+                spec={"schema_version": 1},
+            )
+            store.record_stage(
+                run_id="run-events",
+                stage_name="dedupe",
+                status="completed",
+                status_class="ok",
+            )
+            store.complete_iteration(
+                "run-events",
+                status="completed",
+                quality="healthy",
+            )
+            events = store.list_events(run_id="run-events")
+            self.assertEqual(
+                [item["event_type"] for item in events],
+                ["iteration_started", "stage_recorded", "iteration_completed"],
+            )
 
     def test_state_store_get_run_reports_in_progress_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

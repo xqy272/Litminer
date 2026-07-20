@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,7 +182,27 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         """,
     ),
+    (
+        2,
+        """
+        CREATE TABLE IF NOT EXISTS runtime_events (
+            event_id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            run_id TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_events_entity
+            ON runtime_events(entity_type, entity_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_runtime_events_run
+            ON runtime_events(run_id, created_at);
+        """,
+    ),
 )
+CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 
 class StateStore:
@@ -249,6 +270,98 @@ class StateStore:
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
+    def _record_event_db(
+        self,
+        db: sqlite3.Connection,
+        *,
+        entity_type: str,
+        entity_id: str,
+        event_type: str,
+        status: str = "",
+        run_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        db.execute(
+            """
+            INSERT INTO runtime_events(
+                event_id, entity_type, entity_id, run_id, event_type,
+                status, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                entity_type,
+                entity_id,
+                run_id,
+                event_type,
+                status,
+                self._json(payload or {}),
+                utc_now(),
+            ),
+        )
+        return event_id
+
+    def record_event(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+        event_type: str,
+        status: str = "",
+        run_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        if not self.enabled:
+            return ""
+        with self.connect() as db:
+            return self._record_event_db(
+                db,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                event_type=event_type,
+                status=status,
+                run_id=run_id,
+                payload=payload,
+            )
+
+    def list_events(
+        self,
+        *,
+        entity_type: str = "",
+        entity_id: str = "",
+        run_id: str = "",
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+        clauses: list[str] = []
+        values: list[str] = []
+        for column, value in (
+            ("entity_type", entity_type),
+            ("entity_id", entity_id),
+            ("run_id", run_id),
+        ):
+            if value:
+                clauses.append(f"{column}=?")
+                values.append(value)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM runtime_events"
+                + where
+                + " ORDER BY rowid",
+                values,
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            events.append(item)
+        return events
+
     def upsert_session(self, session_id: str, *, workspace_root: str, output_dir: str) -> None:
         if not self.enabled:
             return
@@ -264,6 +377,14 @@ class StateStore:
                     updated_at=excluded.updated_at
                 """,
                 (session_id, workspace_root, output_dir, now, now),
+            )
+            self._record_event_db(
+                db,
+                entity_type="session",
+                entity_id=session_id,
+                event_type="session_upserted",
+                status="active",
+                payload={"workspace_root": workspace_root, "output_dir": output_dir},
             )
 
     def start_iteration(
@@ -294,6 +415,20 @@ class StateStore:
                 """,
                 (iteration_id, session_id, run_id, input_mode, status, quality, self._json(spec), now),
             )
+            self._record_event_db(
+                db,
+                entity_type="run",
+                entity_id=run_id,
+                run_id=run_id,
+                event_type="iteration_started",
+                status=status,
+                payload={
+                    "session_id": session_id,
+                    "iteration_id": iteration_id,
+                    "input_mode": input_mode,
+                    "quality": quality,
+                },
+            )
 
     def complete_iteration(self, run_id: str, *, status: str, quality: str) -> None:
         if not self.enabled:
@@ -302,6 +437,15 @@ class StateStore:
             db.execute(
                 "UPDATE iterations SET status=?, quality=?, completed_at=? WHERE run_id=?",
                 (status, quality, utc_now(), run_id),
+            )
+            self._record_event_db(
+                db,
+                entity_type="run",
+                entity_id=run_id,
+                run_id=run_id,
+                event_type="iteration_completed",
+                status=status,
+                payload={"quality": quality},
             )
 
     def record_stage(
@@ -348,6 +492,21 @@ class StateStore:
                     int(input_count), int(output_count), message, self._json(error or {}),
                     started_at, completed_at, utc_now(),
                 ),
+            )
+            self._record_event_db(
+                db,
+                entity_type="stage",
+                entity_id=f"{run_id}:{stage_name}",
+                run_id=run_id,
+                event_type="stage_recorded",
+                status=status,
+                payload={
+                    "stage_name": stage_name,
+                    "status_class": status_class,
+                    "input_count": int(input_count),
+                    "output_count": int(output_count),
+                    "message": message,
+                },
             )
 
     def get_provider_health(self, provider: str) -> dict[str, Any]:
@@ -550,6 +709,21 @@ class StateStore:
                     self._json(job), utc_now(),
                 ),
             )
+            job_id = str(job.get("job_id", ""))
+            job_status = str(job.get("status", "unknown"))
+            self._record_event_db(
+                db,
+                entity_type="job",
+                entity_id=job_id,
+                run_id=str(job.get("run_id", "")),
+                event_type=f"job_{job_status}",
+                status=job_status,
+                payload={
+                    "quality": job.get("quality", "inconclusive"),
+                    "output_dir": job.get("output_dir", ""),
+                    "cancel_requested": bool(job.get("cancel_requested", False)),
+                },
+            )
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         if not self.enabled:
@@ -577,6 +751,20 @@ class StateStore:
                     outcome.get("run_id", ""), outcome.get("output_dir", ""), outcome.get("status", "unknown"),
                     outcome.get("quality", "inconclusive"), self._json(outcome), utc_now(),
                 ),
+            )
+            run_id = str(outcome.get("run_id", ""))
+            outcome_status = str(outcome.get("status", "unknown"))
+            self._record_event_db(
+                db,
+                entity_type="run",
+                entity_id=run_id,
+                run_id=run_id,
+                event_type="outcome_recorded",
+                status=outcome_status,
+                payload={
+                    "quality": outcome.get("quality", "inconclusive"),
+                    "output_dir": outcome.get("output_dir", ""),
+                },
             )
 
     def get_run(self, *, run_id: str = "", output_dir: str = "") -> dict[str, Any]:
@@ -673,9 +861,13 @@ class StateStore:
             "schema_migrations", "research_sessions", "iterations", "stage_runs",
             "provider_health", "provider_requests", "source_observations",
             "paper_records", "paper_identifiers", "field_values",
-            "artifact_snapshots", "jobs", "run_outcomes",
+            "artifact_snapshots", "jobs", "run_outcomes", "runtime_events",
         ]
-        payload: dict[str, Any] = {"schema_version": 1, "generated_at": utc_now(), "tables": {}}
+        payload: dict[str, Any] = {
+            "schema_version": CURRENT_SCHEMA_VERSION,
+            "generated_at": utc_now(),
+            "tables": {},
+        }
         with self.connect() as db:
             for table in tables:
                 payload["tables"][table] = [dict(row) for row in db.execute(f"SELECT * FROM {table}")]

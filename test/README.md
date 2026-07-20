@@ -1,7 +1,8 @@
 # Testing
 
-Litminer uses a three-layer testing architecture. Layers 1 and 2 are
-deterministic and CI-mandatory. Layer 3 is manual/on-demand.
+Litminer uses a four-layer testing architecture. Layers 1, 2, and the quick
+part of layer 3 are deterministic and CI-mandatory. Live provider checks and
+long soak profiles are manual/on-demand.
 
 ## Layer 1 — Unit (mock-isolated)
 
@@ -10,6 +11,9 @@ deterministic and CI-mandatory. Layer 3 is manual/on-demand.
 SQLite migration/rollback/recovery, provider cooldown and HTTP ledger,
 coverage quality, canonical provenance, RIS/BibTeX, and new MCP tools. Tests are
 fast and network-isolated.
+
+`test_stabilization.py` covers controlled provider probes, Agent client output
+parsing, and Windows batch-command handling.
 
 ```bash
 python -m unittest discover -s test -p "test_*.py"
@@ -66,34 +70,44 @@ Test fixtures live in `test/fixtures/`:
 | `empty_candidates.csv` | 0 | Header-only CSV for zero-result degradation |
 | `live_crossref_doi.csv` | 1 | Known DOI for live Crossref verification |
 
-## Layer 3 — Provider (live network)
-
-Scenarios with `"profiles": ["live"]` make real API calls. Run them manually
-after changing source wrappers or response parsing:
+## Layer 3 — Native resilience and soak
 
 ```bash
-python test/run_agent_scenarios.py --profile live
+python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/test/resilience
+python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/test/soak
 ```
 
-These verify that Litminer's URL construction, header setting, and response
-parsing work against current real APIs. Failures here may indicate upstream API
-changes that broke Litminer's integration.
+Resilience uses real subprocess termination for CLI and MCP recovery and
+upgrades a seeded SQLite v1 database to v2. Quick soak repeats WAL, atomic
+write, persisted job, cooldown, canonical/export, and offline
+run/resume/merge checks. Standard and long profiles are native release checks.
+
+## Layer 4 — Provider and real Agent (live network)
+
+The provider acceptance CLI uses each real parser and a shared request ledger:
+
+```bash
+python -m litminer.engine.provider_acceptance --profile core --output-dir .litminer/test/providers
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/test/providers-full --allow-skipped
+```
+
+`core` is OpenAlex plus Crossref. `full` adds Semantic Scholar, arXiv, Europe
+PMC, and Unpaywall; missing Unpaywall contact email is a structured skip only
+when `--allow-skipped` is explicit.
+
+Optional installed-client acceptance:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --real --allow-missing-client --output-dir .litminer/test/real-agents
+```
 
 ## Full verification
 
 After code changes, run everything:
 
 ```bash
-python -m compileall litminer -q
-python -m ruff check litminer test
-python -m mypy litminer
-python -m unittest discover -s test -p "test_*.py"
-python -m litminer.sources.mcp.test_server
-python -m litminer.engine.architecture_acceptance --scenario degraded_coverage --output-dir .litminer/test/acceptance
-python -m litminer.engine.bootstrap --output-dir .litminer/bootstrap
-python -m litminer.engine.doctor
-python -m litminer.engine.offline_smoke
-python -m litminer.engine.journal_metrics --validate --metrics references/journal_metrics_seed.csv
-python test/run_agent_scenarios.py
-python test/run_agent_scenarios.py --profile known_issue
+python scripts/run_ci.py --profile full
 ```
+
+Run live providers and standard/long soak separately; they are deliberately not
+part of every pull request.

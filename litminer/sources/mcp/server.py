@@ -23,12 +23,10 @@ Architecture:
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import sys
 import threading
 import time
-import traceback
 import uuid
 from pathlib import Path
 from typing import Any
@@ -39,22 +37,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from litminer import __version__
 from litminer.engine import workspace
-from litminer.engine.common import write_text_atomic
-from litminer.contracts.errors import classify_exception, error_result
 from litminer.contracts.run_spec import RunSpec
-from litminer.contracts.schema_validation import validate_json_schema
 from litminer.contracts import tool_contracts
-from litminer.evidence.canonicalize import build_canonical_artifacts
-from litminer.exporters.exporter import export_bibliography
 from litminer.runtime.provider_runtime import ProviderRuntime
 from litminer.runtime.provider_scheduler import static_capability_rows
 from litminer.runtime.run_planner import build_run_plan
 from litminer.runtime.state_store import StateStore, default_state_store_path
+from litminer.sources.mcp import protocol
+from litminer.sources.mcp.job_registry import JobRegistry
+from litminer.sources.mcp.workflow_tools import (
+    WorkflowDependencies,
+    WorkflowTools,
+)
 
-DEFAULT_PROTOCOL_VERSION = "2025-11-25"
-SUPPORTED_PROTOCOL_VERSIONS = {DEFAULT_PROTOCOL_VERSION, "2024-11-05"}
+DEFAULT_PROTOCOL_VERSION = protocol.DEFAULT_PROTOCOL_VERSION
+SUPPORTED_PROTOCOL_VERSIONS = protocol.SUPPORTED_PROTOCOL_VERSIONS
 MAX_STDIN_LINE_BYTES = int(os.environ.get("LITMINER_MCP_MAX_LINE_BYTES", str(16 * 1024 * 1024)))
 MCP_TOOL_PROFILE_ENV = "LITMINER_MCP_TOOL_PROFILE"
 DEFAULT_MCP_TOOL_PROFILE = "workflow"
@@ -71,67 +69,6 @@ WORKFLOW_TOOL_NAMES = [
 ]
 
 _import_lock = threading.Lock()
-_jobs_lock = threading.Lock()
-JOBS: dict[str, dict[str, Any]] = {}
-
-
-def _safe_job_id(job_id: str) -> str:
-    if not job_id or not all(ch.isalnum() or ch in "-_" for ch in job_id):
-        raise ValueError(f"invalid Litminer job_id: {job_id!r}")
-    return job_id
-
-
-def _job_record_path(job_id: str) -> Path:
-    return _workspace_root() / ".litminer" / "jobs" / f"{_safe_job_id(job_id)}.json"
-
-
-def _public_job_record(job: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in job.items()
-        if key not in {"cancel_event", "thread"} and not key.startswith("_")
-    }
-
-
-def _persist_job_unlocked(job: dict[str, Any]) -> None:
-    job_id = str(job.get("job_id") or "")
-    if not job_id:
-        return
-    path = _job_record_path(job_id)
-    public = _public_job_record(job)
-    write_text_atomic(path, json.dumps(public, indent=2, ensure_ascii=False) + "\n")
-    state_path = str(public.get("state_store") or "")
-    state_enabled = bool(public.get("state_enabled", True))
-    store = StateStore(state_path or default_state_store_path(_workspace_root()), enabled=state_enabled)
-    store.upsert_job(public)
-
-
-def _update_job(job_id: str, **fields: Any) -> None:
-    with _jobs_lock:
-        if job_id not in JOBS:
-            raise ValueError(f"unknown Litminer job_id: {job_id}")
-        JOBS[job_id].update(fields)
-        _persist_job_unlocked(JOBS[job_id])
-
-
-def _load_persisted_job(job_id: str) -> dict[str, Any]:
-    path = _job_record_path(job_id)
-    if not path.exists():
-        data = _runtime_store().get_job(job_id)
-    else:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = _runtime_store().get_job(job_id)
-    if not isinstance(data, dict):
-        return {}
-    if data.get("status") in {"queued", "running", "cancelling"}:
-        data = {
-            **data,
-            "status": "interrupted",
-            "note": "This job record was loaded from disk, but no live MCP worker owns it.",
-        }
-    return data
 
 
 def _mcp_next_actions(job: dict[str, Any]) -> list[str]:
@@ -222,6 +159,20 @@ def _runtime_store() -> StateStore:
     except ValueError as exc:
         raise ValueError(_workspace_escape_message("state_store", str(path), root, path)) from exc
     return StateStore(path)
+
+
+_JOB_REGISTRY = JobRegistry(
+    workspace_root=_workspace_root,
+    runtime_store=_runtime_store,
+)
+JOBS = _JOB_REGISTRY.jobs
+_jobs_lock = _JOB_REGISTRY.lock
+_safe_job_id = _JOB_REGISTRY.safe_job_id
+_job_record_path = _JOB_REGISTRY.record_path
+_public_job_record = _JOB_REGISTRY.public_record
+_persist_job_unlocked = _JOB_REGISTRY.persist_unlocked
+_update_job = _JOB_REGISTRY.update
+_load_persisted_job = _JOB_REGISTRY.load_persisted
 
 
 def _workspace_escape_message(label: str, value: str, root: Path, resolved: Path) -> str:
@@ -329,11 +280,7 @@ def _compact_columns(fieldnames: list[str]) -> list[str]:
     return fieldnames[: min(len(fieldnames), 12)]
 
 
-def _jsonrpc_error(request: dict, code: int, message: str, exc: Exception | None = None) -> dict:
-    error: dict[str, Any] = {"code": code, "message": message}
-    if exc is not None and os.environ.get("LITMINER_MCP_DEBUG_ERRORS"):
-        error["data"] = traceback.format_exc()
-    return {"jsonrpc": "2.0", "id": request.get("id"), "error": error}
+_jsonrpc_error = protocol.jsonrpc_error
 
 
 def _paginate_results(results: list[dict[str, Any]], args: dict, *, default_page_size: int = 20) -> dict[str, Any]:
@@ -491,9 +438,12 @@ def tool_batch_verify_crossref(args: dict) -> dict:
             continue
         seen.add(doi_clean)
 
+        def verify_current_doi() -> Any:
+            return cr.verify_doi(doi_clean, raise_transient=True)
+
         meta = runtime.execute(
             "crossref", "doi_lookup", doi_clean,
-            lambda doi_value=doi_clean: cr.verify_doi(doi_value, raise_transient=True),
+            verify_current_doi,
         )
         if meta is None:
             failed += 1
@@ -546,9 +496,12 @@ def tool_batch_crossref_title_search(args: dict) -> dict:
     runtime = _mcp_provider_runtime()
     for title in titles:
         title_text = str(title)
+        def search_current_title() -> Any:
+            return cr.search_by_title(title_text, max_results=max_results, raise_transient=True)
+
         results = runtime.execute(
             "crossref", "title_lookup", title_text,
-            lambda value=title_text: cr.search_by_title(value, max_results=max_results, raise_transient=True),
+            search_current_title,
         )
         output.append({
             "title": title_text,
@@ -881,86 +834,6 @@ def tool_read_csv_summary(args: dict) -> dict:
     }
 
 
-def tool_read_results(args: dict) -> dict:
-    """Read bounded run artifacts without forcing an Agent to ingest whole files."""
-    output_dir = _workspace_path(args["output_dir"], "output_dir", must_exist=True)
-    artifact = str(args["artifact"])
-    csv_artifacts = {
-        "canonical_papers": "canonical_papers.csv",
-        "triaged_candidates": "triaged_candidates.csv",
-        "publisher_queue": "publisher_queue.csv",
-    }
-    if artifact in csv_artifacts:
-        result = tool_read_csv_summary({
-            "input_csv": str(output_dir / csv_artifacts[artifact]),
-            "page": args.get("page", 1),
-            "page_size": args.get("page_size", 20),
-            "columns": args.get("columns") or [],
-        })
-        result.update({
-            "artifact": artifact,
-            "total_rows": result.get("filtered_count", 0),
-            "has_more": bool(result.get("truncated")),
-        })
-        return result
-
-    file_artifacts = {
-        "coverage_report": "coverage_report.json",
-        "canonical_provenance": "canonical_provenance.json",
-        "agent_summary": "agent_summary.json",
-        "run_outcome": "run_outcome.json",
-        "processing_report": "processing_report.md",
-        "search_audit_report": "search_audit_report.md",
-        "export_manifest": "export_manifest.json",
-    }
-    path = output_dir / file_artifacts[artifact]
-    if not path.exists():
-        raise FileNotFoundError(f"artifact not found: {path}")
-    max_chars = _positive_int(args.get("max_chars"), default=40000, minimum=100, maximum=200000)
-    raw = path.read_text(encoding="utf-8")
-    truncated = len(raw) > max_chars
-    bounded = raw[:max_chars]
-    payload: dict[str, Any] = {
-        "ok": True,
-        "artifact": artifact,
-        "path": str(path),
-        "characters": len(raw),
-        "truncated": truncated,
-        "has_more": truncated,
-        "content_text": bounded,
-    }
-    if path.suffix == ".json" and not truncated:
-        payload["data"] = json.loads(raw)
-    return payload
-
-
-def tool_export(args: dict) -> dict:
-    """Export a canonical bibliography, creating the projection for legacy CSVs."""
-    if args.get("output_dir"):
-        output_dir = _workspace_path(args["output_dir"], "output_dir", must_exist=True)
-        input_csv = output_dir / "canonical_papers.csv"
-        if not input_csv.exists():
-            legacy = output_dir / "triaged_candidates.csv"
-            if not legacy.exists():
-                raise FileNotFoundError(f"canonical or triaged bibliography not found under {output_dir}")
-            input_csv, _provenance, _counts = build_canonical_artifacts(legacy, output_dir)
-    else:
-        input_csv = _workspace_path(args["input_csv"], "input_csv", must_exist=True)
-        output_dir = input_csv.parent
-        fieldnames, _rows = _get_common().read_csv_rows(input_csv)
-        if not {"paper_id", "trusted_bibliography", "export_eligible"}.issubset(set(fieldnames)):
-            input_csv, _provenance, _counts = build_canonical_artifacts(input_csv, output_dir)
-    result = export_bibliography(
-        input_csv,
-        output_dir,
-        formats=list(args.get("formats") or []),
-        output_prefix=str(args.get("output_prefix") or "litminer_export"),
-        include_unverified=bool(args.get("include_unverified", False)),
-        ascii_latex=bool(args.get("ascii_latex", False)),
-    )
-    return {"ok": True, "status": "completed", **result}
-
-
 def tool_workspace_doctor(args: dict) -> dict:
     """Diagnose MCP workspace root, writability, and path mapping."""
     mod = _get_engine_doctor()
@@ -1105,239 +978,33 @@ def _run_namespace(args: dict):
     )
 
 
-def tool_run_lit_search(args: dict) -> dict:
-    """Run the Agent-facing Litminer workflow."""
-    mod = _get_engine_run_lit_search()
-    ns = _run_namespace(args)
-    result = mod.run(ns)
-    run_status = result.pop("status", "completed")
-    summary_path = Path(str(result.get("output_dir") or "")) / "agent_summary.json"
-    summary: dict[str, Any] = {}
-    if summary_path.exists():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            summary = {}
-    next_actions = _mcp_next_actions({
-        "status": run_status,
-        "agent_summary": summary,
-        "agent_summary_path": str(summary_path),
-    })
-    return {"status": "ok", "run_status": run_status, "next_actions": next_actions, **result}
-
-
-def _job_snapshot(job_id: str) -> dict[str, Any]:
-    job_id = _safe_job_id(str(job_id or ""))
-    with _jobs_lock:
-        job = _public_job_record(JOBS.get(job_id) or {})
-    if not job:
-        job = _load_persisted_job(job_id)
-    if not job:
-        raise ValueError(f"unknown Litminer job_id: {job_id}")
-    output_dir = job.get("output_dir")
-    if output_dir:
-        summary_path = Path(output_dir) / "agent_summary.json"
-        if job.get("status") in {"completed", "partial", "failed"} and summary_path.exists():
-            try:
-                job["agent_summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                job["agent_summary_path"] = str(summary_path)
-        else:
-            job["agent_summary_path"] = str(summary_path)
-    job["next_actions"] = _mcp_next_actions(job)
-    return job
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists() or not path.is_file():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _run_view_from_output(output_dir: Path) -> dict[str, Any]:
-    outcome = _read_json_object(output_dir / "run_outcome.json")
-    if outcome:
-        return outcome
-    manifest = _read_json_object(output_dir / "run_manifest.json")
-    coverage = _read_json_object(output_dir / "coverage_report.json")
-    summary = _read_json_object(output_dir / "agent_summary.json")
-    index = _read_json_object(output_dir / "artifacts_index.json")
-    artifacts = {
-        str(item.get("name") or ""): str(item.get("path") or "")
-        for item in index.get("artifacts", [])
-        if isinstance(item, dict) and item.get("exists")
-    }
-    if not (manifest or coverage or summary or artifacts):
-        return {}
-    status = str(manifest.get("run_status") or summary.get("run_status") or "unknown")
-    return {
-        "ok": status != "failed",
-        "run_id": str(manifest.get("run_id") or ""),
-        "status": status,
-        "quality": str(coverage.get("quality") or manifest.get("run_quality") or "inconclusive"),
-        "output_dir": str(output_dir),
-        "artifacts": artifacts,
-        "coverage": coverage,
-        "warnings": summary.get("warnings") or [],
-        "next_actions": summary.get("next_actions") or [],
-        "compatibility_source": "legacy_artifacts",
-    }
-
-
-def tool_get_run(args: dict) -> dict:
-    """Read a live job or persistent run outcome by job, run, or output path."""
-    job_id = str(args.get("job_id") or "")
-    if job_id:
-        job = _job_snapshot(job_id)
-        job_status = str(job.get("status") or "")
-        output_dir = Path(str(job.get("output_dir") or "")) if job.get("output_dir") else None
-        outcome = (
-            _run_view_from_output(output_dir)
-            if output_dir is not None and job_status not in {"queued", "running", "cancelling"}
-            else {}
-        )
-        if outcome:
-            job_run_id = str(job.get("run_id") or "")
-            job.update(outcome)
-            if str(outcome.get("status") or "") in {"", "unknown"} and job_status:
-                job["status"] = job_status
-            if not str(outcome.get("run_id") or "") and job_run_id:
-                job["run_id"] = job_run_id
-            job["job_id"] = job_id
-        job["ok"] = job.get("status") != "failed"
-        job["next_actions"] = _mcp_next_actions(job)
-        return job
-
-    run_id = str(args.get("run_id") or "")
-    output_value = args.get("output_dir")
-    output_dir = _workspace_path(output_value, "output_dir", must_exist=True) if output_value else None
-    state_value = args.get("state_store")
-    if state_value:
-        store: StateStore | None = StateStore(
-            _workspace_path(state_value, "state_store", must_exist=True)
-        )
-    else:
-        default_path = default_state_store_path(_workspace_root())
-        store = _runtime_store() if default_path.exists() else None
-    outcome = (
-        store.get_run(run_id=run_id, output_dir=str(output_dir or ""))
-        if store is not None else {}
-    )
-    if not outcome and output_dir is not None:
-        outcome = _run_view_from_output(output_dir)
-    if not outcome:
-        raise ValueError("no Litminer run was found for the supplied run_id or output_dir")
-    outcome.setdefault("ok", outcome.get("status") != "failed")
-    outcome.setdefault("next_actions", _mcp_next_actions(outcome))
-    return outcome
-
-
-def _run_job(job_id: str, ns: Any) -> None:
-    mod = _get_engine_run_lit_search()
-    _update_job(job_id, status="running", started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    try:
-        result = mod.run(ns)
-        _update_job(
-            job_id,
-            status=result.get("status", "completed"),
-            run_id=result.get("run_id", _job_snapshot(job_id).get("run_id", "")),
-            quality=result.get("quality", "inconclusive"),
-            result=result,
-            output_dir=result.get("output_dir", _job_snapshot(job_id).get("output_dir", "")),
-            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        )
-    except (SystemExit, Exception) as exc:
-        envelope = classify_exception(exc)
-        _update_job(
-            job_id,
-            status="failed",
-            quality="inconclusive",
-            error=envelope.to_dict(),
-            traceback=traceback.format_exc() if os.environ.get("LITMINER_MCP_DEBUG_ERRORS") else "",
-            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        )
-
-
-def tool_start_run(args: dict) -> dict:
-    """Start a Litminer workflow in a background thread."""
-    queued_args = dict(args)
-    queued_args["run_id"] = str(args.get("run_id") or (
-        time.strftime("mcp_%Y%m%dT%H%M%SZ_", time.gmtime()) + uuid.uuid4().hex[:8]
-    ))
-    mod = _get_engine_run_lit_search()
-    ns = mod.normalize_args(_run_namespace(queued_args))
-    if bool(getattr(ns, "resume", False)):
-        prior = mod.workflow_state.load_manifest(Path(ns.output_dir))
-        if prior.get("run_id"):
-            ns.run_id = str(prior["run_id"])
-    run_spec = RunSpec.from_namespace(ns)
-    job_id = str(uuid.uuid4())
-    cancel_event = threading.Event()
-    ns.cancel_check = cancel_event.is_set
-    with _jobs_lock:
-        JOBS[job_id] = {
-            "job_id": job_id,
-            "run_id": str(ns.run_id),
-            "status": "queued",
-            "quality": "inconclusive",
-            "output_dir": str(getattr(ns, "output_dir", "") or ""),
-            "state_store": str(getattr(ns, "state_store_path", "") or ""),
-            "state_enabled": bool(getattr(ns, "state_enabled", True)),
-            "run_spec": run_spec.to_dict(),
-            "cancel_requested": False,
-            "cancel_event": cancel_event,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        _persist_job_unlocked(JOBS[job_id])
-    thread = threading.Thread(target=_run_job, args=(job_id, ns), daemon=False)
-    with _jobs_lock:
-        JOBS[job_id]["thread"] = thread
-    thread.start()
-    return {
-        "status": "queued",
-        "job_id": job_id,
-        "run_id": str(ns.run_id),
-        "quality": "inconclusive",
-        "output_dir": str(getattr(ns, "output_dir", "") or ""),
-        "status_tool": "litminer_get_run",
-        "next_actions": ["poll_litminer_get_run"],
-    }
-
-
-def tool_run_status(args: dict) -> dict:
-    """Return background Litminer job status."""
-    return tool_get_run({"job_id": args.get("job_id")})
-
-
-def tool_resume_run(args: dict) -> dict:
-    """Start a background run with resume enabled."""
-    resumed_args = dict(args)
-    resumed_args["resume"] = True
-    return tool_start_run(resumed_args)
-
-
-def tool_cancel_run(args: dict) -> dict:
-    """Request cancellation for a background run.
-
-    Cancellation is cooperative at the job registry layer. Current engine
-    stages finish their active provider call/stage before the run can stop.
-    """
-    job_id = str(args.get("job_id") or "")
-    with _jobs_lock:
-        if job_id not in JOBS:
-            raise ValueError(f"unknown Litminer job_id: {job_id}")
-        cancel_event = JOBS[job_id].get("cancel_event")
-        if isinstance(cancel_event, threading.Event):
-            cancel_event.set()
-        JOBS[job_id]["cancel_requested"] = True
-        if JOBS[job_id].get("status") in {"queued", "running"}:
-            JOBS[job_id]["status"] = "cancelling"
-        _persist_job_unlocked(JOBS[job_id])
-    return {"status": "cancel_requested", "job_id": job_id, "note": "Engine will stop at the next stage boundary."}
+_WORKFLOW_TOOLS = WorkflowTools(
+    WorkflowDependencies(
+        workspace_root=_workspace_root,
+        workspace_path=_workspace_path,
+        optional_workspace_path=_optional_workspace_path,
+        runtime_store=_runtime_store,
+        get_common=_get_common,
+        get_engine_run_lit_search=_get_engine_run_lit_search,
+        run_namespace=_run_namespace,
+        read_csv_summary=tool_read_csv_summary,
+        positive_int=_positive_int,
+        next_actions=_mcp_next_actions,
+    ),
+    _JOB_REGISTRY,
+)
+tool_read_results = _WORKFLOW_TOOLS.read_results
+tool_export = _WORKFLOW_TOOLS.export
+tool_run_lit_search = _WORKFLOW_TOOLS.run_lit_search
+_job_snapshot = _WORKFLOW_TOOLS.job_snapshot
+_read_json_object = _WORKFLOW_TOOLS.read_json_object
+_run_view_from_output = _WORKFLOW_TOOLS.run_view_from_output
+tool_get_run = _WORKFLOW_TOOLS.get_run
+_run_job = _WORKFLOW_TOOLS.run_job
+tool_start_run = _WORKFLOW_TOOLS.start_run
+tool_run_status = _WORKFLOW_TOOLS.run_status
+tool_resume_run = _WORKFLOW_TOOLS.resume_run
+tool_cancel_run = _WORKFLOW_TOOLS.cancel_run
 
 
 def tool_bootstrap(args: dict) -> dict:
@@ -1799,144 +1466,29 @@ def _visible_tool_names() -> list[str]:
     return [name for name in WORKFLOW_TOOL_NAMES if name in TOOLS]
 
 
-def _legacy_input_schema(tool: dict[str, Any]) -> dict[str, Any]:
-    parameters = tool.get("parameters") or {}
-    return {
-        "type": "object",
-        "properties": {
-            key: {item_key: item_value for item_key, item_value in parameter.items() if item_key != "required"}
-            for key, parameter in parameters.items()
-        },
-        "required": [key for key, parameter in parameters.items() if parameter.get("required")],
-    }
+_legacy_input_schema = protocol.legacy_input_schema
 
 
 def _input_schema(tool_name: str, tool: dict[str, Any]) -> dict[str, Any]:
-    return tool_contracts.schema_for(tool_name) or _legacy_input_schema(tool)
+    return protocol.input_schema(tool_name, tool)
 
 
-def _mcp_tool_response(request: dict, payload: Any, *, is_error: bool = False) -> dict:
-    if isinstance(payload, dict):
-        structured = dict(payload)
-        structured.setdefault("ok", not is_error)
-    else:
-        structured = {"ok": not is_error, "result": payload}
-    return {
-        "jsonrpc": "2.0",
-        "id": request.get("id"),
-        "result": {
-            "content": [{"type": "text", "text": json.dumps(structured, indent=2, ensure_ascii=False)}],
-            "structuredContent": structured,
-            "isError": bool(is_error),
-        },
-    }
+_mcp_tool_response = protocol.mcp_tool_response
 
-
-# JSON-RPC handler (MCP protocol subset)
 
 def handle_request(request: dict) -> dict | None:
-    """Handle a JSON-RPC request."""
-    method = request.get("method", "")
+    return protocol.handle_request(
+        request,
+        tools=TOOLS,
+        visible_tool_names=_visible_tool_names,
+    )
 
-    # tools/list
-    if method == "tools/list":
-        tools_list = []
-        for name in _visible_tool_names():
-            tool = TOOLS[name]
-            tools_list.append({
-                "name": name,
-                "description": tool_contracts.description_for(name, tool["description"]),
-                "inputSchema": _input_schema(name, tool),
-            })
-        return {
-            "jsonrpc": "2.0",
-            "id": request.get("id"),
-            "result": {"tools": tools_list},
-        }
-
-    # tools/call
-    if method == "tools/call":
-        tool_name = request.get("params", {}).get("name", "")
-        arguments = request.get("params", {}).get("arguments", {})
-
-        if tool_name not in TOOLS:
-            envelope = classify_exception(ValueError(f"Unknown tool: {tool_name}"), code="unknown_tool")
-            return _mcp_tool_response(request, error_result(envelope), is_error=True)
-
-        try:
-            tool = TOOLS[tool_name]
-            validate_json_schema(arguments, _input_schema(tool_name, tool))
-            result = tool["handler"](arguments)
-            return _mcp_tool_response(request, result)
-        except (SystemExit, Exception) as exc:
-            envelope = classify_exception(exc)
-            debug_trace = traceback.format_exc() if os.environ.get("LITMINER_MCP_DEBUG_ERRORS") else ""
-            return _mcp_tool_response(
-                request,
-                error_result(envelope, debug_trace=debug_trace),
-                is_error=True,
-            )
-
-    # initialize
-    if method == "initialize":
-        requested_version = (
-            request.get("params", {}).get("protocolVersion")
-            or DEFAULT_PROTOCOL_VERSION
-        )
-        if requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
-            return _jsonrpc_error(
-                request,
-                -32602,
-                f"Unsupported protocolVersion: {requested_version}. "
-                f"Supported: {', '.join(sorted(SUPPORTED_PROTOCOL_VERSIONS))}",
-            )
-        return {
-            "jsonrpc": "2.0",
-            "id": request.get("id"),
-            "result": {
-                "protocolVersion": requested_version,
-                "serverInfo": {"name": "litminer", "version": __version__},
-                "capabilities": {"tools": {"listChanged": False}},
-            },
-        }
-
-    # Notifications have no id; silently accept with no response.
-    if request.get("id") is None:
-        return None  # MCP notifications require no response
-
-    return _jsonrpc_error(request, -32601, f"Unknown method: {method}")
-
-
-# Main (stdio transport)
 
 def main() -> None:
-    """Run the MCP server over stdio."""
-    print("Litminer MCP Server starting on stdio", file=sys.stderr)
-    for raw_line in sys.stdin.buffer:
-        if len(raw_line) > MAX_STDIN_LINE_BYTES:
-            print(json.dumps({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {
-                    "code": -32700,
-                    "message": f"Input line exceeds {MAX_STDIN_LINE_BYTES} bytes",
-                },
-            }), flush=True)
-            continue
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        try:
-            request = json.loads(line)
-            response = handle_request(request)
-            if response is not None:
-                print(json.dumps(response), flush=True)
-        except json.JSONDecodeError as e:
-            print(json.dumps({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": f"Parse error: {e}"},
-            }), flush=True)
+    protocol.serve_stdio(
+        handle_request,
+        max_line_bytes=MAX_STDIN_LINE_BYTES,
+    )
 
 
 if __name__ == "__main__":

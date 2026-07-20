@@ -97,7 +97,8 @@ def _next_actions(summary: dict[str, Any]) -> list[str]:
     source_strategy = summary.get("source_strategy", {})
     concept_summary = summary.get("concept_diagnostics")
     cache = summary.get("cache", {}) if isinstance(summary.get("cache"), dict) else {}
-    coverage = summary.get('coverage') if isinstance(summary.get('coverage'), dict) else {}
+    coverage_value = summary.get('coverage')
+    coverage = coverage_value if isinstance(coverage_value, dict) else {}
     if summary.get("partial"):
         actions.append("Resume the run with the same output_dir if the user request has not changed.")
     for action in coverage.get('next_actions') or []:
@@ -206,6 +207,9 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         for row in rows.get("publisher_queue_probed", [])
         if (row.get("publisher_probe_at") or "").strip()
     )
+    discovered_rows = rows.get("deduped_candidates")
+    if discovered_rows is None:
+        discovered_rows = rows.get("api_candidates", [])
 
     summary: dict[str, Any] = {
         "schema_version": 2,
@@ -226,7 +230,7 @@ def build_summary(output_dir: Path, warnings: list[str] | None = None) -> dict[s
         "stage_next_actions": _status_next_actions(stage_statuses),
         "capability_statuses": capability_statuses,
         "trust_tiers": {
-            "discovered_or_deduped": len(rows.get("deduped_candidates") if rows.get("deduped_candidates") is not None else rows.get("api_candidates", [])),
+            "discovered_or_deduped": len(discovered_rows),
             "bibliographically_verified": crossref_trusted,
             "crossref_trusted": crossref_trusted,
             "metric_pass": metric_pass,

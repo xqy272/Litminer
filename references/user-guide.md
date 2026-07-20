@@ -2,6 +2,13 @@
 
 这份文档承接 README 中不适合放在首页的细节：安装位置、更新、Python 环境、配置、MCP、运行模式和常见排错。
 
+## 支持平台与 Agent
+
+- Windows 是第一支持平台；本地开发优先使用 `scripts/run_ci.ps1`。
+- macOS 是第二支持平台；使用 `scripts/run_ci.sh` 并在原生 macOS 上验收。
+- Linux 与 Docker 不属于发布支持范围。
+- Codex 与 Claude Code 是主要客户端。`AGENTS.md`、`CLAUDE.md` 只提供薄适配，公共行为以 `SKILL.md` 和 `references/agent-operating-contract.md` 为准。
+
 ## 分发方式
 
 Litminer 当前按“完整仓库就是 skill 包”的方式分发。推荐直接 clone 仓库，不建议只复制部分文件。
@@ -231,6 +238,28 @@ env_vars = [
 - [config/mcp.claude.example.json](../config/mcp.claude.example.json)
 
 更多工具说明见 [MCP surface reference](mcp-surface.md) 和 [MCP README](../litminer/sources/mcp/README.md)。
+
+## 开发与验收
+
+Windows 快速/完整验证：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 quick
+powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 full
+```
+
+专项验收：
+
+```powershell
+python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped
+python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
+python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
+```
+
+Provider live 只在手动或定时任务中运行。`core` 验收 OpenAlex/Crossref；
+`full` 覆盖六个 provider。Unpaywall 没有联系邮箱时只会在明确传入
+`--allow-skipped` 后作为结构化 skip 接受。
 
 ## 常见问题
 

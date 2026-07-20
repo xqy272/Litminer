@@ -49,7 +49,7 @@ By default Litminer keeps internal recovery state at
 `.litminer/state/litminer.sqlite3`. This database stores research
 session/iteration state, stage records, provider health and cooldowns, one row
 per HTTP attempt, source observations, canonical field provenance, artifact
-snapshots, background jobs, and final outcomes.
+snapshots, background jobs, final outcomes, and append-only `runtime_events`.
 
 The SQLite database is internal state, not the deliverable. CSV, JSON,
 Markdown, RIS, and BibTeX artifacts remain portable snapshots and can be read
@@ -63,9 +63,13 @@ Use a custom workspace-local database with `--state-store PATH` or
 python -m litminer.runtime.state_store --state-store .litminer/state/litminer.sqlite3 --output state_snapshot.json
 ```
 
+The current schema is version 2. Migration 2 adds the runtime event ledger
+without replacing existing session, iteration, job, stage, or outcome tables.
 The database uses migrations, foreign keys, WAL mode, transaction rollback,
 and short-lived connections so interrupted Windows processes do not leave
-normal operations permanently locked.
+normal operations permanently locked. Release acceptance upgrades a seeded v1
+database, reruns the migration idempotently, and injects a broken later
+migration to prove complete rollback.
 
 ## Resume Rules
 
@@ -85,6 +89,30 @@ MCP background jobs are double-written to `.litminer/jobs/*.json` and SQLite.
 `litminer_get_run` can recover by `job_id`, `run_id`, or `output_dir`. A
 queued/running job loaded after its worker process disappeared is reported as
 `interrupted`, never as a still-running ghost job.
+
+Native recovery acceptance terminates real processes rather than raising only
+mock exceptions:
+
+```bash
+python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience
+```
+
+It crashes the CLI after a completed dedupe stage record, resumes the same
+`run_id` with the stage reused, kills an MCP process that owns a running job,
+loads that job from a fresh MCP process as `interrupted`, and confirms that a
+completed job is never downgraded.
+
+Long-run acceptance is separate:
+
+```bash
+python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak
+python -m litminer.engine.runtime_soak --profile standard --output-dir .litminer/acceptance/soak-standard
+python -m litminer.engine.runtime_soak --profile long --output-dir .litminer/acceptance/soak-long
+```
+
+The soak report covers WAL/short connections, atomic replacement, job
+persistence, cooldown recovery, canonical projection, RIS/BibTeX hashes,
+offline run/resume/merge cycles, database integrity, failures, and lock retries.
 
 If the request, queries, concepts, sources, or mode changed, do not force a
 resume-signature mismatch. Use `--merge-into EXISTING_OUTPUT_DIR` instead. It

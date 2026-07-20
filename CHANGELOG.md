@@ -8,6 +8,18 @@ when you want a stable version.
 
 ### Added
 
+- Added Windows-primary/macOS-secondary native CI, one cross-platform CI
+  orchestrator, and PowerShell/macOS wrappers. Linux and Docker are no longer
+  release acceptance targets.
+- Added shared Codex/Claude Code operating contracts, root client adapters,
+  deterministic adapter acceptance, and optional real-client CLI acceptance.
+- Added controlled parser-level live acceptance for OpenAlex, Crossref,
+  Semantic Scholar, arXiv, Europe PMC, and Unpaywall, with structured skips and
+  an isolated SQLite request ledger.
+- Added SQLite schema migration 2 with append-only `runtime_events`, v1 upgrade
+  acceptance, idempotency checks, and deliberately broken migration rollback.
+- Added native subprocess crash/restart acceptance for CLI stage recovery and
+  MCP worker loss, plus quick/standard/long runtime soak profiles.
 - Added a typed Contract Layer with shared `RunSpec`, `RunOutcome`, JSON-Schema
   validation, stable `ErrorEnvelope` classes, and generated MCP descriptions.
 - Added workspace-local SQLite runtime state for sessions, iterations, stages,
@@ -56,6 +68,12 @@ when you want a stable version.
 
 ### Changed
 
+- Split run initialization/recovery wiring into `runtime/run_lifecycle.py` and
+  artifact/outcome finalization into `engine/run_finalizer.py`; the compatibility
+  runner is now below 2400 lines.
+- Split MCP protocol, job persistence, and high-level workflow helpers into
+  focused modules; the stdio server remains the compatibility entry point and
+  is now below 1500 lines.
 - Reduced the default MCP surface to nine high-level tools: doctor,
   capabilities, plan, start, get, resume, cancel, read results, and export.
   Synchronous full-run, low-level provider, legacy status/summary, and stage
@@ -84,6 +102,17 @@ when you want a stable version.
 
 ### Fixed
 
+- Restored the exact feasibility-report Markdown contract after finalizer
+  extraction, including inline-code markers used by existing Agent tests.
+- Made real Codex acceptance compatible with current Windows npm `.CMD`
+  launchers by placing global approval flags before `exec` and sending the
+  long prompt over stdin; Claude JSON envelopes remain supported.
+- Aligned Crossref live acceptance with the parser's
+  `crossref_doi`/`crossref_title` fields and fixed Unpaywall's direct
+  DOI CLI JSON import plus no-contact live preflight handling.
+- Absolutized runtime-soak output roots before spawning child workflows so
+  relative Windows paths survive first-run, resume, and merge cycles; failed
+  pipeline reports now retain bounded child stderr.
 - Closed SQLite initialization connections explicitly on Windows, made
   migration application transactional, and prevented callback/thread objects
   from entering serialized `RunSpec` output.

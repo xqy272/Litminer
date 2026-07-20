@@ -6,6 +6,14 @@ Litminer 是一个面向 AI Agent 的科研文献信息获取 skill。它帮助 
 
 它不是综述生成器、PDF 阅读器或知识库。Litminer 负责把检索、核验、失败记录和证据交付做成可复跑流程；最终科学判断仍由 Agent 和用户完成。
 
+## 支持范围
+
+- Windows 是第一支持平台，也是最重要的发布门禁。
+- macOS 是第二支持平台，必须在原生 macOS runner 上验收。
+- Linux 和 Docker 不属于发布支持目标；容器结果不能替代 Windows/macOS 原生验收。
+- Codex 与 Claude Code 是主要 Agent 客户端，共享同一 `RunSpec`、MCP、artifact 和安全契约。
+- 运行时要求 Python 3.10+；核心运行时保持 stdlib-only。
+
 ## 适合什么
 
 - 从 OpenAlex、Semantic Scholar、arXiv、Europe PMC 等来源发现候选文献。
@@ -197,6 +205,12 @@ LITMINER_CONTACT_EMAIL=you@example.org
 | RIS/BibTeX 导出 | `python -m litminer.exporters.exporter --help` |
 | SQLite 状态导出 | `python -m litminer.runtime.state_store --output state_snapshot.json` |
 | 新架构 acceptance | `python -m litminer.engine.architecture_acceptance --help` |
+| Codex/Claude 契约验收 | `python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents` |
+| Provider live 验收 | `python -m litminer.engine.provider_acceptance --profile full --output-dir .litminer/acceptance/providers --allow-skipped` |
+| Crash/migration/restart 验收 | `python -m litminer.engine.runtime_resilience --profile quick --output-dir .litminer/acceptance/resilience` |
+| Quick runtime soak | `python -m litminer.engine.runtime_soak --profile quick --output-dir .litminer/acceptance/soak` |
+| 统一快速 CI | `powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 quick` |
+| 统一完整 CI | `powershell -ExecutionPolicy Bypass -File scripts/run_ci.ps1 full` |
 | 全量测试 | `python -m unittest discover -s test -p "test_*.py"` |
 
 ## 边界
@@ -239,7 +253,7 @@ Litminer/
 `-- test/
 ```
 
-`litminer/contracts/` 是公共 Agent 契约，`litminer/runtime/` 管理 SQLite、provider scheduler 和阶段状态，`litminer/evidence/` 分离 observations 与 canonical records，`litminer/exporters/` 负责可信书目导出；`litminer/sources/api/` 是来源 wrapper，`litminer/engine/` 保留兼容编排与确定性阶段，`litminer/sources/mcp/` 是 MCP stdio adapter。
+`litminer/contracts/` 是公共 Agent 契约；`litminer/runtime/` 管理 SQLite、provider scheduler、`run_lifecycle` 和阶段状态；`litminer/evidence/` 分离 observations 与 canonical records；`litminer/exporters/` 负责可信书目导出。`run_lit_search.py` 只保留兼容 CLI 与 stage 顺序，最终化集中在 `run_finalizer.py`；MCP 的 protocol、job registry 和高层 workflow tools 也已拆成独立模块。
 
 ## 许可证
 

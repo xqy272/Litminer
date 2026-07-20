@@ -2,6 +2,10 @@
 
 Use this file when configuring or debugging the optional MCP server.
 
+Windows is the primary supported MCP host and macOS is secondary. Codex and
+Claude Code are the primary clients. Linux and Docker are not release
+acceptance targets.
+
 MCP is an execution surface for the Litminer skill. It should make repeatable
 operations easier, not replace the skill's runtime judgement. The Agent still
 derives queries, concepts, sources, and constraints from the user request.
@@ -32,6 +36,11 @@ lookups, metrics validation, provenance generation, or stage debugging.
 The server still implements the advanced handlers internally; the profile
 controls the advertised surface so ordinary Agents are not distracted by every
 stage tool.
+
+The stdio compatibility entry point is `server.py`. JSON-RPC construction lives
+in `protocol.py`, in-memory/persisted jobs live in `job_registry.py`, and
+high-level run/read/export/recovery helpers live in `workflow_tools.py`. This
+split does not change tool names or schemas.
 
 ## Workflow Tools
 
@@ -120,6 +129,17 @@ env_vars = [
 
 On Windows, prefer an absolute Python executable path or a project-local
 virtualenv Python if the default `python` command is unreliable.
+
+Validate the actual client adapters and MCP surface with:
+
+```bash
+python -m litminer.engine.agent_client_acceptance --agent all --output-dir .litminer/acceptance/agents
+python -m litminer.sources.mcp.test_server
+```
+
+Add `--real --allow-missing-client` to the first command only for an optional
+installed Codex/Claude Code CLI check. Deterministic acceptance remains the
+required contract gate.
 
 ## JSON-RPC Example
 

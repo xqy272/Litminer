@@ -8,7 +8,7 @@ from typing import Any
 from litminer.contracts.errors import LitminerValidationError
 
 
-_TYPE_MAP = {
+_TYPE_MAP: dict[str, type[Any] | tuple[type[Any], ...]] = {
     "object": dict,
     "array": list,
     "string": str,

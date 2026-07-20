@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ssl
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Any, Iterable
 
 

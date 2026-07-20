@@ -91,7 +91,9 @@ def expand_citations(
     for doi in seed_dois:
         if direction in ("forward", "both"):
             try:
-                callback = lambda: semantic_scholar_search.get_citations(doi, max_results=max_per_seed)
+                def callback():
+                    return semantic_scholar_search.get_citations(doi, max_results=max_per_seed)
+
                 citations = (
                     provider_runtime.execute("semantic_scholar", "citation_expand", doi, callback)
                     if provider_runtime is not None else callback()
@@ -128,7 +130,9 @@ def expand_citations(
 
         if direction in ("backward", "both"):
             try:
-                callback = lambda: semantic_scholar_search.get_references(doi, max_results=max_per_seed)
+                def callback():
+                    return semantic_scholar_search.get_references(doi, max_results=max_per_seed)
+
                 refs = (
                     provider_runtime.execute("semantic_scholar", "reference_expand", doi, callback)
                     if provider_runtime is not None else callback()

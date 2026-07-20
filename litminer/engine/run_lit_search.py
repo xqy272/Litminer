@@ -16,7 +16,6 @@ It does not perform final literature-review judgement and does not parse PDFs.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -29,44 +28,52 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 from litminer.engine import api_discovery
-from litminer.engine import agent_summary
-from litminer.engine import artifacts
 from litminer.engine import build_publisher_queue
 from litminer.engine import cache as cache_helpers
 from litminer.engine import citation_expand
-from litminer.engine import concept_diagnostics
 from litminer.engine import dedupe_papers
 from litminer.engine import doctor
 from litminer.engine import journal_metrics
 from litminer.engine import merge_csv
 from litminer.engine import publisher_probe
-from litminer.engine import processing_report
 from litminer.engine import provenance
-from litminer.engine import publisher_adapters
 from litminer.engine import publisher_html_extract
-from litminer.engine import result_profile
-from litminer.engine import search_audit_report
 from litminer.engine import semantic_triage
 from litminer.engine import query_plan
-from litminer.engine import research_session
-from litminer.engine import status_policy
 from litminer.engine import validate_stage
 from litminer.engine import verification_queue
 from litminer.engine import workspace
 from litminer.engine import workflow_state
 from litminer.engine.common import read_csv_rows, write_csv_atomic, write_text_atomic
+from litminer.engine.run_finalizer import (
+    aggregate_run_status,
+    finalize_run,
+    make_report,
+    refresh_processing_report,
+    write_publisher_adapters_artifact,
+)
 from litminer.sources.api import arxiv_search
 from litminer.sources.api import crossref_verify
 from litminer.sources.api import unpaywall_lookup
-from litminer.contracts.outcomes import RunOutcome
-from litminer.contracts.run_spec import RunSpec
-from litminer.evidence import canonicalize as canonical_evidence
-from litminer.evidence import coverage as coverage_model
 from litminer.evidence import observations as evidence_observations
-from litminer.exporters.exporter import export_bibliography
-from litminer.runtime.stage_executor import PipelineExecutor, RunContext
-from litminer.runtime.provider_runtime import ProviderRuntime
-from litminer.runtime.state_store import StateStore, default_state_store_path
+from litminer.runtime.run_lifecycle import (
+    initialize_run,
+    record_manifest_stage,
+    run_signature_payload,
+    stage_files_exist,
+    validate_resume_manifest,
+)
+from litminer.runtime.stage_executor import PipelineExecutor
+from litminer.runtime.state_store import StateStore
+
+__all__ = [
+    'aggregate_run_status',
+    'make_report',
+    'run_signature_payload',
+    'stage_files_exist',
+    'validate_resume_manifest',
+    'write_publisher_adapters_artifact',
+]
 
 
 DEFAULT_QUEUE_PRIORITIES = {"high", "medium", "needs_review"}
@@ -468,100 +475,6 @@ def load_queries(args: argparse.Namespace) -> list[str]:
     return api_discovery.load_queries(args.query or [], args.query_file)
 
 
-def run_signature_payload(args: argparse.Namespace, queries: list[str]) -> dict[str, Any]:
-    return {
-        "input_csv": str(args.input_csv.resolve(strict=False)) if args.input_csv else "",
-        "merge_into": str(args.merge_into.resolve(strict=False)) if getattr(args, "merge_into", None) else "",
-        "queries": queries,
-        "year_from": args.year_from,
-        "year_to": args.year_to,
-        "mode": getattr(args, "mode", None) or "custom/default",
-        "discovery_sources": args.discovery_sources,
-        "max_results_per_query": args.max_results_per_query,
-        "skip_openalex": args.skip_openalex,
-        "include_semantic_scholar": args.include_semantic_scholar,
-        "include_arxiv": args.include_arxiv,
-        "include_europe_pmc": args.include_europe_pmc,
-        "semantic_query_limit": args.semantic_query_limit,
-        "semantic_max_results": args.semantic_max_results,
-        "strict_discovery": args.strict_discovery,
-        "parallel_providers": args.parallel_providers,
-        "provider_workers": args.provider_workers,
-        "provider_failure_threshold": args.provider_failure_threshold,
-        "provider_rate_limit_cooldown_seconds": args.provider_rate_limit_cooldown_seconds,
-        "openalex_work_types": args.openalex_work_types,
-        "skip_crossref": args.skip_crossref,
-        "enrich_unpaywall": args.enrich_unpaywall,
-        "skip_unpaywall": args.skip_unpaywall,
-        "skip_journal_metrics": args.skip_journal_metrics,
-        "metrics": str(args.metrics.resolve(strict=False)) if args.metrics else "",
-        "min_if": args.min_if,
-        "queue_strict_only": args.queue_strict_only,
-        "allow_missing_doi": args.allow_missing_doi,
-        "queue_priorities": args.queue_priorities,
-        "include_metadata_blocked": args.include_metadata_blocked,
-        "fields_needed": args.fields_needed or [],
-        "page_required_field": args.page_required_field or [],
-        "probe_publishers": args.probe_publishers,
-        "required_concept": args.required_concept or [],
-        "optional_concept": args.optional_concept or [],
-        "negative_concept": args.negative_concept or [],
-        "exclude_article_type": args.exclude_article_type or [],
-        "triage_profile": str(args.triage_profile.resolve(strict=False)) if args.triage_profile else "",
-        "allow_regex_concepts": bool(getattr(args, "allow_regex_concepts", False)),
-    }
-
-
-def stage_files_exist(out_dir: Path) -> bool:
-    stage_names = [
-        "api_candidates.csv",
-        "merged_candidates.csv",
-        "deduped_candidates.csv",
-        "pretriaged_candidates.csv",
-        "verification_queue.csv",
-        "verified_candidates.csv",
-        "triaged_candidates.csv",
-        "selected_candidates.csv",
-        "oa_annotated_candidates.csv",
-        "metrics_annotated_candidates.csv",
-        "strict_candidates.csv",
-        "backup_candidates.csv",
-        "publisher_queue.csv",
-        "publisher_queue_probed.csv",
-    ]
-    return any((out_dir / name).exists() for name in stage_names)
-
-
-def validate_resume_manifest(
-    out_dir: Path,
-    args: argparse.Namespace,
-    existing_manifest: dict[str, Any],
-    signature: str,
-) -> None:
-    if not getattr(args, "resume", False):
-        return
-    if getattr(args, "resume_allow_mismatch", False):
-        reason = str(getattr(args, "resume_mismatch_reason", "") or "").strip()
-        if not reason:
-            raise SystemExit(
-                "--resume-allow-mismatch requires --resume-mismatch-reason so the unsafe reuse is auditable."
-            )
-        return
-    existing_signature = str(existing_manifest.get("run_signature") or "")
-    if existing_signature:
-        if existing_signature != signature:
-            raise SystemExit(
-                "Cannot resume because current request parameters differ from run_manifest.json. "
-                "Use a new --output-dir, remove --resume, or pass --resume-allow-mismatch only after manual review."
-            )
-        return
-    if existing_manifest or stage_files_exist(out_dir):
-        raise SystemExit(
-            "Cannot safely resume: existing outputs have no run signature. "
-            "Use a new --output-dir, remove --resume, or pass --resume-allow-mismatch only after manual review."
-        )
-
-
 def selected_discovery_sources(args: argparse.Namespace) -> list[str]:
     sources = api_discovery.parse_sources(args.discovery_sources)
     if args.skip_openalex:
@@ -758,57 +671,6 @@ def preflight_warnings(args: argparse.Namespace) -> list[str]:
     return warnings
 
 
-def refresh_processing_report(out_dir: Path, warnings: list[str] | None = None) -> None:
-    """Write best-effort Agent-facing reports after resumable stages."""
-    try:
-        processing_report.write_report(out_dir, out_dir / "processing_report.md")
-    except Exception as exc:
-        print(f"WARNING: failed to refresh processing_report.md: {exc}", file=sys.stderr)
-    try:
-        agent_summary.write_summary(out_dir, warnings=warnings)
-    except Exception as exc:
-        print(f"WARNING: failed to refresh agent_summary.json: {exc}", file=sys.stderr)
-
-
-def record_manifest_stage(out_dir: Path,
-                          manifest: dict[str, Any] | None,
-                          name: str,
-                          status: str,
-                          *,
-                          input_path: Path | None = None,
-                          output_path: Path | None = None,
-                          row_count_value: int | None = None,
-                          message: str = "") -> None:
-    if manifest is None:
-        return
-    workflow_state.record_stage(
-        manifest,
-        name,
-        status,
-        input_path=input_path,
-        output_path=output_path,
-        row_count_value=row_count_value,
-        message=message,
-    )
-    workflow_state.write_manifest(out_dir, manifest)
-    state_info = manifest.get('state_store') if isinstance(manifest.get('state_store'), dict) else {}
-    if state_info and state_info.get('enabled') and state_info.get('path'):
-        StateStore(Path(str(state_info['path']))).record_stage(
-            run_id=str(manifest.get('run_id') or ''),
-            stage_name=name,
-            status=status,
-            status_class=status_policy.classify_status(status),
-            input_path=str(input_path or ''),
-            output_path=str(output_path or ''),
-            input_count=workflow_state.row_count(input_path) if input_path else 0,
-            output_count=row_count_value if row_count_value is not None else (
-                workflow_state.row_count(output_path) if output_path else 0
-            ),
-            message=message,
-            completed_at=workflow_state.utc_now(),
-        )
-
-
 def budget_seconds(args: argparse.Namespace) -> float | None:
     value = getattr(args, "time_budget_seconds", None)
     if value in (None, ""):
@@ -841,24 +703,6 @@ def should_stop_after(args: argparse.Namespace, stage_name: str, started_at: flo
         budget = budget_seconds(args)
         return True, f"Stopped after stage {stage_name}: time budget {budget:g}s exhausted"
     return False, ""
-
-
-PARTIAL_RUN_STATUS_CLASSES = {"auth", "budget_limited", "error", "network", "partial", "rate_limited"}
-
-
-def aggregate_run_status(manifest: dict[str, Any], requested_status: str) -> str:
-    if requested_status != "completed":
-        return requested_status
-    stages = manifest.get("stages", [])
-    if not isinstance(stages, list):
-        return requested_status
-    for stage in stages:
-        if not isinstance(stage, dict):
-            continue
-        status_class = status_policy.classify_status(str(stage.get("status") or ""))
-        if status_class in PARTIAL_RUN_STATUS_CLASSES:
-            return "partial"
-    return requested_status
 
 
 def write_query_plan_artifact(
@@ -942,347 +786,6 @@ def write_provenance_artifact(
         row_count_value=workflow_state.row_count(input_path),
     )
     return path
-
-
-def write_publisher_adapters_artifact(out_dir: Path) -> Path:
-    path = out_dir / "publisher_adapters.json"
-    write_text_atomic(
-        path,
-        json.dumps({"schema_version": 1, "adapters": publisher_adapters.adapter_rows()}, indent=2) + "\n",
-    )
-    return path
-
-
-def finalize_run(
-    out_dir: Path,
-    manifest: dict[str, Any],
-    counts: dict[str, int],
-    args: argparse.Namespace,
-    strict_path: Path | None,
-    backup_path: Path | None,
-    queue_priorities: set[str],
-    warnings: list[str],
-    *,
-    run_status: str = "completed",
-    stop_reason: str = "",
-    triaged: Path | None = None,
-    publisher_queue: Path | None = None,
-) -> dict[str, str]:
-    if stop_reason:
-        warnings = [*warnings, stop_reason]
-        record_manifest_stage(
-            out_dir,
-            manifest,
-            "run_control",
-            "stopped",
-            message=stop_reason,
-        )
-    final_status = aggregate_run_status(manifest, run_status)
-    if final_status == "partial" and run_status == "completed":
-        warnings = [*warnings, "One or more stages completed with partial, rate-limit, budget, or error status."]
-    make_report(out_dir, counts, args, strict_path, backup_path, queue_priorities, warnings=warnings)
-    write_publisher_adapters_artifact(out_dir)
-    manifest["run_status"] = final_status
-    if stop_reason:
-        manifest["stop_reason"] = stop_reason
-    manifest["completed_at"] = workflow_state.utc_now()
-    workflow_state.write_manifest(out_dir, manifest)
-    result_profile_path = result_profile.write_profile(
-        out_dir / "triaged_candidates.csv",
-        out_dir / "api_discovery_trace.csv",
-        workflow_state.manifest_path(out_dir),
-    )
-    concept_diagnostics_path = concept_diagnostics.write_diagnostics(
-        out_dir / "triaged_candidates.csv"
-    )
-    iteration_id = str(getattr(args, "session_iteration_id", "") or "iteration_001")
-    queries = list(getattr(args, "session_queries", []) or [])
-    delta_profile_path = research_session.write_delta(
-        getattr(args, "merge_base_path", None),
-        out_dir / "triaged_candidates.csv",
-        iteration_id=iteration_id,
-        queries=queries,
-    )
-    delta_profile = json.loads(delta_profile_path.read_text(encoding="utf-8"))
-    session_manifest_path = research_session.append_iteration(
-        out_dir,
-        iteration_id=iteration_id,
-        queries=queries,
-        concepts={
-            "required": list(getattr(args, "required_concept", []) or []),
-            "optional": list(getattr(args, "optional_concept", []) or []),
-            "negative": list(getattr(args, "negative_concept", []) or []),
-        },
-        delta=delta_profile,
-        run_status=final_status,
-        merge_mode=bool(getattr(args, "merge_into", None)),
-    )
-    canonical_input = triaged or out_dir / 'triaged_candidates.csv'
-    canonical_path, canonical_provenance_path, canonical_counts = canonical_evidence.build_canonical_artifacts(
-        canonical_input,
-        out_dir,
-        state_store=getattr(args, 'state_store_instance', None),
-    )
-    counts['canonical_rows'] = canonical_counts['rows']
-    counts['canonical_trusted'] = canonical_counts['trusted']
-    counts['export_eligible'] = canonical_counts['export_eligible']
-    if getattr(args, 'input_csv', None):
-        configured_sources: list[str] = []
-    else:
-        try:
-            configured_sources = selected_discovery_sources(args)
-        except SystemExit:
-            configured_sources = []
-    coverage_path = coverage_model.write_coverage_report(
-        out_dir,
-        configured_sources=configured_sources,
-        query_count=len(queries),
-        candidate_count=workflow_state.row_count(canonical_input),
-        input_mode=getattr(args, 'run_spec').input.mode,
-        run_id=str(manifest.get('run_id') or ''),
-        verification={
-            'candidate_rows': workflow_state.row_count(canonical_input),
-            'crossref_verified': counts.get('crossref_verified', 0),
-            'crossref_title_recovered': counts.get('crossref_title_recovered', 0),
-            'crossref_skipped_budget': counts.get('crossref_skipped_budget', 0),
-            'crossref_provider_failures': sum(
-                counts.get(key, 0)
-                for key in (
-                    'crossref_rate_limited', 'crossref_network_error',
-                    'crossref_auth_error', 'crossref_response_parse_error',
-                    'crossref_provider_error',
-                )
-            ),
-            'unpaywall_ok': counts.get('unpaywall_ok', 0),
-            'unpaywall_skipped_budget': counts.get('unpaywall_skipped_budget', 0),
-        },
-        state_store=getattr(args, 'state_store_instance', None),
-    )
-    coverage_data = json.loads(coverage_path.read_text(encoding='utf-8'))
-    export_result: dict[str, Any] = {}
-    if getattr(args, 'export_formats', None):
-        export_result = export_bibliography(
-            canonical_path,
-            out_dir,
-            formats=list(args.export_formats),
-            include_unverified=bool(args.include_unverified_export),
-            ascii_latex=bool(args.ascii_latex),
-        )
-    manifest['run_quality'] = coverage_data.get('quality', 'inconclusive')
-    manifest['coverage_report'] = str(coverage_path)
-    manifest['canonical_papers'] = str(canonical_path)
-    manifest['export_manifest'] = str(export_result.get('manifest') or '')
-    workflow_state.write_manifest(out_dir, manifest)
-    # search_audit_report reads agent_summary.json. Refresh after final
-    # profile, coverage, canonical, and delta artifacts exist.
-    refresh_processing_report(out_dir, warnings=warnings)
-    audit_report_path = search_audit_report.build_audit_report(out_dir)
-    artifact_index_path = artifacts.write_index(out_dir)
-    artifact_paths = {
-        'triaged_candidates': str(triaged or out_dir / 'triaged_candidates.csv'),
-        'canonical_papers': str(canonical_path),
-        'canonical_provenance': str(canonical_provenance_path),
-        'coverage_report': str(coverage_path),
-        'feasibility_report': str(out_dir / 'feasibility_report.md'),
-        'processing_report': str(out_dir / 'processing_report.md'),
-        'agent_summary': str(out_dir / agent_summary.SUMMARY_NAME),
-        'result_profile': str(result_profile_path),
-        'concept_diagnostics': str(concept_diagnostics_path),
-        'delta_profile': str(delta_profile_path),
-        'research_session_manifest': str(session_manifest_path),
-        'search_audit_report': str(audit_report_path),
-        'query_plan': str(out_dir / query_plan.PLAN_NAME),
-        'run_spec': str(out_dir / 'run_spec.json'),
-        'field_provenance': str(out_dir / provenance.PROVENANCE_NAME),
-        'publisher_adapters': str(out_dir / 'publisher_adapters.json'),
-        'publisher_queue': str(publisher_queue or out_dir / 'publisher_queue.csv'),
-        'run_manifest': str(workflow_state.manifest_path(out_dir)),
-        'artifacts_index': str(artifact_index_path),
-    }
-    for format_name, output in (export_result.get('outputs') or {}).items():
-        artifact_paths[f'export_{format_name}'] = str(output.get('path') or '')
-    if export_result.get('manifest'):
-        artifact_paths['export_manifest'] = str(export_result['manifest'])
-    next_actions = list(coverage_data.get('next_actions') or [])
-    if final_status == 'partial':
-        next_actions.append('resume_same_run_only_if_the_run_spec_is_unchanged')
-    outcome = RunOutcome(
-        run_id=str(manifest.get('run_id') or ''),
-        status=final_status if final_status in {'partial', 'completed', 'cancelled', 'failed'} else 'completed',
-        quality=str(coverage_data.get('quality') or 'inconclusive'),
-        output_dir=str(out_dir),
-        artifacts=artifact_paths,
-        coverage=coverage_data,
-        warnings=tuple(warnings),
-        next_actions=tuple(dict.fromkeys(next_actions)),
-    )
-    outcome_path = outcome.write(out_dir / 'run_outcome.json')
-    artifact_paths['run_outcome'] = str(outcome_path)
-    # Rewrite with the outcome artifact included in its own artifact map.
-    outcome = RunOutcome(
-        run_id=outcome.run_id,
-        status=outcome.status,
-        quality=outcome.quality,
-        output_dir=outcome.output_dir,
-        artifacts=artifact_paths,
-        coverage=outcome.coverage,
-        warnings=outcome.warnings,
-        next_actions=outcome.next_actions,
-    )
-    outcome.write(outcome_path)
-    state_store = getattr(args, 'state_store_instance', None)
-    if isinstance(state_store, StateStore):
-        state_store.complete_iteration(outcome.run_id, status=outcome.status, quality=outcome.quality)
-        state_store.record_outcome(outcome.to_dict())
-    manifest['run_quality'] = outcome.quality
-    manifest['run_outcome'] = str(outcome_path)
-    workflow_state.write_manifest(out_dir, manifest)
-    refresh_processing_report(out_dir, warnings=warnings)
-    artifacts.write_index(out_dir, artifact_index_path)
-    if isinstance(state_store, StateStore):
-        index_data = json.loads(artifact_index_path.read_text(encoding='utf-8'))
-        for record in index_data.get('artifacts', []):
-            if record.get('exists'):
-                state_store.record_artifact(
-                    run_id=outcome.run_id,
-                    name=str(record.get('name') or ''),
-                    path=str(record.get('path') or ''),
-                    sha256=str(record.get('sha256') or ''),
-                )
-    return {
-        'status': final_status,
-        'quality': outcome.quality,
-        'run_id': outcome.run_id,
-        'output_dir': str(out_dir),
-        **artifact_paths,
-    }
-
-
-def make_report(out_dir: Path, counts: dict[str, int],
-                args: argparse.Namespace,
-                strict_path: Path | None,
-                backup_path: Path | None,
-                queue_priorities: set[str],
-                warnings: list[str] | None = None) -> None:
-    target = args.target_count
-    feasible_count = counts.get("publisher_queue", 0)
-    blocking_reasons: list[str] = []
-    if counts.get("deduped", 0) == 0:
-        blocking_reasons.append("No candidates remained after discovery/merge/deduplication.")
-    if counts.get("triaged", 0) == 0:
-        blocking_reasons.append("No rows reached semantic triage.")
-    if feasible_count == 0:
-        if args.min_if is not None and getattr(args, "skip_journal_metrics", False):
-            blocking_reasons.append("Metric filtering was requested but journal metrics are disabled.")
-        elif args.min_if is not None and counts.get("metric_pass", 0) == 0:
-            blocking_reasons.append("No metric-pass candidates are available under the current IF threshold.")
-        else:
-            blocking_reasons.append("No candidates reached the publisher evidence queue under the current constraints.")
-    if target is not None and feasible_count < target:
-        blocking_reasons.append(
-            f"Current feasible count {feasible_count} is below requested target {target}."
-        )
-    feasible = not blocking_reasons
-
-    lines = [
-        "# Litminer Feasibility Report",
-        "",
-        f"Output directory: `{out_dir}`",
-        f"Run mode: `{getattr(args, 'mode', None) or 'custom/default'}`",
-        f"Year from: `{args.year_from or 'none'}`",
-        f"Target count: `{target if target is not None else 'not specified'}`",
-        f"Minimum IF: `{args.min_if if args.min_if is not None else 'not specified'}`",
-        f"Metric queue mode: `{'strict-pass-only' if args.queue_strict_only else 'annotate-only'}`",
-        f"Queued triage priorities: `{', '.join(sorted(queue_priorities))}`",
-        f"Overall: `{'FEASIBLE' if feasible else 'NOT_FEASIBLE'}`",
-        "",
-        "## Counts",
-        "",
-    ]
-    for key in [
-        "discovery_files",
-        "merge_base_rows",
-        "deduped",
-        "pretriaged",
-        "pretriage_high",
-        "verification_queue",
-        "verification_queue_doi",
-        "verification_queue_title_lookup",
-        "crossref_verified",
-        "crossref_title_recovered",
-        "crossref_mismatch",
-        "crossref_lookup_failed",
-        "crossref_missing_doi",
-        "crossref_title_lookup_failed",
-        "crossref_rate_limited",
-        "crossref_network_error",
-        "crossref_auth_error",
-        "crossref_response_parse_error",
-        "crossref_provider_error",
-        "crossref_skipped_budget",
-        "triaged",
-        "triage_high",
-        "triage_medium",
-        "triage_needs_review",
-        "triage_low",
-        "metadata_blocked",
-        "selected_for_verification",
-        "verified",
-        "selected_unverified",
-        "unpaywall_ok",
-        "unpaywall_skipped_missing_email",
-        "unpaywall_missing_doi",
-        "unpaywall_not_found",
-        "unpaywall_rate_limited",
-        "unpaywall_network_error",
-        "unpaywall_response_parse_error",
-        "unpaywall_error",
-        "unpaywall_skipped_budget",
-        "metric_pass",
-        "metric_backup",
-        "publisher_queue",
-        "publisher_probed",
-    ]:
-        if key in counts:
-            lines.append(f"- {key}: {counts[key]}")
-
-    lines.extend([
-        "",
-        "## Feasibility",
-        "",
-    ])
-    if feasible:
-        lines.append("The current constraints appear feasible from the available candidate set.")
-    else:
-        lines.append(
-            "The current constraints do not reach the requested count. "
-            "Do not fabricate rows; inspect lower-priority candidates or ask to relax constraints."
-        )
-        lines.append("")
-        lines.append("Blocking reasons:")
-        for reason in blocking_reasons:
-            lines.append(f"- {reason}")
-    if strict_path:
-        lines.append(f"- Metric-pass table: `{strict_path.name}`")
-    if backup_path:
-        lines.append(f"- Metric backup table: `{backup_path.name}`")
-
-    if warnings:
-        lines.extend(["", "## Configuration Warnings", ""])
-        for warning in warnings:
-            lines.append(f"- {warning}")
-
-    lines.extend([
-        "",
-        "## Next Actions",
-        "",
-        "- Use `triaged_candidates.csv` as the Agent review surface; scripts rank and tag but do not make final scientific judgement.",
-        "- Use `publisher_queue.csv` to inspect DOI landing pages and publisher-visible article pages.",
-        "- Use Unpaywall OA links as structured access hints when available; verify article-level claims on publisher-visible pages.",
-        "- Record PDF/SI URLs when publisher pages expose them; PDF parsing is outside Litminer core.",
-        "- Treat WebSearch as supplemental only; metadata and publisher pages remain the primary evidence path.",
-    ])
-    write_text_atomic(out_dir / "feasibility_report.md", "\n".join(lines) + "\n")
 
 
 def run_crossref_stage(input_path: Path, out_dir: Path,
@@ -1997,113 +1500,19 @@ def run_publisher_html_extract_stage(input_path: Path, out_dir: Path,
 def run(args: argparse.Namespace) -> dict[str, str]:
     started_at = time.monotonic()
     args = normalize_args(args)
-    run_spec = RunSpec.from_namespace(args)
-    args.run_spec = run_spec
     warnings = preflight_warnings(args)
     for warning in warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
-    out_dir = args.output_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
     queries = load_queries(args)
-    args.session_queries = list(queries)
-    args.session_iteration_id = (
-        research_session.resume_iteration_id(out_dir)
-        if getattr(args, "resume", False)
-        else research_session.next_iteration_id(out_dir)
-    )
-    merge_base_path: Path | None = None
-    if getattr(args, "merge_into", None):
-        existing_candidates = next(
-            (
-                path
-                for path in (
-                    out_dir / "deduped_candidates.csv",
-                    out_dir / "merged_candidates.csv",
-                    out_dir / "api_candidates.csv",
-                )
-                if path.exists()
-            ),
-            None,
-        )
-        if existing_candidates is None:
-            raise SystemExit(
-                "--merge-into requires an existing Litminer output directory "
-                "with deduped_candidates.csv, merged_candidates.csv, or api_candidates.csv"
-            )
-        merge_base_path = out_dir / "merge_base_candidates.csv"
-        shutil.copyfile(existing_candidates, merge_base_path)
-    args.merge_base_path = merge_base_path
-    signature_payload = run_signature_payload(args, queries)
-    signature = workflow_state.stable_fingerprint(signature_payload)
-    prior_manifest = workflow_state.load_manifest(out_dir)
-    existing_manifest = prior_manifest if getattr(args, "resume", False) else {}
-    validate_resume_manifest(out_dir, args, existing_manifest, signature)
-    if getattr(args, "merge_into", None):
-        # A merge is a new research iteration and therefore a new run. Only a
-        # true resume may preserve the prior run_id/created_at.
-        existing_manifest = {}
-    manifest = workflow_state.new_manifest(
+    lifecycle = initialize_run(
         args,
-        existing=existing_manifest,
-        signature=signature,
-        signature_payload=signature_payload,
+        started_at=started_at,
+        queries=queries,
     )
-    state_store = StateStore(
-        args.state_store_path or default_state_store_path(workspace.workspace_root()),
-        enabled=bool(args.state_enabled),
-    )
-    session_id = research_session.session_id(out_dir)
-    run_id = str(manifest.get('run_id') or '')
-    state_store.upsert_session(
-        session_id,
-        workspace_root=str(workspace.workspace_root()),
-        output_dir=str(out_dir),
-    )
-    state_store.start_iteration(
-        session_id=session_id,
-        iteration_id=str(args.session_iteration_id),
-        run_id=run_id,
-        input_mode=run_spec.input.mode,
-        spec=run_spec.to_dict(),
-    )
-    args.state_store_instance = state_store
-    args.provider_runtime = ProviderRuntime(
-        state_store,
-        run_id=run_id,
-        iteration_id=str(args.session_iteration_id),
-    )
-    args.pipeline_executor = PipelineExecutor(RunContext(
-        run_spec=run_spec,
-        output_dir=out_dir,
-        run_id=run_id,
-        iteration_id=str(args.session_iteration_id),
-        session_id=session_id,
-        state_store=state_store,
-        started_monotonic=started_at,
-        cancel_check=getattr(args, 'cancel_check', None),
-    ))
-    run_spec_path = out_dir / 'run_spec.json'
-    write_text_atomic(run_spec_path, json.dumps(run_spec.to_dict(), indent=2, ensure_ascii=False) + '\n')
-    manifest['contract'] = {
-        'run_spec_schema_version': run_spec.schema_version,
-        'run_spec_path': str(run_spec_path),
-    }
-    manifest['state_store'] = {
-        'enabled': state_store.enabled,
-        'path': str(state_store.path) if state_store.enabled else '',
-        'scope': 'workspace_local_runtime_provider_and_evidence_state',
-    }
-    manifest["cache"] = {
-        "enabled": bool(getattr(args, "cache_enabled", True)),
-        "cache_dir": str(getattr(args, "cache_dir", "")),
-        "ttl_days": getattr(args, "cache_ttl_days", None),
-        "provider_failure_ttl_seconds": getattr(args, "provider_failure_cache_ttl_seconds", None),
-        "scope": "workspace_local_metadata_and_short_lived_provider_failures",
-    }
-    if getattr(args, "resume_allow_mismatch", False):
-        manifest["resume_mismatch_allowed"] = True
-        manifest["resume_mismatch_reason"] = str(getattr(args, "resume_mismatch_reason", "") or "").strip()
-    workflow_state.write_manifest(out_dir, manifest)
+    args = lifecycle.args
+    out_dir = lifecycle.output_dir
+    manifest = lifecycle.manifest
+    merge_base_path = lifecycle.merge_base_path
     refresh_processing_report(out_dir, warnings=warnings)
     counts: dict[str, int] = {}
     queue_priorities = parse_set(args.queue_priorities, DEFAULT_QUEUE_PRIORITIES)
@@ -2117,6 +1526,7 @@ def run(args: argparse.Namespace) -> dict[str, str]:
             sources = selected_discovery_sources(args)
         except SystemExit:
             sources = []
+    args.selected_discovery_sources = list(sources)
     if "arxiv" in sources and any(
         query.strip() and not arxiv_search.is_advanced_query(query)
         for query in queries

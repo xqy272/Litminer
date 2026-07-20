@@ -159,7 +159,6 @@ class RunSpec:
         input_csv = _path(_value(mapping, "input_csv"))
         merge_into = _path(_value(mapping, "merge_into"))
 
-        has_discovery = bool(queries or query_file)
         has_import = bool(input_csv)
         if merge_into:
             input_mode = "iterate"
@@ -262,7 +261,7 @@ class RunSpec:
             )
 
     def to_dict(self) -> dict[str, Any]:
-        data = {
+        data: dict[str, Any] = {
             'schema_version': self.schema_version,
             'input': asdict(self.input),
             'retrieval': asdict(self.retrieval),
